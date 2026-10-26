@@ -18,9 +18,12 @@ public sealed class EngineHarness : IAsyncDisposable
     private readonly string _directory;
     private readonly List<ProcessEngine> _engines = [];
 
-    private EngineHarness(string directory, EngineOptions options)
+    private readonly Func<NodeRegistry, NodeRegistry>? _extraNodes;
+
+    private EngineHarness(string directory, EngineOptions options, Func<NodeRegistry, NodeRegistry>? extraNodes)
     {
         _directory = directory;
+        _extraNodes = extraNodes;
         Options = options;
         Store = new SqliteStore(Path.Combine(directory, "pepa.db"));
         Faults = new FaultInjectingStore(Store);
@@ -36,22 +39,29 @@ public sealed class EngineHarness : IAsyncDisposable
     public ProcessEngine Engine { get; private set; } = null!;
     public ScenarioService Scenarios { get; private set; } = null!;
 
-    public static async Task<EngineHarness> CreateAsync(EngineOptions? options = null, bool withFaults = false)
+    /// <summary>Папка теста: база и (для файловых тестов) рабочая папка.</summary>
+    public string Directory => _directory;
+
+    public static async Task<EngineHarness> CreateAsync(EngineOptions? options = null, bool withFaults = false,
+        Func<NodeRegistry, NodeRegistry>? extraNodes = null)
     {
         var directory = Path.Combine(Path.GetTempPath(), "pepa-tests", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(directory);
+        System.IO.Directory.CreateDirectory(directory);
         var harness = new EngineHarness(directory, options ?? new EngineOptions
         {
             MaxParallelProcesses = 4,
             ShutdownGracePeriod = TimeSpan.FromSeconds(2),
-        });
+        }, extraNodes);
         await harness.Store.InitializeAsync();
         await harness.StartEngineAsync(withFaults);
         return harness;
     }
 
-    public NodeRegistry CreateRegistry() =>
-        new NodeRegistry().RegisterLogicNodes().Register(new TestActionNode(World));
+    public NodeRegistry CreateRegistry()
+    {
+        var registry = new NodeRegistry().RegisterLogicNodes().Register(new TestActionNode(World));
+        return _extraNodes?.Invoke(registry) ?? registry;
+    }
 
     private async Task StartEngineAsync(bool withFaults)
     {
@@ -155,7 +165,7 @@ public sealed class EngineHarness : IAsyncDisposable
         Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         try
         {
-            Directory.Delete(_directory, recursive: true);
+            System.IO.Directory.Delete(_directory, recursive: true);
         }
         catch (IOException)
         {

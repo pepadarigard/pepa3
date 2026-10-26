@@ -268,6 +268,12 @@ public sealed partial class ProcessEngine
             slot.EndStep(stepCancellation);
         }
 
+        // Действие только читало внешнее состояние — ничего не изменилось, итог не может быть «неизвестен».
+        if (result is NodeResult.Unknown readOnlyUnknown && descriptor.Effect == NodeEffect.ReadOnly)
+        {
+            result = NodeResult.Fail(readOnlyUnknown.Reason);
+        }
+
         // 5. Неизвестный итог — сверка с внешней системой (это проверка, а не повтор действия).
         string? resolution = null;
         if (result is NodeResult.Unknown unknown && descriptor.SupportsVerification)
