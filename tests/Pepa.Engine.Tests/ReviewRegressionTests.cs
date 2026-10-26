@@ -186,7 +186,7 @@ public sealed class ReviewRegressionTests(ITestOutputHelper output)
         await Until(async () => (await h.Store.GetEventAsync(eventId))!.State == EventState.Unmatched);
         await h.IdleAsync(TimeSpan.FromSeconds(3));
         Assert.Equal(0, h.World.Executions("auto"));
-        Assert.Contains("до перезапуска", (await h.Store.GetEventAsync(eventId))!.Note);
+        Assert.Contains("до запуска Pepa", (await h.Store.GetEventAsync(eventId))!.Note);
 
         // Решение пользователя — «Сопоставить снова»: теперь триггер срабатывает.
         await h.Engine.RerouteEventAsync(eventId);

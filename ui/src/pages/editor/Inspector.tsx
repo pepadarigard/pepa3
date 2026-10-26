@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { AlertTriangle, Lock, Plus, Trash2, Unlink } from "lucide-react";
 import type { Json, NodeDefinition, NodeTypeDescriptor, ValidationIssue, VariableDefinition, VariableType } from "../../api/types";
+import { useTelegram } from "../../api/hooks";
 import { categoryColor, NodeIcon } from "../../components/Icon";
 import { Badge, Button } from "../../components/ui";
 import { ru } from "../../i18n/ru";
 import { isFieldVisible, type PepaEdge } from "../../lib/graph";
+import { navigate } from "../../router";
 import { FieldEditor } from "./FieldEditor";
 import type { Meta } from "./useEditor";
 
@@ -13,6 +15,24 @@ const effectText: Record<string, { text: string; tone: "neutral" | "info" | "att
   readOnly: { text: "Только чтение — повтор безопасен", tone: "info" },
   external: { text: "Внешнее действие — без повторов вслепую", tone: "attention" },
 };
+
+/** Блок Telegram без подключённого аккаунта при запуске завершится ошибкой — сказать об этом заранее. */
+function TelegramHint() {
+  const { data } = useTelegram();
+  if (!data || data.state === "connected") return null;
+  const text = data.state === "disconnected"
+    ? "Сейчас нет связи с Telegram — Pepa подключится сама."
+    : "Telegram ещё не подключён: без этого блок завершится ошибкой.";
+  return (
+    <div className="issue warning" style={{ border: 0, padding: 0, cursor: "default", alignItems: "flex-start" }}>
+      <AlertTriangle size={14} style={{ flex: "none", marginTop: 2 }} />
+      <span>
+        {text}{" "}
+        <button type="button" className="link-button small" onClick={() => navigate({ page: "integrations" })}>Интеграции →</button>
+      </span>
+    </div>
+  );
+}
 
 export function NodeInspector({ node, descriptor, variables, issues, onChange, onCreateVariable, onDelete }: {
   node: NodeDefinition;
@@ -64,6 +84,7 @@ export function NodeInspector({ node, descriptor, variables, issues, onChange, o
             <Lock size={14} style={{ flex: "none", marginTop: 2 }} /> {descriptor.resourceHint}
           </div>
         )}
+        {descriptor.category === "telegram" && <TelegramHint />}
         {general.map((issue, i) => (
           <div key={i} className={`issue ${issue.severity}`} style={{ border: 0, padding: 0, cursor: "default" }}>
             <AlertTriangle size={14} /> {issue.message}

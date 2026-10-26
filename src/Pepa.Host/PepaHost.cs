@@ -10,6 +10,7 @@ using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging;
 using Pepa.Adapters.Browser;
 using Pepa.Adapters.FileSystem;
+using Pepa.Adapters.Telegram;
 using Pepa.Core.Expressions;
 using Pepa.Core.Nodes;
 using Pepa.Core.Serialization;
@@ -91,8 +92,15 @@ public sealed class PepaHost : IAsyncDisposable
             DataDirectory = dataDirectory,
             ExecutablePathOverride = options.BrowserExecutablePath,
         }, adsPower);
+        // Входящие сообщения Telegram становятся событиями движка (движок создаётся позже, поэтому ссылка — отложенная).
+        ProcessEngine? engineRef = null;
+        var telegram = new TelegramService(dataDirectory, input => engineRef!.PublishEventAsync(input))
+        {
+            ServerAddress = options.TelegramServerAddress,
+            ConnectTimeout = options.TelegramConnectTimeout,
+        };
         var registry = new NodeRegistry().RegisterLogicNodes().RegisterFlowNodes().RegisterFileNodes(workspace)
-            .RegisterBrowserNodes(browsers, workspace);
+            .RegisterBrowserNodes(browsers, workspace).RegisterTelegramNodes(telegram);
         var token = options.Token ?? Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
         var hostContext = new HostContext
         {
@@ -139,6 +147,7 @@ public sealed class PepaHost : IAsyncDisposable
         builder.Services.AddSingleton<EventHub>();
         builder.Services.AddSingleton(adsPower);
         builder.Services.AddSingleton(browsers);
+        builder.Services.AddSingleton(telegram);
         builder.Services.AddSingleton(sp => new ProcessEngine(
             sp.GetRequiredService<IPepaStore>(),
             sp.GetRequiredService<NodeRegistry>(),
@@ -152,7 +161,10 @@ public sealed class PepaHost : IAsyncDisposable
         var app = builder.Build();
         var logger = app.Services.GetRequiredService<ILogger<PepaHost>>();
         var engine = app.Services.GetRequiredService<ProcessEngine>();
+        engineRef = engine;
         var events = app.Services.GetRequiredService<EventHub>();
+        telegram.Logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger<TelegramService>();
+        telegram.StatusChanged += () => events.Publish("integrations");
         engine.Changed += change => events.Publish("process", change.ProcessId);
         engine.EventsChanged += () => events.Publish("events");
         engine.TriggersChanged += () => events.Publish("triggers");
@@ -166,6 +178,18 @@ public sealed class PepaHost : IAsyncDisposable
             Limit = int.MaxValue,
         }, cancellationToken);
         browsers.Prune(unfinished.Select(p => p.Id).ToList());
+        // Подключение к уже авторизованному Telegram — в фоне, чтобы не задерживать запуск окна.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await telegram.StartAsync();
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Не удалось подключиться к Telegram при запуске.");
+            }
+        });
         if (options.SeedSamples)
         {
             await SeedSamplesAsync(store, app.Services.GetRequiredService<ScenarioService>(), logger);
@@ -233,10 +257,17 @@ public sealed class PepaHost : IAsyncDisposable
             return;
         }
 
+        // Пример с таким же названием уже есть (например, сбой между созданием примеров и записью версии) — не дублировать.
+        var existing = (await store.ListScenariosAsync()).Select(s => s.Name).ToHashSet(StringComparer.Ordinal);
         // В обратном порядке: список сценариев отсортирован по времени изменения, меньший номер окажется выше.
         var added = 0;
         foreach (var (_, sample) in SampleScenarios.Versioned().Where(s => s.Version > version).Reverse())
         {
+            if (existing.Contains(sample.Name))
+            {
+                continue;
+            }
+
             await scenarios.CreateAsync(sample);
             added++;
         }
@@ -269,13 +300,17 @@ public sealed class PepaHost : IAsyncDisposable
 
         var engine = Engine;
         var events = Services.GetRequiredService<EventHub>();
+        var telegram = Services.GetRequiredService<TelegramService>();
         try
         {
+            // Сначала прервать ожидание ответа Telegram — иначе запрос входа задержал бы остановку сервера.
+            telegram.BeginShutdown();
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             await _app.StopAsync(timeout.Token);
         }
         finally
         {
+            await telegram.DisposeAsync();
             await engine.StopAsync();
             await Services.GetRequiredService<BrowserSessions>().DisposeAsync();
             Services.GetRequiredService<AdsPowerClient>().Dispose();

@@ -181,6 +181,20 @@ async function main() {
     await page.goto(`${base}/#/runs`);
     await page.getByText("Сейчас ничего не выполняется").waitFor();
 
+    step("Интеграции: Telegram — проверка данных входа");
+    await page.goto(`${base}/#/integrations`);
+    const tg = page.getByTestId("telegram-card");
+    await tg.getByText("Не подключён").waitFor();
+    await tg.getByRole("textbox", { name: "api_id" }).fill("12345");
+    await tg.getByRole("textbox", { name: "api_hash" }).fill("abc");
+    await tg.getByRole("textbox", { name: "Телефон аккаунта" }).fill("+7 900 123-45-67");
+    const before = errors.length;
+    await tg.getByRole("button", { name: "Подключить" }).click();
+    await tg.getByText("32 символа (цифры", { exact: false }).waitFor();
+    // Ответ 400 на неверные данные — ожидаемый; браузер пишет о нём в консоль.
+    errors.splice(before, errors.length - before, ...errors.slice(before).filter((e) => !e.includes("status of 400")));
+    await page.screenshot({ path: path.join(shots, "13-integrations-telegram.png") });
+
     step("Тёмная тема");
     await page.goto(`${base}/#/settings`);
     await page.getByRole("button", { name: "Тёмная" }).click();

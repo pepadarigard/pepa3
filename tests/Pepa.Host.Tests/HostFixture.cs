@@ -37,6 +37,9 @@ public sealed class HostFixture : IAsyncDisposable
         Token = Token,
         UiDirectory = Path.Combine(root, "no-ui"),
         SeedSamples = seedSamples,
+        // Проверки никогда не обращаются к настоящему Telegram: порт 1 на этой машине закрыт.
+        TelegramServerAddress = "127.0.0.1:1",
+        TelegramConnectTimeout = TimeSpan.FromSeconds(10),
     };
 
     public async Task RestartAsync()

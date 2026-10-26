@@ -41,6 +41,7 @@
   --cat-files: #0891b2;
   --cat-flow: #d97706;
   --cat-browser: #059669;
+  --cat-telegram: #0284c7;
   --cat-other: #a855f7;
 
   --radius-sm: 6px;
@@ -87,6 +88,7 @@
     --cat-files: #22d3ee;
     --cat-flow: #fbbf24;
     --cat-browser: #34d399;
+    --cat-telegram: #38bdf8;
     --cat-other: #c084fc;
     color-scheme: dark;
   }
@@ -128,6 +130,7 @@
   --cat-files: #22d3ee;
   --cat-flow: #fbbf24;
   --cat-browser: #34d399;
+  --cat-telegram: #38bdf8;
   --cat-other: #c084fc;
   color-scheme: dark;
 }
@@ -430,6 +433,12 @@ code,
   gap: 16px;
 }
 
+.grid-3 {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
 .grid-stats {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -437,7 +446,8 @@ code,
 }
 
 @media (max-width: 960px) {
-  .grid-2 {
+  .grid-2,
+  .grid-3 {
     grid-template-columns: 1fr;
   }
   .grid-stats {

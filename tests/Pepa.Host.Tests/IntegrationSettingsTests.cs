@@ -76,7 +76,7 @@ public sealed class IntegrationSettingsTests
         Assert.Equal(Samples.SampleScenarios.All().Count, all.Count);
 
         // Как будто установлена версия Pepa с набором примеров 2: пользователь удалил «Пример 1».
-        var first = all.Single(s => s!["name"]!.GetValue<string>().StartsWith("Пример 1", StringComparison.Ordinal))!["id"]!.GetValue<string>();
+        var first = all.Single(s => s!["name"]!.GetValue<string>().StartsWith("Пример 1.", StringComparison.Ordinal))!["id"]!.GetValue<string>();
         await f.SendAsync(HttpMethod.Delete, $"/api/scenarios/{first}");
         foreach (var name in new[] { "Пример 7", "Пример 8" })
         {
@@ -95,7 +95,7 @@ public sealed class IntegrationSettingsTests
         var names = (await f.GetAsync("/api/scenarios")).AsArray().Select(s => s!["name"]!.GetValue<string>()).ToList();
         Assert.Contains(names, n => n.StartsWith("Пример 7", StringComparison.Ordinal));
         Assert.Contains(names, n => n.StartsWith("Пример 8", StringComparison.Ordinal));
-        Assert.DoesNotContain(names, n => n.StartsWith("Пример 1", StringComparison.Ordinal));
+        Assert.DoesNotContain(names, n => n.StartsWith("Пример 1.", StringComparison.Ordinal));
         Assert.Equal(names.Count, names.Distinct().Count());
     }
 }

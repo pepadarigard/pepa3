@@ -9,7 +9,7 @@ public static class SampleScenarios
     public static IReadOnlyList<ScenarioDefinition> All() => [.. Versioned().Select(s => s.Scenario)];
 
     /// <summary>Текущая версия набора примеров: при обновлении Pepa добавляются только новые.</summary>
-    public const int CurrentVersion = 3;
+    public const int CurrentVersion = 4;
 
     /// <summary>Примеры с номером версии набора, в которой они появились.</summary>
     public static IReadOnlyList<(int Version, ScenarioDefinition Scenario)> Versioned() =>
@@ -17,6 +17,7 @@ public static class SampleScenarios
         (1, Hello()), (1, Loop()), (1, WaitAndErrors()), (1, SortFolder()),
         (2, WaitForReply()), (2, GreetEveryone()),
         (3, BrowserPage()), (3, AdsPowerFlow()),
+        (4, TelegramReply()), (4, AdsPowerTelegram()),
     ];
 
     private static NodeDefinition N(string id, string type, double x, double y, JsonObject? config = null,
@@ -309,6 +310,84 @@ public static class SampleScenarios
         Edges =
         [
             E("start", "open"), E("open", "shot"), E("shot", "hint"), E("hint", "wait"),
+            E("wait", "close", Ports.Event), E("wait", "late", Ports.Timeout), E("close", "done"),
+        ],
+    };
+
+    public static ScenarioDefinition TelegramReply() => new()
+    {
+        Name = "Пример 9. Telegram: спросить и дождаться ответа",
+        Description = "Отправляет сообщение в чат Telegram и ждёт ответ из этого же чата до 30 минут. Ожидание переживает закрытие Pepa. " +
+                      "Нужен подключённый Telegram («Интеграции»).",
+        Variables =
+        [
+            new VariableDefinition
+            {
+                Name = "chat", Type = VariableType.Text, Default = "", IsInput = true,
+                Description = "Кому написать: @username или номер телефона из контактов",
+            },
+            new VariableDefinition { Name = "question", Type = VariableType.Text, Default = "Можно продолжать? Ответьте «да».", IsInput = true, Description = "Текст вопроса" },
+            new VariableDefinition { Name = "reply", Type = VariableType.Any, Description = "Полученный ответ" },
+        ],
+        Nodes =
+        [
+            N("start", "start", 0, 120),
+            N("send", "telegram.send", 260, 120, new JsonObject { ["chat"] = "{{ vars.chat }}", ["text"] = "{{ vars.question }}" }, "Спросить"),
+            N("wait", "telegram.wait", 540, 120, new JsonObject
+            {
+                ["chat"] = "{{ vars.chat }}",
+                ["timeoutSeconds"] = 1800,
+                ["saveTo"] = "reply",
+            }, "Ждать ответ"),
+            N("done", "end", 820, 40, new JsonObject { ["outcome"] = "success", ["message"] = "Ответ: {{ vars.reply.payload.text }}" }),
+            N("late", "end", 820, 220, new JsonObject { ["outcome"] = "failure", ["message"] = "Ответ не пришёл за 30 минут." }, "Ответа нет"),
+        ],
+        Edges = [E("start", "send"), E("send", "wait"), E("wait", "done", Ports.Event), E("wait", "late", Ports.Timeout)],
+    };
+
+    public static ScenarioDefinition AdsPowerTelegram() => new()
+    {
+        Name = "Пример 10. AdsPower + Telegram: сайт, сообщение и ответ",
+        Description = "Открывает профиль AdsPower и сайт, делает снимок, пишет в Telegram и ждёт ответ со словом «готово» до 30 минут; " +
+                      "затем закрывает профиль. Профиль занят этим процессом, ответ из чата получает только он. Нужны AdsPower и Telegram.",
+        Variables =
+        [
+            new VariableDefinition { Name = "profile", Type = VariableType.Text, Default = "", IsInput = true, Description = "ID профиля AdsPower" },
+            new VariableDefinition { Name = "url", Type = VariableType.Text, Default = "https://example.com", IsInput = true, Description = "Адрес сайта" },
+            new VariableDefinition
+            {
+                Name = "chat", Type = VariableType.Text, Default = "", IsInput = true,
+                Description = "Кому написать: @username или номер телефона из контактов",
+            },
+            new VariableDefinition { Name = "title", Type = VariableType.Text, Description = "Заголовок страницы" },
+            new VariableDefinition { Name = "reply", Type = VariableType.Any, Description = "Полученный ответ" },
+        ],
+        Nodes =
+        [
+            N("start", "start", 0, 120),
+            N("open", "adspower.open", 260, 120, new JsonObject { ["profileId"] = "{{ vars.profile }}", ["url"] = "{{ vars.url }}", ["closeOnFinish"] = true },
+                "Открыть профиль"),
+            N("read", "browser.read", 540, 120, new JsonObject { ["what"] = "title", ["saveTo"] = "title" }, "Заголовок"),
+            N("shot", "browser.screenshot", 820, 120, new JsonObject { ["path"] = "примеры/adspower/{{ vars.profile }}.png" }, "Снимок"),
+            N("send", "telegram.send", 1100, 120, new JsonObject
+            {
+                ["chat"] = "{{ vars.chat }}",
+                ["text"] = "Профиль {{ vars.profile }}: открыта страница «{{ vars.title }}». Напишите «готово», когда можно закрывать.",
+            }, "Написать"),
+            N("wait", "telegram.wait", 1380, 120, new JsonObject
+            {
+                ["chat"] = "{{ vars.chat }}",
+                ["contains"] = "готово",
+                ["timeoutSeconds"] = 1800,
+                ["saveTo"] = "reply",
+            }, "Ждать «готово»"),
+            N("close", "browser.close", 1660, 40, new JsonObject { ["stopProfile"] = true }, "Закрыть профиль"),
+            N("done", "end", 1940, 40, new JsonObject { ["outcome"] = "success", ["message"] = "Ответ: {{ vars.reply.payload.text }}" }),
+            N("late", "end", 1660, 260, new JsonObject { ["outcome"] = "failure", ["message"] = "Ответ не пришёл за 30 минут. Профиль закроется сам." }, "Ответа нет"),
+        ],
+        Edges =
+        [
+            E("start", "open"), E("open", "read"), E("read", "shot"), E("shot", "send"), E("send", "wait"),
             E("wait", "close", Ports.Event), E("wait", "late", Ports.Timeout), E("close", "done"),
         ],
     };

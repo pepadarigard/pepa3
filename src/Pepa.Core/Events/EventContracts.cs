@@ -18,6 +18,12 @@ public sealed record EventInput
     public string? CorrelationKey { get; init; }
 
     public JsonNode? Payload { get; init; }
+
+    /// <summary>
+    /// Когда событие произошло у источника. Событие, произошедшее до запуска Pepa (например, сообщение, полученное,
+    /// пока приложение было закрыто), отдаётся ожидающим процессам, но процессы по нему сами не запускаются.
+    /// </summary>
+    public DateTimeOffset? OccurredAt { get; init; }
 }
 
 /// <summary>Чего ждёт процесс: правила, по которым событие считается «его».</summary>

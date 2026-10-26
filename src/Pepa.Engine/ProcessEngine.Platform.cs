@@ -235,6 +235,7 @@ public sealed partial class ProcessEngine
         CorrelationKey = string.IsNullOrEmpty(input.CorrelationKey) ? null : input.CorrelationKey,
         Payload = input.Payload?.DeepClone(),
         ReceivedAt = now,
+        OccurredAt = input.OccurredAt,
         State = EventState.Received,
     };
 

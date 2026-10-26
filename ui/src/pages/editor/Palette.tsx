@@ -40,7 +40,7 @@ export function Palette({ categories, descriptors, onAdd }: { categories: NodeCa
         );
       })}
       <div className="small faint" style={{ padding: "0 4px" }}>
-        Windows-приложения и Telegram появятся здесь по мере подключения интеграций.
+        Блоки для окон Windows и для мыши с клавиатурой появятся здесь на следующих этапах.
       </div>
     </aside>
   );

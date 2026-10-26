@@ -1,7 +1,8 @@
-import { AppWindow, BellRing, Bot, Copy, FolderOpen, Globe, Keyboard, Send, type LucideIcon } from "lucide-react";
+import { AppWindow, BellRing, Bot, Copy, FolderOpen, Globe, Keyboard, type LucideIcon } from "lucide-react";
 import { getToken } from "../api/client";
 import { useInfo } from "../api/hooks";
 import { useFeedback } from "../components/feedback";
+import { TelegramCard } from "../components/TelegramCard";
 import { Badge, Button } from "../components/ui";
 import { native } from "../lib/native";
 import { navigate } from "../router";
@@ -39,13 +40,6 @@ const integrations: Integration[] = [
     details:
       "Профиль — ресурс: одновременно им пользуется один процесс, остальные ждут очереди. После перезапуска Pepa подключается к ещё открытому профилю, не открывая его заново. Проверено на имитации Local API по официальному описанию; с настоящим AdsPower проверьте связь в настройках.",
     settings: true,
-  },
-  {
-    icon: Send,
-    title: "Telegram",
-    status: "planned",
-    description: "Сообщения и ожидание ответов: через официальный API или через Telegram Desktop.",
-    details: "Этап 4. Bot API и пользовательский аккаунт (MTProto) — разные возможности, их нельзя путать.",
   },
   {
     icon: AppWindow,
@@ -135,6 +129,8 @@ export function IntegrationsPage() {
           </div>
         </div>
       </div>
+
+      <TelegramCard />
 
       <div className="grid-2">
         {integrations.map((item) => (

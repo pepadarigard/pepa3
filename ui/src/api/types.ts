@@ -384,6 +384,26 @@ export interface Settings {
   adsPowerHasKey: boolean;
 }
 
+export type TelegramState =
+  | "notConfigured"
+  | "loginRequired"
+  | "connecting"
+  | "waitingCode"
+  | "waitingPassword"
+  | "connected"
+  | "disconnected";
+
+export interface TelegramStatus {
+  state: TelegramState;
+  /** Имя подключённого аккаунта. */
+  account: string | null;
+  /** Пояснение: что произошло или что нужно сделать. */
+  message: string | null;
+  /** Сохранённые данные для повторного входа (api_hash не отдаётся). */
+  apiId: number | null;
+  phone: string | null;
+}
+
 export interface AdsPowerProfile {
   id: string;
   number: string | null;

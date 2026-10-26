@@ -25,6 +25,9 @@ public sealed partial class ProcessEngine
     /// </summary>
     private long _eventsBeforeStart;
 
+    /// <summary>Когда запущен движок: события, произошедшие у источника раньше, триггеры сами не запускают.</summary>
+    private DateTimeOffset _startedAt;
+
     private enum RouteMode
     {
         /// <summary>Новое событие: подписки, затем триггеры (если событие пришло во время этой работы Pepa).</summary>
@@ -168,7 +171,8 @@ public sealed partial class ProcessEngine
                     return record.State;
                 }
 
-                var allowTriggers = mode == RouteMode.Manual || record.Id > _eventsBeforeStart;
+                var allowTriggers = mode == RouteMode.Manual ||
+                                    (record.Id > _eventsBeforeStart && (record.OccurredAt is null || record.OccurredAt >= _startedAt));
                 var started = allowTriggers ? await StartByEventTriggersAsync(record, cancellationToken) : [];
                 var now = _time.GetUtcNow();
                 var final = started.Count > 0
@@ -184,8 +188,8 @@ public sealed partial class ProcessEngine
                         State = EventState.Unmatched,
                         Note = allowTriggers
                             ? "Нет ожидающих процессов с подходящими правилами. Ничего не запускалось."
-                            : "Принято до перезапуска Pepa: ожидающих его процессов нет, а запуск по триггерам после перезапуска " +
-                              "сам не выполняется. Чтобы обработать событие, нажмите «Сопоставить снова».",
+                            : "Произошло или принято до запуска Pepa: ожидающих его процессов нет, а запуск по триггерам для " +
+                              "таких событий сам не выполняется. Чтобы обработать событие, нажмите «Сопоставить снова».",
                         HandledAt = now,
                     };
                 await using var write = await _store.BeginWriteAsync(cancellationToken);

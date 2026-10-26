@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Telegram через пользовательский аккаунт (MTProto, WTelegramClient): отправка сообщений и входящие как события Pepa. -->
+  <ItemGroup>
+    <ProjectReference Include="..\Pepa.Core\Pepa.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="WTelegramClient" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Pepa.Adapters.Telegram.Tests" />
+  </ItemGroup>
+</Project>

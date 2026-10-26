@@ -48,7 +48,7 @@ public sealed class ApiTests
         await using var f = await HostFixture.StartAsync();
         var list = (await f.GetAsync("/api/scenarios")).AsArray();
         Assert.Equal(SampleScenarios.All().Count, list.Count);
-        Assert.StartsWith("Пример 1", list[0]!["name"]!.GetValue<string>());
+        Assert.StartsWith("Пример 1.", list[0]!["name"]!.GetValue<string>());
         Assert.All(list, s =>
         {
             Assert.Equal(0, s!["errorCount"]!.GetValue<int>());
@@ -60,7 +60,7 @@ public sealed class ApiTests
     }
 
     [Theory]
-    [InlineData("Пример 1")]
+    [InlineData("Пример 1.")]
     [InlineData("Пример 2")]
     [InlineData("Пример 4")]
     [InlineData("Пример 6")]
@@ -83,7 +83,7 @@ public sealed class ApiTests
     public async Task Sample_with_inputs_uses_given_values()
     {
         await using var f = await HostFixture.StartAsync();
-        var scenarioId = await f.ScenarioIdAsync("Пример 1");
+        var scenarioId = await f.ScenarioIdAsync("Пример 1.");
 
         var (_, run) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{scenarioId}/run",
             new { inputs = new { name = "Тест" } });
@@ -168,7 +168,7 @@ public sealed class ApiTests
     public async Task Disallowed_resume_action_is_conflict()
     {
         await using var f = await HostFixture.StartAsync();
-        var (_, run) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{await f.ScenarioIdAsync("Пример 1")}/run", new { });
+        var (_, run) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{await f.ScenarioIdAsync("Пример 1.")}/run", new { });
         var id = run!["processId"]!.GetValue<string>();
         await f.WaitForProcessAsync(id, p => HostFixture.Status(p) == "completed");
 
@@ -196,7 +196,7 @@ public sealed class ApiTests
     public async Task Overview_counts_processes()
     {
         await using var f = await HostFixture.StartAsync();
-        var (_, run) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{await f.ScenarioIdAsync("Пример 1")}/run", new { });
+        var (_, run) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{await f.ScenarioIdAsync("Пример 1.")}/run", new { });
         await f.WaitForProcessAsync(run!["processId"]!.GetValue<string>(), p => HostFixture.Status(p) == "completed");
 
         var overview = await f.GetAsync("/api/overview");
@@ -214,7 +214,7 @@ public sealed class ApiTests
         await using var stream = await response.Content.ReadAsStreamAsync();
         using var reader = new StreamReader(stream);
 
-        var (_, run) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{await f.ScenarioIdAsync("Пример 1")}/run", new { });
+        var (_, run) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{await f.ScenarioIdAsync("Пример 1.")}/run", new { });
         var processId = run!["processId"]!.GetValue<string>();
 
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));

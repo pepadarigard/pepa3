@@ -146,6 +146,7 @@ internal static class SqliteMapping
         CorrelationKey = Str(r, "correlation_key"),
         Payload = NodeOf(r, "payload"),
         ReceivedAt = DateOf(r, "received_at")!.Value,
+        OccurredAt = DateOf(r, "occurred_at"),
         State = EnumOf<EventState>(r, "state"),
         ProcessId = Str(r, "process_id"),
         SubscriptionId = Long(r, "subscription_id"),

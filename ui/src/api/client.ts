@@ -1,5 +1,6 @@
 import type {
   AdsPowerProfile,
+  TelegramStatus,
   Info,
   NodeTypes,
   PepaEvent,
@@ -147,6 +148,12 @@ export const api = {
 
   checkAdsPower: () => request<{ ok: boolean; message: string }>("POST", "/integrations/adspower/check"),
   adsPowerProfiles: () => request<AdsPowerProfile[]>("GET", "/integrations/adspower/profiles"),
+
+  telegram: () => request<TelegramStatus>("GET", "/integrations/telegram"),
+  telegramLogin: (login: { apiId: number; apiHash: string | null; phone: string }) =>
+    request<TelegramStatus>("POST", "/integrations/telegram/login", login),
+  telegramContinue: (value: string) => request<TelegramStatus>("POST", "/integrations/telegram/login/continue", { value }),
+  telegramLogout: () => request<TelegramStatus>("POST", "/integrations/telegram/logout"),
 
   settings: () => request<Settings>("GET", "/settings"),
   saveSettings: (settings: Settings) => request<Settings>("PUT", "/settings", settings),

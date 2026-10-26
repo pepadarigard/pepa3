@@ -31,6 +31,12 @@ public sealed record PepaHostOptions
 
     /// <summary>Свой исполняемый файл браузера вместо Edge/Chrome (разработка и проверка без Windows).</summary>
     public string? BrowserExecutablePath { get; init; }
+
+    /// <summary>Адрес сервера Telegram «ip:порт» вместо основного (проверки: чтобы не обращаться к настоящему Telegram).</summary>
+    public string? TelegramServerAddress { get; init; }
+
+    /// <summary>Сколько ждать ответа Telegram при подключении и входе.</summary>
+    public TimeSpan TelegramConnectTimeout { get; init; } = TimeSpan.FromSeconds(45);
 }
 
 public static class HostPaths

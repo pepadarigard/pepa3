@@ -115,6 +115,7 @@ public sealed partial class SqliteStore
             correlation_key   TEXT NULL,
             payload           TEXT NULL,
             received_at       TEXT NOT NULL,
+            occurred_at       TEXT NULL,
             state             TEXT NOT NULL,
             process_id        TEXT NULL,
             subscription_id   INTEGER NULL,

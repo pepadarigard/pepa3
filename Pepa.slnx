@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/Pepa.Adapters.Browser/Pepa.Adapters.Browser.csproj" />
     <Project Path="src/Pepa.Adapters.FileSystem/Pepa.Adapters.FileSystem.csproj" />
+    <Project Path="src/Pepa.Adapters.Telegram/Pepa.Adapters.Telegram.csproj" />
     <Project Path="src/Pepa.Core/Pepa.Core.csproj" />
     <Project Path="src/Pepa.Desktop/Pepa.Desktop.csproj" />
     <Project Path="src/Pepa.Engine/Pepa.Engine.csproj" />
@@ -12,6 +13,7 @@
   <Folder Name="/tests/">
     <Project Path="tests/Pepa.Adapters.Browser.Tests/Pepa.Adapters.Browser.Tests.csproj" />
     <Project Path="tests/Pepa.Adapters.FileSystem.Tests/Pepa.Adapters.FileSystem.Tests.csproj" />
+    <Project Path="tests/Pepa.Adapters.Telegram.Tests/Pepa.Adapters.Telegram.Tests.csproj" />
     <Project Path="tests/Pepa.Core.Tests/Pepa.Core.Tests.csproj" />
     <Project Path="tests/Pepa.Engine.Tests/Pepa.Engine.Tests.csproj" />
     <Project Path="tests/Pepa.Host.Tests/Pepa.Host.Tests.csproj" />

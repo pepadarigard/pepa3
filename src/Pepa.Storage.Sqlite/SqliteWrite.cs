@@ -171,10 +171,10 @@ internal sealed class SqliteWrite(SqliteConnection connection, SqliteTransaction
         }
 
         await using var command = Command("""
-                                          INSERT INTO events (source, type, external_id, correlation_key, payload, received_at, state,
-                                              process_id, subscription_id, candidates, started_processes, note, handled_at)
-                                          VALUES ($source, $type, $external_id, $correlation_key, $payload, $received_at, $state,
-                                              $process_id, $subscription_id, $candidates, $started_processes, $note, $handled_at)
+                                          INSERT INTO events (source, type, external_id, correlation_key, payload, received_at, occurred_at,
+                                              state, process_id, subscription_id, candidates, started_processes, note, handled_at)
+                                          VALUES ($source, $type, $external_id, $correlation_key, $payload, $received_at, $occurred_at,
+                                              $state, $process_id, $subscription_id, $candidates, $started_processes, $note, $handled_at)
                                           RETURNING id;
                                           """);
         BindEvent(command, record);
@@ -480,6 +480,7 @@ internal sealed class SqliteWrite(SqliteConnection connection, SqliteTransaction
         c.Parameters.AddWithValue("$correlation_key", OrNull(e.CorrelationKey));
         c.Parameters.AddWithValue("$payload", JsonOrNull(e.Payload));
         c.Parameters.AddWithValue("$received_at", Date(e.ReceivedAt));
+        c.Parameters.AddWithValue("$occurred_at", DateOrNull(e.OccurredAt));
         c.Parameters.AddWithValue("$state", e.State.ToString());
         c.Parameters.AddWithValue("$process_id", OrNull(e.ProcessId));
         c.Parameters.AddWithValue("$subscription_id", OrNull(e.SubscriptionId));

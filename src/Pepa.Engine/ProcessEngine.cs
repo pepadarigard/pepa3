@@ -78,6 +78,7 @@ public sealed partial class ProcessEngine : IAsyncDisposable
 
         // События, принятые до этого запуска, сопоставляются с ожидающими, но процессы по ним сами не запускаются.
         _eventsBeforeStart = (await _store.ListEventsAsync(new EventQuery { Limit = 1 }, cancellationToken)).FirstOrDefault()?.Id ?? 0;
+        _startedAt = _time.GetUtcNow();
         var report = await RecoverAsync(cancellationToken);
         for (var i = 0; i < Math.Max(1, _options.MaxParallelProcesses); i++)
         {

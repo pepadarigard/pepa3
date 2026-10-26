@@ -63,6 +63,51 @@ internal static class ApiEndpoints
             }
         });
 
+        api.MapGet("/integrations/telegram", (Adapters.Telegram.TelegramService telegram) => TelegramDto(telegram));
+
+        api.MapPost("/integrations/telegram/login", async (TelegramLoginRequest request, Adapters.Telegram.TelegramService telegram) =>
+        {
+            try
+            {
+                await telegram.BeginLoginAsync(
+                    new Adapters.Telegram.TelegramCredentials(request.ApiId, request.ApiHash ?? "", request.Phone ?? ""));
+                return Results.Ok(TelegramDto(telegram));
+            }
+            catch (Adapters.Telegram.TelegramLoginException ex)
+            {
+                return Results.Json(new ErrorDto(ex.Message), Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status400BadRequest);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return Results.Json(new ErrorDto($"Не удалось связаться с Telegram: {ex.Message}"), Core.Serialization.PepaJson.Options,
+                    statusCode: StatusCodes.Status502BadGateway);
+            }
+        });
+
+        api.MapPost("/integrations/telegram/login/continue", async (TelegramCodeRequest request, Adapters.Telegram.TelegramService telegram) =>
+        {
+            try
+            {
+                await telegram.ContinueLoginAsync(request.Value ?? "");
+                return Results.Ok(TelegramDto(telegram));
+            }
+            catch (Adapters.Telegram.TelegramLoginException ex)
+            {
+                return Results.Json(new ErrorDto(ex.Message), Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status400BadRequest);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return Results.Json(new ErrorDto($"Не удалось связаться с Telegram: {ex.Message}"), Core.Serialization.PepaJson.Options,
+                    statusCode: StatusCodes.Status502BadGateway);
+            }
+        });
+
+        api.MapPost("/integrations/telegram/logout", async (Adapters.Telegram.TelegramService telegram) =>
+        {
+            await telegram.LogoutAsync();
+            return TelegramDto(telegram);
+        });
+
         api.MapGet("/integrations/adspower/profiles", async (Adapters.Browser.AdsPowerClient adsPower, CancellationToken ct) =>
         {
             try
@@ -355,6 +400,14 @@ internal static class ApiEndpoints
             UpdatedAt = default,
         }, ct);
         return (await mapper.TriggersAsync([saved], ct))[0];
+    }
+
+    private static TelegramStatusDto TelegramDto(Adapters.Telegram.TelegramService telegram)
+    {
+        var status = telegram.Status;
+        var saved = telegram.SavedLogin;
+        return new TelegramStatusDto(JsonNamingPolicy.CamelCase.ConvertName(status.State.ToString()), status.Account, status.Message,
+            saved?.ApiId, saved?.Phone);
     }
 
     private static SettingsDto ToDto(SettingsService settings)

@@ -109,7 +109,7 @@ public sealed class PlatformApiTests
     public async Task Triggers_can_be_created_listed_run_and_deleted()
     {
         await using var f = await HostFixture.StartAsync();
-        var scenarioId = await f.ScenarioIdAsync("Пример 1");
+        var scenarioId = await f.ScenarioIdAsync("Пример 1.");
 
         var (badStatus, bad) = await f.SendAsync(HttpMethod.Post, "/api/triggers", new
         {
@@ -152,7 +152,7 @@ public sealed class PlatformApiTests
     public async Task Event_trigger_starts_scenario_from_api_event()
     {
         await using var f = await HostFixture.StartAsync();
-        var scenarioId = await f.ScenarioIdAsync("Пример 1");
+        var scenarioId = await f.ScenarioIdAsync("Пример 1.");
         var (status, _) = await f.SendAsync(HttpMethod.Post, "/api/triggers", new
         {
             scenarioId, kind = "event", enabled = true, config = new { source = "http", eventType = "hello" },

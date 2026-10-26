@@ -7,6 +7,7 @@ import {
   Globe,
   Keyboard,
   Link,
+  MessageCircle,
   MousePointerClick,
   ScanSearch,
   TextCursorInput,
@@ -53,6 +54,7 @@ const nodeIcons: Record<string, LucideIcon> = {
   box: Box,
   "bell-ring": BellRing,
   send: Send,
+  "message-circle": MessageCircle,
   lock: Lock,
   "lock-open": LockOpen,
   workflow: Workflow,
@@ -84,6 +86,8 @@ export function categoryColor(category: string): string {
       return "var(--cat-flow)";
     case "browser":
       return "var(--cat-browser)";
+    case "telegram":
+      return "var(--cat-telegram)";
     default:
       return "var(--cat-other)";
   }

@@ -9,6 +9,7 @@
     <ProjectReference Include="..\Pepa.Storage.Sqlite\Pepa.Storage.Sqlite.csproj" />
     <ProjectReference Include="..\Pepa.Adapters.FileSystem\Pepa.Adapters.FileSystem.csproj" />
     <ProjectReference Include="..\Pepa.Adapters.Browser\Pepa.Adapters.Browser.csproj" />
+    <ProjectReference Include="..\Pepa.Adapters.Telegram\Pepa.Adapters.Telegram.csproj" />
   </ItemGroup>
   <ItemGroup>
     <!-- Собранный интерфейс (ui/ → npm run build) копируется рядом с приложением. -->

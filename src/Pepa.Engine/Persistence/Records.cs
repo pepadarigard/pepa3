@@ -268,6 +268,10 @@ public sealed record EventRecord
     public string? CorrelationKey { get; init; }
     public JsonNode? Payload { get; init; }
     public required DateTimeOffset ReceivedAt { get; init; }
+
+    /// <summary>Когда событие произошло у источника (например, время сообщения в Telegram); null — тогда же, когда принято.</summary>
+    public DateTimeOffset? OccurredAt { get; init; }
+
     public required EventState State { get; init; }
     public string? ProcessId { get; init; }
     public long? SubscriptionId { get; init; }

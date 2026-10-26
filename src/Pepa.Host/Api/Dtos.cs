@@ -221,4 +221,12 @@ public sealed record SettingsDto(
 
 public sealed record CheckResultDto(bool Ok, string Message);
 
+/// <param name="ApiId">Сохранённый api_id (api_hash наружу не отдаётся).</param>
+/// <param name="Phone">Сохранённый номер — для повторного входа.</param>
+public sealed record TelegramStatusDto(string State, string? Account, string? Message, int? ApiId, string? Phone);
+
+public sealed record TelegramLoginRequest(int ApiId, string? ApiHash, string? Phone);
+
+public sealed record TelegramCodeRequest(string? Value);
+
 public sealed record AdsPowerProfileDto(string Id, string? Number, string Name, string? Group);
