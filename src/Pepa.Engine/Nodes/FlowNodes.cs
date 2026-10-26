@@ -93,11 +93,20 @@ public sealed class WaitEventNode : INodeExecutor
 
     public ValueTask<NodeResult> ExecuteAsync(NodeExecutionContext context, CancellationToken cancellationToken)
     {
+        // Ключ задан, но получился пустым (например, переменная не заполнена): без ключа процесс принял бы чужое событие.
+        var configuredKey = context.Node.Config.GetString("correlationKey");
+        var key = context.GetString("correlationKey");
+        if (!string.IsNullOrWhiteSpace(configuredKey) && string.IsNullOrEmpty(key))
+        {
+            throw new NodeInputException(
+                $"Ключ сопоставления «{configuredKey}» получился пустым — без ключа процесс принял бы чужое событие. Проверьте переменные.");
+        }
+
         var spec = new EventSubscriptionSpec
         {
             Source = context.RequireString("source").Trim(),
             EventType = FlowNodes.Optional(context, "eventType"),
-            CorrelationKey = context.GetString("correlationKey") is { Length: > 0 } key ? key : null,
+            CorrelationKey = string.IsNullOrEmpty(key) ? null : key,
             MatchExpression = FlowNodes.Optional(context, "match"),
             Priority = (int)(context.GetNumber("priority") ?? 0),
             LookbackSeconds = (int)(context.GetNumber("lookbackSeconds") ?? 0),

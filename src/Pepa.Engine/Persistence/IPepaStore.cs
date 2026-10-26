@@ -77,7 +77,9 @@ public interface IStoreWrite : IAsyncDisposable
     // События: вставка с защитой от повторов (null — такое событие уже есть).
     Task<long?> TryInsertEventAsync(EventRecord record);
     Task<EventRecord?> FindEventByExternalIdAsync(string source, string externalId);
-    Task UpdateEventAsync(EventRecord record);
+    /// <summary>Изменить событие, только если оно сейчас в состоянии <paramref name="expected"/>.</summary>
+    Task<bool> TryUpdateEventAsync(EventRecord record, EventState expected);
+    Task<EventRecord?> GetEventAsync(long id);
     Task<IReadOnlyList<EventRecord>> GetEventsForSubscriptionAsync(long subscriptionId);
 
     Task<long> InsertSubscriptionAsync(SubscriptionRecord record);
@@ -102,6 +104,7 @@ public interface IStoreWrite : IAsyncDisposable
 
     // Триггеры
     Task SaveTriggerAsync(TriggerRecord trigger);
+    Task<TriggerRecord?> GetTriggerAsync(string id);
     Task<bool> DeleteTriggerAsync(string id);
 
     Task CommitAsync();

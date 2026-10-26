@@ -162,8 +162,10 @@ public sealed partial class ProcessEngine
                 var now = _time.GetUtcNow();
                 var updated = Cleared(process) with { Status = ProcessStatus.Running, UpdatedAt = now };
                 var message = $"Проверка показала, что шаг {label} не выполнен ({verification.Message}). Шаг будет выполнен снова.";
+                var effects = new CommitEffects();
                 await using (var write = await _store.BeginWriteAsync())
                 {
+                    await ReleaseTokenWaitAsync(write, process.Id, token, effects);
                     await write.UpdateStepAsync(step with
                     {
                         State = StepState.Failed,
@@ -173,7 +175,7 @@ public sealed partial class ProcessEngine
                     await write.UpsertTokenAsync(token with
                     {
                         State = TokenState.Ready, Attempt = token.Attempt + 1, WaitKind = WaitKind.None, WakeAt = null,
-                        WaitingStepId = null,
+                        WaitingStepId = null, WaitRef = null,
                     });
                     await write.UpdateProcessAsync(updated);
                     await write.AddJournalAsync(Journal(process.Id, JournalLevel.Info, message, step.Id, node.Id));
@@ -181,6 +183,7 @@ public sealed partial class ProcessEngine
                 }
 
                 AfterCommit(updated);
+                await ApplyEffectsAsync(effects);
                 return new ControlResult(message);
             }
 
@@ -212,8 +215,11 @@ public sealed partial class ProcessEngine
         var now = _time.GetUtcNow();
         var updated = Cleared(process) with { Status = ProcessStatus.Running, UpdatedAt = now };
         var message = $"Шаг {label} будет выполнен ещё раз по решению пользователя.";
+        var effects = new CommitEffects();
         await using (var write = await _store.BeginWriteAsync())
         {
+            // Прежнее ожидание этого шага (событие, ресурс, вызванный сценарий) больше не действует.
+            await ReleaseTokenWaitAsync(write, process.Id, token, effects);
             if (step is not null)
             {
                 await write.UpdateStepAsync(step with { Resolution = "Пользователь решил выполнить шаг ещё раз." });
@@ -222,7 +228,7 @@ public sealed partial class ProcessEngine
             await write.UpsertTokenAsync(token with
             {
                 State = TokenState.Ready, Attempt = token.Attempt + 1, WaitKind = WaitKind.None, WakeAt = null,
-                WaitingStepId = null,
+                WaitingStepId = null, WaitRef = null,
             });
             await write.UpdateProcessAsync(updated);
             await write.AddJournalAsync(Journal(process.Id, JournalLevel.Warning, message, step?.Id, token.NodeId));
@@ -230,6 +236,7 @@ public sealed partial class ProcessEngine
         }
 
         AfterCommit(updated);
+        await ApplyEffectsAsync(effects);
         return new ControlResult(message);
     }
 
@@ -247,7 +254,7 @@ public sealed partial class ProcessEngine
         await ApplyResultAsync(process, Graph(process), token, node, descriptor, step,
             new NodeResult.Success(port, EmptyUpdates, null, message, MessageLevel.Warning),
             finalState == StepState.Skipped ? "Пропущен пользователем." : "Отмечен выполненным пользователем.",
-            finalState);
+            finalState, extraWrites: (write, _, _, effects) => ReleaseTokenWaitAsync(write, process.Id, token, effects));
         return new ControlResult(message);
     }
 

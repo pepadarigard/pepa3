@@ -11,11 +11,35 @@ public sealed record PublishResult(long EventId, bool Duplicate);
 /// <summary>
 /// Система событий: приём с защитой от повторов, сопоставление с ожидающими процессами по правилам,
 /// конфликты при неоднозначности, запуск процессов триггерами.
+/// Всё сопоставление идёт под одним замком (<see cref="_routingLock"/>), по одному событию, а каждое изменение
+/// события записывается, только если оно всё ещё в том состоянии, в котором его прочитали.
 /// </summary>
 public sealed partial class ProcessEngine
 {
     private readonly SemaphoreSlim _routerSignal = new(0, int.MaxValue);
     private readonly SemaphoreSlim _routingLock = new(1, 1);
+
+    /// <summary>
+    /// Последнее событие, принятое до этого запуска Pepa. Такие события сопоставляются с ожидающими процессами,
+    /// но процессы по ним триггеры сами не запускают (как и пропущенные запуски по расписанию).
+    /// </summary>
+    private long _eventsBeforeStart;
+
+    private enum RouteMode
+    {
+        /// <summary>Новое событие: подписки, затем триггеры (если событие пришло во время этой работы Pepa).</summary>
+        New,
+
+        /// <summary>Повторное сопоставление необработанного события с подписками. Триггеры не запускаются, без совпадений ничего не меняется.</summary>
+        Rematch,
+
+        /// <summary>Пользователь попросил сопоставить снова: подписки и триггеры.</summary>
+        Manual,
+    }
+
+    /// <summary>Источник служебных событий платформы: снаружи его отправить нельзя.</summary>
+    internal static bool IsPlatformSource(string? source) =>
+        string.Equals(source?.Trim(), EventSources.Platform, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Принять событие. Повтор с тем же внешним идентификатором не создаёт новое событие.</summary>
     public async Task<PublishResult> PublishEventAsync(EventInput input, CancellationToken cancellationToken = default)
@@ -24,6 +48,11 @@ public sealed partial class ProcessEngine
         if (string.IsNullOrWhiteSpace(input.Source) || input.Source.Length > 100)
         {
             throw new EngineOperationException("У события должен быть источник (до 100 символов).");
+        }
+
+        if (IsPlatformSource(input.Source))
+        {
+            throw new EngineOperationException($"Источник «{EventSources.Platform}» служебный — его события создаёт только сама Pepa.");
         }
 
         if ((input.Type?.Length ?? 0) > 100)
@@ -105,7 +134,7 @@ public sealed partial class ProcessEngine
 
                 foreach (var record in pending)
                 {
-                    await RouteEventAsync(record, cancellationToken);
+                    await RouteEventAsync(record, RouteMode.New, cancellationToken);
                 }
 
                 if (pending.Count < 200)
@@ -122,19 +151,27 @@ public sealed partial class ProcessEngine
         EventsChanged?.Invoke();
     }
 
-    private async Task RouteEventAsync(EventRecord record, CancellationToken cancellationToken)
+    /// <summary>Сопоставить одно событие. Вызывающий держит <see cref="_routingLock"/>.</summary>
+    private async Task<EventState> RouteEventAsync(EventRecord record, RouteMode mode, CancellationToken cancellationToken)
     {
+        var expected = record.State;
+
         // Попытки на случай, если подходящая подписка перестала действовать между проверкой и назначением.
         for (var attempt = 0; attempt < 5; attempt++)
         {
             var candidates = await FindCandidatesAsync(record, cancellationToken);
-            var now = _time.GetUtcNow();
 
             if (candidates.Count == 0)
             {
-                var started = await StartByEventTriggersAsync(record, cancellationToken);
-                await using var write = await _store.BeginWriteAsync(cancellationToken);
-                await write.UpdateEventAsync(started.Count > 0
+                if (mode == RouteMode.Rematch)
+                {
+                    return record.State;
+                }
+
+                var allowTriggers = mode == RouteMode.Manual || record.Id > _eventsBeforeStart;
+                var started = allowTriggers ? await StartByEventTriggersAsync(record, cancellationToken) : [];
+                var now = _time.GetUtcNow();
+                var final = started.Count > 0
                     ? record with
                     {
                         State = EventState.Delivered,
@@ -145,44 +182,59 @@ public sealed partial class ProcessEngine
                     : record with
                     {
                         State = EventState.Unmatched,
-                        Note = "Нет ожидающих процессов с подходящими правилами. Ничего не запускалось.",
+                        Note = allowTriggers
+                            ? "Нет ожидающих процессов с подходящими правилами. Ничего не запускалось."
+                            : "Принято до перезапуска Pepa: ожидающих его процессов нет, а запуск по триггерам после перезапуска " +
+                              "сам не выполняется. Чтобы обработать событие, нажмите «Сопоставить снова».",
                         HandledAt = now,
-                    });
-                await write.CommitAsync();
-                return;
+                    };
+                await using var write = await _store.BeginWriteAsync(cancellationToken);
+                if (await write.TryUpdateEventAsync(final, expected))
+                {
+                    await write.CommitAsync();
+                }
+
+                return final.State;
             }
 
             var best = candidates.Max(c => c.Subscription.Priority);
             var top = candidates.Where(c => c.Subscription.Priority == best).ToList();
             if (top.Count > 1)
             {
-                await using var write = await _store.BeginWriteAsync(cancellationToken);
-                await write.UpdateEventAsync(record with
+                await using (var write = await _store.BeginWriteAsync(cancellationToken))
                 {
-                    State = EventState.Conflict,
-                    Candidates = new JsonArray(top.Select(c => (JsonNode?)new JsonObject
+                    if (!await write.TryUpdateEventAsync(record with
+                        {
+                            State = EventState.Conflict,
+                            Candidates = new JsonArray(top.Select(c => (JsonNode?)new JsonObject
+                            {
+                                ["subscriptionId"] = c.Subscription.Id,
+                                ["processId"] = c.Process.Id,
+                                ["scenarioName"] = c.Process.ScenarioName,
+                            }).ToArray()),
+                            Note = $"Событие одинаково подходит {top.Count} процессам. Выберите, кому его отдать.",
+                            HandledAt = _time.GetUtcNow(),
+                        }, expected))
                     {
-                        ["subscriptionId"] = c.Subscription.Id,
-                        ["processId"] = c.Process.Id,
-                        ["scenarioName"] = c.Process.ScenarioName,
-                    }).ToArray()),
-                    Note = $"Событие одинаково подходит {top.Count} процессам. Выберите, кому его отдать.",
-                    HandledAt = now,
-                });
-                foreach (var candidate in top)
-                {
-                    await write.AddJournalAsync(Journal(candidate.Process.Id, JournalLevel.Warning,
-                        $"Событие #{record.Id} «{record.Source}» подходит сразу нескольким процессам. " +
-                        "Оно не отдано никому — нужно решение на странице «Выполнение»."));
+                        return record.State;
+                    }
+
+                    foreach (var candidate in top)
+                    {
+                        await write.AddJournalAsync(Journal(candidate.Process.Id, JournalLevel.Warning,
+                            $"Событие #{record.Id} «{record.Source}» подходит сразу нескольким процессам. " +
+                            "Оно не отдано никому — нужно решение на странице «Выполнение»."));
+                    }
+
+                    await write.CommitAsync();
                 }
 
-                await write.CommitAsync();
                 foreach (var candidate in top)
                 {
                     Notify(candidate.Process.Id);
                 }
 
-                return;
+                return EventState.Conflict;
             }
 
             var winner = top[0];
@@ -194,26 +246,31 @@ public sealed partial class ProcessEngine
                     continue; // подписка уже не действует — сопоставить заново
                 }
 
-                await write.UpdateEventAsync(record with
+                if (!await write.TryUpdateEventAsync(record with
+                    {
+                        State = EventState.Matched,
+                        ProcessId = winner.Process.Id,
+                        SubscriptionId = winner.Subscription.Id,
+                        Candidates = null,
+                        Note = winner.Process.Status is ProcessStatus.Paused or ProcessStatus.NeedsAttention
+                            ? "Назначено процессу; будет применено после его возобновления."
+                            : null,
+                        HandledAt = _time.GetUtcNow(),
+                    }, expected))
                 {
-                    State = EventState.Matched,
-                    ProcessId = winner.Process.Id,
-                    SubscriptionId = winner.Subscription.Id,
-                    Candidates = null,
-                    Note = winner.Process.Status is ProcessStatus.Paused or ProcessStatus.NeedsAttention
-                        ? "Назначено процессу; будет применено после его возобновления."
-                        : null,
-                    HandledAt = now,
-                });
+                    return record.State; // событие уже изменилось — подписку не трогаем (транзакция откатится)
+                }
+
                 await write.CommitAsync();
             }
 
             Enqueue(winner.Process.Id);
             Notify(winner.Process.Id);
-            return;
+            return EventState.Matched;
         }
 
         _logger.LogWarning("Не удалось сопоставить событие {EventId}: подписки менялись во время сопоставления.", record.Id);
+        return record.State;
     }
 
     private sealed record Candidate(SubscriptionRecord Subscription, ProcessRecord Process);
@@ -223,12 +280,7 @@ public sealed partial class ProcessEngine
         var result = new List<Candidate>();
         foreach (var subscription in await _store.GetActiveSubscriptionsAsync(record.Source, cancellationToken))
         {
-            if (subscription.EventType is { } type && !string.Equals(type, record.Type, StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            if (subscription.CorrelationKey is { } key && !string.Equals(key, record.CorrelationKey, StringComparison.Ordinal))
+            if (!SubscriptionAccepts(subscription.EventType, subscription.CorrelationKey, record))
             {
                 continue;
             }
@@ -277,26 +329,55 @@ public sealed partial class ProcessEngine
         return result;
     }
 
+    private static bool SubscriptionAccepts(string? eventType, string? correlationKey, EventRecord record) =>
+        (eventType is null || string.Equals(eventType, record.Type, StringComparison.OrdinalIgnoreCase)) &&
+        (correlationKey is null || string.Equals(correlationKey, record.CorrelationKey, StringComparison.Ordinal));
+
+    /// <summary>Новое ожидание с окном «пришедшие раньше»: какие необработанные события стоит предложить подпискам.</summary>
+    private sealed record ReclaimRequest(string Source, string? EventType, string? CorrelationKey, DateTimeOffset Since);
+
     /// <summary>
-    /// Новое ожидание: необработанные события из разрешённого окна снова отправляются на сопоставление —
-    /// с учётом всех действующих подписок, а не только новой.
+    /// Необработанные события из разрешённого окна сопоставляются с действующими подписками. Триггеры при этом не
+    /// запускаются: событие уже однажды «никому не подошло».
     /// </summary>
-    private async Task ReclaimUnmatchedAsync(string source, DateTimeOffset since)
+    private async Task ReclaimUnmatchedAsync(ReclaimRequest request)
     {
-        var unmatched = await _store.ListEventsAsync(new EventQuery { States = [EventState.Unmatched], Limit = 500 });
-        var candidates = unmatched.Where(e => e.Source == source && e.ReceivedAt >= since).ToList();
-        if (candidates.Count == 0)
+        await _routingLock.WaitAsync();
+        try
         {
-            return;
+            var unmatched = await _store.ListEventsAsync(new EventQuery { States = [EventState.Unmatched], Limit = 500 });
+            foreach (var record in unmatched
+                         .Where(e => e.Source == request.Source && e.ReceivedAt >= request.Since &&
+                                     SubscriptionAccepts(request.EventType, request.CorrelationKey, e))
+                         .OrderBy(e => e.Id))
+            {
+                await RouteEventAsync(record, RouteMode.Rematch, CancellationToken.None);
+            }
         }
-
-        await using var write = await _store.BeginWriteAsync();
-        foreach (var record in candidates)
+        finally
         {
-            await write.UpdateEventAsync(record with { State = EventState.Received, Note = null, HandledAt = null });
+            _routingLock.Release();
         }
+    }
 
-        await write.CommitAsync();
+    /// <summary>События, которые вернулись на сопоставление (процесс завершился или повторил шаг, не применив их).</summary>
+    private async Task RematchEventsAsync(IReadOnlyCollection<long> eventIds)
+    {
+        await _routingLock.WaitAsync();
+        try
+        {
+            foreach (var id in eventIds.Order())
+            {
+                if (await _store.GetEventAsync(id) is { State: EventState.Unmatched } record)
+                {
+                    await RouteEventAsync(record, RouteMode.Rematch, CancellationToken.None);
+                }
+            }
+        }
+        finally
+        {
+            _routingLock.Release();
+        }
     }
 
     /// <summary>Решение пользователя по конфликтному или необработанному событию.</summary>
@@ -308,23 +389,22 @@ public sealed partial class ProcessEngine
         await _routingLock.WaitAsync(cancellationToken);
         try
         {
-            var record = await _store.GetEventAsync(eventId, cancellationToken)
-                         ?? throw new EngineOperationException("Событие не найдено.");
+            await using var write = await _store.BeginWriteAsync(cancellationToken);
+            var record = await write.GetEventAsync(eventId) ?? throw new EngineOperationException("Событие не найдено.");
             if (record.State is not (EventState.Conflict or EventState.Unmatched))
             {
                 throw new EngineOperationException("Событие уже обработано.");
             }
 
             var now = _time.GetUtcNow();
-            await using var write = await _store.BeginWriteAsync(cancellationToken);
             if (subscriptionId is null)
             {
-                await write.UpdateEventAsync(record with
+                await write.TryUpdateEventAsync(record with
                 {
                     State = EventState.Ignored,
                     Note = "Пропущено по решению пользователя.",
                     HandledAt = now,
-                });
+                }, record.State);
                 result = new ControlResult("Событие пропущено.");
             }
             else
@@ -337,7 +417,7 @@ public sealed partial class ProcessEngine
                     throw new EngineOperationException("Этот процесс уже не ждёт такое событие.");
                 }
 
-                await write.UpdateEventAsync(record with
+                await write.TryUpdateEventAsync(record with
                 {
                     State = EventState.Matched,
                     ProcessId = subscription.ProcessId,
@@ -345,7 +425,7 @@ public sealed partial class ProcessEngine
                     Candidates = null,
                     Note = "Назначено пользователем.",
                     HandledAt = now,
-                });
+                }, record.State);
                 await write.AddJournalAsync(Journal(subscription.ProcessId, JournalLevel.Info,
                     $"Событие #{record.Id} назначено этому процессу пользователем."));
                 processId = subscription.ProcessId;
@@ -369,25 +449,29 @@ public sealed partial class ProcessEngine
         return result;
     }
 
-    /// <summary>Повторить сопоставление необработанного события (например, после запуска нужного процесса).</summary>
+    /// <summary>Повторить сопоставление необработанного события по просьбе пользователя (подписки и триггеры).</summary>
     public async Task<ControlResult> RerouteEventAsync(long eventId, CancellationToken cancellationToken = default)
     {
         EnsureRunning();
-        var record = await _store.GetEventAsync(eventId, cancellationToken) ?? throw new EngineOperationException("Событие не найдено.");
-        if (record.State is not (EventState.Unmatched or EventState.Conflict))
+        EventState state;
+        await _routingLock.WaitAsync(cancellationToken);
+        try
         {
-            throw new EngineOperationException("Повторить сопоставление можно только для необработанного события.");
+            var record = await _store.GetEventAsync(eventId, cancellationToken) ?? throw new EngineOperationException("Событие не найдено.");
+            if (record.State is not (EventState.Unmatched or EventState.Conflict))
+            {
+                throw new EngineOperationException("Повторить сопоставление можно только для необработанного события.");
+            }
+
+            state = await RouteEventAsync(record, RouteMode.Manual, cancellationToken);
+        }
+        finally
+        {
+            _routingLock.Release();
         }
 
-        await using (var write = await _store.BeginWriteAsync(cancellationToken))
-        {
-            await write.UpdateEventAsync(record with { State = EventState.Received, Candidates = null, Note = null, HandledAt = null });
-            await write.CommitAsync();
-        }
-
-        await RoutePendingAsync(cancellationToken);
-        var updated = await _store.GetEventAsync(eventId, cancellationToken);
-        return new ControlResult(updated?.State switch
+        EventsChanged?.Invoke();
+        return new ControlResult(state switch
         {
             EventState.Matched or EventState.Delivered => "Событие сопоставлено.",
             EventState.Conflict => "Событие снова подходит нескольким процессам — выберите вручную.",

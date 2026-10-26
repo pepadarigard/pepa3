@@ -74,7 +74,9 @@ public sealed class FaultInjectingStore(IPepaStore inner) : IPepaStore
         public Task<ProcessRecord?> GetProcessAsync(string id) => inner.GetProcessAsync(id);
         public Task<long?> TryInsertEventAsync(EventRecord record) => inner.TryInsertEventAsync(record);
         public Task<EventRecord?> FindEventByExternalIdAsync(string source, string externalId) => inner.FindEventByExternalIdAsync(source, externalId);
-        public Task UpdateEventAsync(EventRecord record) => inner.UpdateEventAsync(record);
+        public Task<bool> TryUpdateEventAsync(EventRecord record, EventState expected) => inner.TryUpdateEventAsync(record, expected);
+        public Task<EventRecord?> GetEventAsync(long id) => inner.GetEventAsync(id);
+        public Task<TriggerRecord?> GetTriggerAsync(string id) => inner.GetTriggerAsync(id);
         public Task<IReadOnlyList<EventRecord>> GetEventsForSubscriptionAsync(long subscriptionId) => inner.GetEventsForSubscriptionAsync(subscriptionId);
         public Task<long> InsertSubscriptionAsync(SubscriptionRecord record) => inner.InsertSubscriptionAsync(record);
         public Task<bool> TrySetSubscriptionStateAsync(long id, SubscriptionState expected, SubscriptionState state, long? eventId) => inner.TrySetSubscriptionStateAsync(id, expected, state, eventId);

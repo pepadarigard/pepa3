@@ -8,8 +8,10 @@ using Pepa.Engine.Scheduling;
 namespace Pepa.Engine;
 
 /// <summary>
-/// Автоматический запуск: по расписанию и по событиям. Запуски, пропущенные, пока Pepa была закрыта,
+/// Автоматический запуск: по расписанию и по событиям. Запуски, пропущенные, пока Pepa была закрыта (или сильно опоздавшие),
 /// не выполняются сами — они учитываются, и пользователь может запустить их вручную.
+/// Любое решение о запуске принимается в той же транзакции, что и запись процесса, по только что перечитанному триггеру:
+/// удалённый, выключенный или изменённый пользователем триггер ничего не запустит и не будет перезаписан старыми данными.
 /// </summary>
 public sealed partial class ProcessEngine
 {
@@ -44,34 +46,75 @@ public sealed partial class ProcessEngine
     private async Task RunDueSchedulesAsync(CancellationToken cancellationToken)
     {
         var now = _time.GetUtcNow();
-        var triggers = await _store.ListTriggersAsync(null, cancellationToken);
-        foreach (var trigger in triggers.Where(t => t is { Kind: TriggerKind.Schedule, Enabled: true, NextRunAt: { } next } && next <= now))
+        var due = (await _store.ListTriggersAsync(null, cancellationToken))
+            .Where(t => t is { Kind: TriggerKind.Schedule, Enabled: true, NextRunAt: { } next } && next <= now)
+            .ToList();
+        foreach (var trigger in due)
         {
-            var occurrence = trigger.NextRunAt!.Value;
-            var updated = trigger with
+            await RunScheduledOccurrenceAsync(trigger, cancellationToken);
+        }
+    }
+
+    /// <summary>Наступил срок одного запуска по расписанию.</summary>
+    private async Task RunScheduledOccurrenceAsync(TriggerRecord seen, CancellationToken cancellationToken)
+    {
+        var occurrence = seen.NextRunAt!.Value;
+        var now = _time.GetUtcNow();
+        var late = now - occurrence > _options.ScheduleLateGrace;
+
+        PreparedStart? prepared = null;
+        string? error = null;
+        if (!late)
+        {
+            try
             {
-                NextRunAt = ScheduleCalculator.Next(trigger.Config, now, _time.LocalTimeZone),
+                prepared = await PrepareStartAsync(seen.ScenarioId, seen.Inputs?.DeepClone() as JsonObject, cancellationToken);
+            }
+            catch (Exception ex) when (ex is EngineOperationException or ScenarioInvalidException)
+            {
+                error = ex.Message;
+            }
+        }
+
+        ProcessRecord? started = null;
+        await using (var write = await _store.BeginWriteAsync(cancellationToken))
+        {
+            var current = await write.GetTriggerAsync(seen.Id);
+            if (current is not { Kind: TriggerKind.Schedule, Enabled: true } || current.NextRunAt != occurrence ||
+                current.UpdatedAt != seen.UpdatedAt)
+            {
+                return; // триггер удалён, выключен или изменён — решение примет следующий проход по свежим данным
+            }
+
+            var updated = current with
+            {
+                NextRunAt = ScheduleCalculator.Next(current.Config, now, _time.LocalTimeZone),
                 UpdatedAt = now,
             };
 
-            if (trigger.Overlap == "skip" && trigger.LastProcessId is { } lastId &&
-                await _store.GetProcessAsync(lastId, cancellationToken) is { IsTerminal: false })
+            if (late)
             {
-                updated = updated with { SkippedRuns = trigger.SkippedRuns + 1 };
+                updated = updated with
+                {
+                    MissedRuns = current.MissedRuns + 1 + ScheduleCalculator.CountBetween(current.Config, occurrence, now, _time.LocalTimeZone),
+                    LastMissedAt = occurrence,
+                };
+            }
+            else if (current.Overlap == "skip" && current.LastProcessId is { } lastId &&
+                     await write.GetProcessAsync(lastId) is { IsTerminal: false })
+            {
+                updated = updated with { SkippedRuns = current.SkippedRuns + 1 };
+            }
+            else if (prepared is null)
+            {
+                updated = updated with { LastError = error, LastRunAt = now };
             }
             else
             {
-                try
-                {
-                    var processId = await StartProcessAsync(trigger.ScenarioId, trigger.Inputs?.DeepClone() as JsonObject,
-                        $"schedule:{trigger.Id}:{occurrence:O}", $"по расписанию: {ScheduleCalculator.Describe(trigger.Config)}",
-                        cancellationToken);
-                    updated = updated with { LastRunAt = now, LastProcessId = processId, LastError = null };
-                }
-                catch (Exception ex) when (ex is EngineOperationException or ScenarioInvalidException)
-                {
-                    updated = updated with { LastError = ex.Message, LastRunAt = now };
-                }
+                var (process, created) = await InsertStartedProcessAsync(write, prepared, $"schedule:{current.Id}:{occurrence:O}",
+                    $"по расписанию: {ScheduleCalculator.Describe(current.Config)}");
+                started = created ? process : null;
+                updated = updated with { LastRunAt = now, LastProcessId = process.Id, LastError = null };
             }
 
             if (updated.NextRunAt is null)
@@ -79,11 +122,17 @@ public sealed partial class ProcessEngine
                 updated = updated with { Enabled = false };
             }
 
-            await using var write = await _store.BeginWriteAsync(cancellationToken);
             await write.SaveTriggerAsync(updated);
             await write.CommitAsync();
-            TriggersChanged?.Invoke();
         }
+
+        if (started is not null)
+        {
+            Notify(started.Id);
+            Enqueue(started.Id);
+        }
+
+        TriggersChanged?.Invoke();
     }
 
     /// <summary>Изменились триггеры или их состояние.</summary>
@@ -94,21 +143,27 @@ public sealed partial class ProcessEngine
     {
         var now = _time.GetUtcNow();
         var missedTotal = 0;
-        foreach (var trigger in await _store.ListTriggersAsync(null, cancellationToken))
+        foreach (var seen in await _store.ListTriggersAsync(null, cancellationToken))
         {
-            if (trigger is not { Kind: TriggerKind.Schedule, Enabled: true, NextRunAt: { } next } || next > now)
+            if (seen is not { Kind: TriggerKind.Schedule, Enabled: true, NextRunAt: { } next } || next > now)
             {
                 continue;
             }
 
-            var missed = 1 + ScheduleCalculator.CountBetween(trigger.Config, next, now, _time.LocalTimeZone);
-            missedTotal += missed;
-            var nextRun = ScheduleCalculator.Next(trigger.Config, now, _time.LocalTimeZone);
             await using var write = await _store.BeginWriteAsync(cancellationToken);
-            await write.SaveTriggerAsync(trigger with
+            var current = await write.GetTriggerAsync(seen.Id);
+            if (current is not { Kind: TriggerKind.Schedule, Enabled: true, NextRunAt: { } due } || due > now)
             {
-                MissedRuns = trigger.MissedRuns + missed,
-                LastMissedAt = next,
+                continue;
+            }
+
+            var missed = 1 + ScheduleCalculator.CountBetween(current.Config, due, now, _time.LocalTimeZone);
+            missedTotal += missed;
+            var nextRun = ScheduleCalculator.Next(current.Config, now, _time.LocalTimeZone);
+            await write.SaveTriggerAsync(current with
+            {
+                MissedRuns = current.MissedRuns + missed,
+                LastMissedAt = due,
                 NextRunAt = nextRun,
                 Enabled = nextRun is not null,
                 UpdatedAt = now,
@@ -119,7 +174,7 @@ public sealed partial class ProcessEngine
         return missedTotal;
     }
 
-    /// <summary>Запуск процессов триггерами по событию, которое никто не ждал.</summary>
+    /// <summary>Запуск процессов триггерами по событию, которое никто не ждал. Вызывается под замком сопоставления.</summary>
     private async Task<List<string>> StartByEventTriggersAsync(EventRecord record, CancellationToken cancellationToken)
     {
         var started = new List<string>();
@@ -130,13 +185,14 @@ public sealed partial class ProcessEngine
         {
             var source = trigger.Config.GetString("source");
             var type = trigger.Config.GetString("eventType");
-            if (!string.Equals(source, record.Source, StringComparison.OrdinalIgnoreCase) ||
+            if (!string.Equals(source?.Trim(), record.Source, StringComparison.OrdinalIgnoreCase) ||
                 (!string.IsNullOrWhiteSpace(type) && !string.Equals(type, record.Type, StringComparison.OrdinalIgnoreCase)))
             {
                 continue;
             }
 
             string? error = null;
+            PreparedStart? prepared = null;
             try
             {
                 if (trigger.Config.GetString("filter") is { Length: > 0 } filter && !_expressions.EvaluateCondition(filter, eventScope))
@@ -153,34 +209,50 @@ public sealed partial class ProcessEngine
                     }
                 }
 
-                var processId = await StartProcessAsync(trigger.ScenarioId, inputs, $"event:{trigger.Id}:{record.Id}",
-                    $"по событию #{record.Id} «{record.Source}»", cancellationToken);
-                started.Add(processId);
-                await using var write = await _store.BeginWriteAsync(cancellationToken);
-                await write.SaveTriggerAsync(trigger with
-                {
-                    LastRunAt = _time.GetUtcNow(), LastProcessId = processId, LastError = null, UpdatedAt = _time.GetUtcNow(),
-                });
-                await write.CommitAsync();
+                prepared = await PrepareStartAsync(trigger.ScenarioId, inputs, cancellationToken);
             }
             catch (Exception ex) when (ex is ExpressionException or EngineOperationException or ScenarioInvalidException)
             {
                 error = ex.Message;
             }
 
-            if (error is not null)
+            ProcessRecord? created = null;
+            await using (var write = await _store.BeginWriteAsync(cancellationToken))
             {
-                await using var write = await _store.BeginWriteAsync(cancellationToken);
-                await write.SaveTriggerAsync(trigger with { LastError = error, UpdatedAt = _time.GetUtcNow() });
+                var current = await write.GetTriggerAsync(trigger.Id);
+                if (current is not { Kind: TriggerKind.Event, Enabled: true } || current.UpdatedAt != trigger.UpdatedAt)
+                {
+                    continue; // триггер удалён, выключен или изменён, пока событие обрабатывалось
+                }
+
+                var now = _time.GetUtcNow();
+                if (prepared is null)
+                {
+                    await write.SaveTriggerAsync(current with { LastError = error, UpdatedAt = now });
+                }
+                else
+                {
+                    var (process, isNew) = await InsertStartedProcessAsync(write, prepared, $"event:{current.Id}:{record.Id}",
+                        $"по событию #{record.Id} «{record.Source}»");
+                    created = isNew ? process : null;
+                    started.Add(process.Id);
+                    await write.SaveTriggerAsync(current with
+                    {
+                        LastRunAt = now, LastProcessId = process.Id, LastError = null, UpdatedAt = now,
+                    });
+                }
+
                 await write.CommitAsync();
+            }
+
+            if (created is not null)
+            {
+                Notify(created.Id);
+                Enqueue(created.Id);
             }
         }
 
-        if (started.Count > 0)
-        {
-            TriggersChanged?.Invoke();
-        }
-
+        TriggersChanged?.Invoke();
         return started;
     }
 
@@ -195,62 +267,66 @@ public sealed partial class ProcessEngine
         }
 
         var now = _time.GetUtcNow();
-        var existing = string.IsNullOrEmpty(trigger.Id) ? null : await _store.GetTriggerAsync(trigger.Id, cancellationToken);
-        var saved = trigger with
+        if (trigger.Kind == TriggerKind.Schedule)
         {
-            Id = existing?.Id ?? (string.IsNullOrEmpty(trigger.Id) ? NewId() : trigger.Id),
-            Name = trigger.Name.Trim(),
-            Overlap = trigger.Overlap is "allow" ? "allow" : "skip",
-            CreatedAt = existing?.CreatedAt ?? now,
-            UpdatedAt = now,
-            LastRunAt = existing?.LastRunAt,
-            LastProcessId = existing?.LastProcessId,
-            MissedRuns = existing?.MissedRuns ?? 0,
-            LastMissedAt = existing?.LastMissedAt,
-            SkippedRuns = existing?.SkippedRuns ?? 0,
-            LastError = null,
-        };
-
-        if (saved.Kind == TriggerKind.Schedule)
-        {
-            if (ScheduleCalculator.Validate(saved.Config) is { } problem)
+            if (ScheduleCalculator.Validate(trigger.Config) is { } problem)
             {
                 throw new EngineOperationException(problem);
             }
 
-            var next = ScheduleCalculator.Next(saved.Config, now, _time.LocalTimeZone);
-            if (next is null && saved.Enabled)
+            if (trigger.Enabled && ScheduleCalculator.Next(trigger.Config, now, _time.LocalTimeZone) is null)
             {
                 throw new EngineOperationException("По этому расписанию запусков больше не будет (время уже прошло).");
             }
-
-            saved = saved with { NextRunAt = saved.Enabled ? next : null };
         }
         else
         {
-            if (string.IsNullOrWhiteSpace(saved.Config.GetString("source")))
+            if (string.IsNullOrWhiteSpace(trigger.Config.GetString("source")))
             {
                 throw new EngineOperationException("Укажите источник события.");
             }
 
-            if (saved.Config.GetString("filter") is { Length: > 0 } filter && _expressions.CheckExpression(filter) is { } error)
+            if (trigger.Config.GetString("filter") is { Length: > 0 } filter && _expressions.CheckExpression(filter) is { } error)
             {
                 throw new EngineOperationException($"Условие: {error}");
             }
 
-            foreach (var (name, value) in saved.Inputs ?? [])
+            foreach (var (name, value) in trigger.Inputs ?? [])
             {
                 if (value.AsString() is { Length: > 0 } code && _expressions.CheckExpression(code) is { } inputError)
                 {
                     throw new EngineOperationException($"Значение «{name}»: {inputError}");
                 }
             }
-
-            saved = saved with { NextRunAt = null };
         }
 
+        TriggerRecord saved;
         await using (var write = await _store.BeginWriteAsync(cancellationToken))
         {
+            TriggerRecord? existing = null;
+            if (!string.IsNullOrEmpty(trigger.Id))
+            {
+                existing = await write.GetTriggerAsync(trigger.Id)
+                           ?? throw new EngineOperationException("Запуск по расписанию или событию не найден (возможно, его удалили).");
+            }
+
+            saved = trigger with
+            {
+                Id = existing?.Id ?? NewId(),
+                Name = trigger.Name.Trim(),
+                Overlap = trigger.Overlap is "allow" ? "allow" : "skip",
+                CreatedAt = existing?.CreatedAt ?? now,
+                UpdatedAt = now,
+                LastRunAt = existing?.LastRunAt,
+                LastProcessId = existing?.LastProcessId,
+                MissedRuns = existing?.MissedRuns ?? 0,
+                LastMissedAt = existing?.LastMissedAt,
+                SkippedRuns = existing?.SkippedRuns ?? 0,
+                LastError = null,
+                NextRunAt = trigger.Kind == TriggerKind.Schedule && trigger.Enabled
+                    ? ScheduleCalculator.Next(trigger.Config, now, _time.LocalTimeZone)
+                    : null,
+            };
             await write.SaveTriggerAsync(saved);
             await write.CommitAsync();
         }
@@ -276,32 +352,36 @@ public sealed partial class ProcessEngine
     public async Task<string> RunTriggerNowAsync(string id, CancellationToken cancellationToken = default)
     {
         EnsureRunning();
-        var trigger = await _store.GetTriggerAsync(id, cancellationToken) ?? throw new EngineOperationException("Триггер не найден.");
-        if (trigger.Kind != TriggerKind.Schedule)
+        var seen = await _store.GetTriggerAsync(id, cancellationToken) ?? throw new EngineOperationException("Триггер не найден.");
+        if (seen.Kind != TriggerKind.Schedule)
         {
             throw new EngineOperationException("Вручную запускаются только расписания.");
         }
 
-        var processId = await StartProcessAsync(trigger.ScenarioId, trigger.Inputs?.DeepClone() as JsonObject,
-            null, "вручную по расписанию", cancellationToken);
-        var now = _time.GetUtcNow();
+        var prepared = await PrepareStartAsync(seen.ScenarioId, seen.Inputs?.DeepClone() as JsonObject, cancellationToken);
+        ProcessRecord process;
         await using (var write = await _store.BeginWriteAsync(cancellationToken))
         {
-            await write.SaveTriggerAsync(trigger with { MissedRuns = 0, LastRunAt = now, LastProcessId = processId, UpdatedAt = now });
+            var current = await write.GetTriggerAsync(id) ?? throw new EngineOperationException("Триггер не найден (возможно, его удалили).");
+            (process, _) = await InsertStartedProcessAsync(write, prepared, null, "вручную по расписанию");
+            var now = _time.GetUtcNow();
+            await write.SaveTriggerAsync(current with { MissedRuns = 0, LastRunAt = now, LastProcessId = process.Id, UpdatedAt = now });
             await write.CommitAsync();
         }
 
+        Notify(process.Id);
+        Enqueue(process.Id);
         TriggersChanged?.Invoke();
-        return processId;
+        return process.Id;
     }
 
     /// <summary>Сбросить счётчик пропущенных запусков, ничего не запуская.</summary>
     public async Task DismissMissedRunsAsync(string id, CancellationToken cancellationToken = default)
     {
-        var trigger = await _store.GetTriggerAsync(id, cancellationToken) ?? throw new EngineOperationException("Триггер не найден.");
         await using (var write = await _store.BeginWriteAsync(cancellationToken))
         {
-            await write.SaveTriggerAsync(trigger with { MissedRuns = 0, UpdatedAt = _time.GetUtcNow() });
+            var current = await write.GetTriggerAsync(id) ?? throw new EngineOperationException("Триггер не найден.");
+            await write.SaveTriggerAsync(current with { MissedRuns = 0, UpdatedAt = _time.GetUtcNow() });
             await write.CommitAsync();
         }
 

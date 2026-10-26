@@ -51,10 +51,19 @@ public static class ScheduleCalculator
                     return null;
                 }
 
-                // Привязка к началу местных суток, чтобы «каждые 30 минут» было в :00 и :30, а не «от момента сохранения».
+                // Интервал, укладывающийся в сутки целое число раз, привязан к местной полуночи: «каждые 30 минут» — в :00 и :30.
+                // Остальные (7 минут, 36 часов) идут ровной сеткой от постоянной точки, без сбоя в полночь.
                 var period = TimeSpan.FromMinutes(minutes);
-                var localDate = TimeZoneInfo.ConvertTime(after, zone).Date;
-                var anchor = new DateTimeOffset(localDate, zone.GetUtcOffset(localDate));
+                DateTimeOffset anchor;
+                if (TimeSpan.FromDays(1).Ticks % period.Ticks == 0)
+                {
+                    var localDate = TimeZoneInfo.ConvertTime(after, zone).Date;
+                    anchor = new DateTimeOffset(localDate, zone.GetUtcOffset(localDate));
+                }
+                else
+                {
+                    anchor = new DateTimeOffset(2000, 1, 1, 0, 0, 0, zone.BaseUtcOffset);
+                }
                 var passed = (after - anchor).Ticks / period.Ticks;
                 var next = anchor + TimeSpan.FromTicks((passed + 1) * period.Ticks);
                 return next > after ? next : next + period;

@@ -76,6 +76,8 @@ public sealed partial class ProcessEngine : IAsyncDisposable
             throw new InvalidOperationException("Движок уже запущен.");
         }
 
+        // События, принятые до этого запуска, сопоставляются с ожидающими, но процессы по ним сами не запускаются.
+        _eventsBeforeStart = (await _store.ListEventsAsync(new EventQuery { Limit = 1 }, cancellationToken)).FirstOrDefault()?.Id ?? 0;
         var report = await RecoverAsync(cancellationToken);
         for (var i = 0; i < Math.Max(1, _options.MaxParallelProcesses); i++)
         {
@@ -85,7 +87,8 @@ public sealed partial class ProcessEngine : IAsyncDisposable
         _background.Add(Task.Run(() => TimerLoopAsync(_stop.Token)));
         _background.Add(Task.Run(() => RouterLoopAsync(_stop.Token)));
         _background.Add(Task.Run(() => TriggerLoopAsync(_stop.Token)));
-        // События, принятые до закрытия, но не сопоставленные, — сопоставить. Применятся они только после ручного возобновления.
+        // События, принятые до закрытия, но не сопоставленные, — сопоставить. Применятся они только после ручного возобновления,
+        // а триггеры по ним сами не сработают.
         SignalRouter();
         _logger.LogInformation("Движок запущен: {Workers} исполнителей. {Report}", _options.MaxParallelProcesses, report);
         return report;
@@ -134,27 +137,39 @@ public sealed partial class ProcessEngine : IAsyncDisposable
     {
         EnsureRunning();
         var prepared = await PrepareStartAsync(scenarioId, inputs, cancellationToken);
-        var now = _time.GetUtcNow();
-        var (process, token) = NewProcess(prepared, now, parentId: null, depth: 0, originKey);
-
+        ProcessRecord process;
+        bool created;
         await using (var write = await _store.BeginWriteAsync(cancellationToken))
         {
-            if (originKey is not null && await write.GetProcessByOriginAsync(originKey) is { } existing)
-            {
-                return existing.Id;
-            }
-
-            await write.InsertProcessAsync(process);
-            await write.UpsertTokenAsync(token);
-            await write.AddJournalAsync(Journal(process.Id, JournalLevel.Info,
-                $"Процесс запущен{(origin is null ? "" : $" ({origin})")}: сценарий «{prepared.Scenario.Name}», " +
-                $"версия {prepared.Scenario.Version}."));
+            (process, created) = await InsertStartedProcessAsync(write, prepared, originKey, origin);
             await write.CommitAsync();
         }
 
-        Notify(process.Id);
-        Enqueue(process.Id);
+        if (created)
+        {
+            Notify(process.Id);
+            Enqueue(process.Id);
+        }
+
         return process.Id;
+    }
+
+    /// <summary>Записать новый процесс в транзакции. Если процесс с таким ключом происхождения уже есть — вернуть его.</summary>
+    private async Task<(ProcessRecord Process, bool Created)> InsertStartedProcessAsync(IStoreWrite write, PreparedStart prepared,
+        string? originKey, string? origin)
+    {
+        if (originKey is not null && await write.GetProcessByOriginAsync(originKey) is { } existing)
+        {
+            return (existing, false);
+        }
+
+        var (process, token) = NewProcess(prepared, _time.GetUtcNow(), parentId: null, depth: 0, originKey);
+        await write.InsertProcessAsync(process);
+        await write.UpsertTokenAsync(token);
+        await write.AddJournalAsync(Journal(process.Id, JournalLevel.Info,
+            $"Процесс запущен{(origin is null ? "" : $" ({origin})")}: сценарий «{prepared.Scenario.Name}», " +
+            $"версия {prepared.Scenario.Version}."));
+        return (process, true);
     }
 
     /// <summary>Загрузить и проверить сценарий, собрать начальные переменные.</summary>
@@ -364,6 +379,13 @@ public sealed partial class ProcessEngine : IAsyncDisposable
                 actions.Add(ProcessAction.Continue);
                 break;
             default:
+                // Сбой платформы во время ожидания: само ожидание (событие, ресурс, срок) записано целиком —
+                // его можно просто продолжить, не начиная шаг заново.
+                if (tokens.Any(t => t is { State: TokenState.Waiting, WaitKind: WaitKind.Event or WaitKind.Resource or WaitKind.Timer }))
+                {
+                    actions.Add(ProcessAction.Continue);
+                }
+
                 actions.Add(ProcessAction.Retry);
                 break;
         }

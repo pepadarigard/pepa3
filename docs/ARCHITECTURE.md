@@ -29,6 +29,7 @@ Windows-сервере без включённого ПК пользовател
 | `Pepa.Engine` | движок, жизненный цикл процессов, восстановление, логические блоки, контракты хранилища, `ScenarioService` | Core |
 | `Pepa.Storage.Sqlite` | хранилище: схема, миграции, транзакции | Engine, Microsoft.Data.Sqlite |
 | `Pepa.Adapters.FileSystem` | файловые действия, рабочая папка | Core |
+| `Pepa.Adapters.Browser` | браузер через Playwright (Edge/Chrome), профили AdsPower через Local API и CDP | Core, FileSystem, Microsoft.Playwright |
 | `Pepa.Host` | композиция, HTTP API, SSE, настройки, примеры, блокировка экземпляра, журнал | всё выше, ASP.NET Core |
 | `Pepa.Server` | консольный запуск | Host |
 | `Pepa.Desktop` | WPF + WebView2 | Host |
@@ -42,11 +43,11 @@ Windows-сервере без включённого ПК пользовател
 | Scenario Model | `Pepa.Core/Model`, `Pepa.Core/Validation` | есть |
 | Execution Engine | `Pepa.Engine/ProcessEngine*.cs` | есть |
 | Process Manager | `Pepa.Engine` (процессы, решения пользователя) | есть |
-| Event System | — | этап 2 (маркер и `WaitKind` уже рассчитаны на ожидание события) |
-| Scheduler and Queues | `Pepa.Engine` (таймер ожиданий, очередь исполнителей) | частично; расписания — этап 2 |
-| Resource Manager | — | этап 2 |
+| Event System | `Pepa.Engine/ProcessEngine.Events.cs`, блоки событий | есть |
+| Scheduler and Queues | `Pepa.Engine` (таймер ожиданий, очередь исполнителей, расписания `ProcessEngine.Triggers.cs`) | есть |
+| Resource Manager | `Pepa.Engine/ProcessEngine.Platform.cs` (ресурсы, очередь, взаимные блокировки) | есть |
 | Persistence Layer | `Pepa.Storage.Sqlite` | есть |
-| Integration Adapters | `Pepa.Adapters.*` | файлы — есть |
+| Integration Adapters | `Pepa.Adapters.*` | файлы, браузер, AdsPower — есть; Telegram, Windows — этап 4 |
 | Permission System | рабочая папка (`Workspace`), запрет системных папок | начато |
 | Observability | шаги, журнал процесса, журнал платформы `logs/` | есть |
 | AI Provider Layer | — | этап 5 |
@@ -175,10 +176,21 @@ Windows-сервере без включённого ПК пользовател
 
 `POST /api/events` — способ передать событие из своей программы на этом компьютере (с тем же токеном).
 
+## Браузер и AdsPower
+
+`BrowserSessions` хранит открытые браузеры процессов (один экземпляр Playwright на приложение, у процесса — сессии
+по имени, обычно `main`). Список сессий записывается в `browser-sessions.json` в папке данных: после перезапуска
+Pepa к ещё открытому профилю AdsPower можно подключиться снова. `AdsPowerClient` — Local API (v2, запасной v1,
+ключ `Authorization: Bearer`, запросы по одному с паузой). Блоки «Открыть браузер» и «Открыть профиль AdsPower»
+объявляют нужный ресурс (`INodeExecutor.RequiredResource`): движок занимает его до действия — сразу или в очереди —
+и выполняет блок снова, уже с ресурсом. Ресурс освобождается блоком «Закрыть браузер» (`Success.ReleaseResources`)
+или при завершении процесса; по событию `ProcessFinished` модуль закрывает браузеры процесса.
+
 ## Как добавить новый блок
 
 1. Реализовать `INodeExecutor` с описанием `NodeTypeDescriptor`: тип, категория, поля (вид поля определяет редактор
-   в конструкторе и способ вычисления значения), выходы, `effect`.
+   в конструкторе и способ вычисления значения), выходы, `effect`. Если блоку нужен монопольный ресурс —
+   `RequiredResource`; если действие может длиться дольше общего тайм-аута — `ExpectedDuration`.
 2. Для внешних действий — `PrepareAsync` (снимок «до») и `VerifyAsync` (проверка без повтора), если это возможно.
    Ошибки параметров — `NodeInputException` (действие заведомо не выполнялось).
 3. Зарегистрировать в `NodeRegistry` (для адаптера — метод-расширение `Register…Nodes`).

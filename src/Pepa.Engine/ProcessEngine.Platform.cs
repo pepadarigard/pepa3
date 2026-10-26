@@ -23,10 +23,17 @@ public sealed partial class ProcessEngine
         public HashSet<string> Enqueue { get; } = new(StringComparer.Ordinal);
         public HashSet<string> Notify { get; } = new(StringComparer.Ordinal);
         public List<string> CancelChildren { get; } = [];
-        public List<(string Source, DateTimeOffset Since)> Reclaim { get; } = [];
+        public List<ReclaimRequest> Reclaim { get; } = [];
+
+        /// <summary>События, вернувшиеся на сопоставление (только с подписками, без триггеров).</summary>
+        public HashSet<long> Rematch { get; } = [];
         public bool RouteEvents { get; set; }
     }
 
+    /// <summary>
+    /// Последствия уже подтверждённой транзакции. Ошибка здесь не должна делать процесс «сломанным»:
+    /// его состояние уже записано, поэтому ошибки только записываются в журнал приложения.
+    /// </summary>
     private async Task ApplyEffectsAsync(CommitEffects effects)
     {
         foreach (var id in effects.Notify)
@@ -39,12 +46,24 @@ public sealed partial class ProcessEngine
             Enqueue(id);
         }
 
-        foreach (var (source, since) in effects.Reclaim)
+        try
         {
-            await ReclaimUnmatchedAsync(source, since);
+            foreach (var request in effects.Reclaim)
+            {
+                await ReclaimUnmatchedAsync(request);
+            }
+
+            if (effects.Rematch.Count > 0)
+            {
+                await RematchEventsAsync(effects.Rematch);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex, "Не удалось повторно сопоставить события (они остались необработанными и видны в списке событий).");
         }
 
-        if (effects.RouteEvents || effects.Reclaim.Count > 0)
+        if (effects.RouteEvents)
         {
             SignalRouter();
         }
@@ -120,7 +139,8 @@ public sealed partial class ProcessEngine
                 {
                     return NodeResult.Fail(
                         $"Взаимная блокировка: ресурс «{key}» занят процессом #{resource.HolderProcessId[^6..]}, " +
-                        "который сам ждёт ресурс этого процесса. Освободите ресурс или измените порядок.", retryable: false);
+                        "который сам ждёт этот процесс (его ресурс или завершение вызванного сценария). " +
+                        "Освободите ресурс до вызова или измените порядок.", retryable: false);
                 }
 
                 if (resource is null)
@@ -157,6 +177,11 @@ public sealed partial class ProcessEngine
                 if (string.IsNullOrWhiteSpace(input.Source))
                 {
                     return NodeResult.Fail("У события не указан источник.", retryable: false);
+                }
+
+                if (IsPlatformSource(input.Source))
+                {
+                    return NodeResult.Fail($"Источник «{EventSources.Platform}» служебный — его события создаёт только сама Pepa.", retryable: false);
                 }
 
                 var id = await write.TryInsertEventAsync(NewEventRecord(input, now));
@@ -199,9 +224,12 @@ public sealed partial class ProcessEngine
         }
     }
 
+    /// <summary>Источники сравниваются без учёта регистра: храним их в нижнем регистре.</summary>
+    internal static string NormalizeSource(string source) => source.Trim().ToLowerInvariant();
+
     internal static EventRecord NewEventRecord(EventInput input, DateTimeOffset now) => new()
     {
-        Source = input.Source.Trim(),
+        Source = NormalizeSource(input.Source),
         Type = input.Type?.Trim() ?? "",
         ExternalId = string.IsNullOrWhiteSpace(input.ExternalId) ? null : input.ExternalId.Trim(),
         CorrelationKey = string.IsNullOrEmpty(input.CorrelationKey) ? null : input.CorrelationKey,
@@ -307,13 +335,31 @@ public sealed partial class ProcessEngine
             }
 
             return await ApplyResultAsync(process, graph, token, node, descriptor, step, result, null,
-                extraWrites: async (write, _) => await write.UpdateEventAsync(record with
+                extraWrites: async (write, _, final, effects) =>
                 {
-                    State = EventState.Delivered,
-                    ProcessId = process.Id,
-                    SubscriptionId = subscription.Id,
-                    HandledAt = now,
-                }));
+                    if (final is NodeResult.Success)
+                    {
+                        await write.TryUpdateEventAsync(record with
+                        {
+                            State = EventState.Delivered,
+                            ProcessId = process.Id,
+                            SubscriptionId = subscription.Id,
+                            HandledAt = now,
+                        }, EventState.Matched);
+                    }
+                    else if (await write.TryUpdateEventAsync(record with
+                             {
+                                 State = EventState.Unmatched,
+                                 ProcessId = null,
+                                 SubscriptionId = null,
+                                 Note = $"Процесс #{process.Id[^6..]} не смог принять событие: {(final as NodeResult.Failure)?.Error}",
+                                 HandledAt = now,
+                             }, EventState.Matched))
+                    {
+                        // Событие не потеряно: его можно отдать другому ожидающему процессу.
+                        effects.Rematch.Add(record.Id);
+                    }
+                });
         }
 
         if (subscription.State == SubscriptionState.Active && token.WakeAt is { } wakeAt && wakeAt <= now)
@@ -412,27 +458,44 @@ public sealed partial class ProcessEngine
         return next?.ProcessId;
     }
 
-    /// <summary>Ждёт ли держатель (по цепочке) ресурс, занятый этим процессом.</summary>
+    /// <summary>
+    /// Ждёт ли держатель — по цепочке «ждёт ресурс у…» и «ждёт завершения вызванного сценария…» — этот процесс.
+    /// </summary>
     private static async Task<bool> WouldDeadlockAsync(IStoreWrite write, string processId, string holderId)
     {
         var waiters = await write.GetAllWaitersAsync();
         var resources = (await write.GetAllResourcesAsync()).ToDictionary(r => r.Key, StringComparer.Ordinal);
         var visited = new HashSet<string>(StringComparer.Ordinal);
-        var current = holderId;
-        while (visited.Add(current))
+        var pending = new Stack<string>();
+        pending.Push(holderId);
+        while (pending.Count > 0)
         {
+            var current = pending.Pop();
             if (current == processId)
             {
                 return true;
             }
 
-            var waiting = waiters.FirstOrDefault(w => w.ProcessId == current);
-            if (waiting is null || !resources.TryGetValue(waiting.ResourceKey, out var resource) || resource.HolderProcessId is null)
+            if (!visited.Add(current))
             {
-                return false;
+                continue;
             }
 
-            current = resource.HolderProcessId;
+            foreach (var waiting in waiters.Where(w => w.ProcessId == current))
+            {
+                if (resources.TryGetValue(waiting.ResourceKey, out var resource) && resource.HolderProcessId is { } next)
+                {
+                    pending.Push(next);
+                }
+            }
+
+            foreach (var subscription in await write.GetSubscriptionsAsync(current))
+            {
+                if (subscription is { Purpose: SubscriptionPurpose.ChildProcess, State: SubscriptionState.Active, CorrelationKey: { } child })
+                {
+                    pending.Push(child);
+                }
+            }
         }
 
         return false;
@@ -502,21 +565,7 @@ public sealed partial class ProcessEngine
                 await write.TrySetSubscriptionStateAsync(subscription.Id, SubscriptionState.Active, SubscriptionState.Cancelled, null);
             }
 
-            // Назначенное, но не применённое событие возвращается на сопоставление — его может ждать другой процесс.
-            foreach (var record in await write.GetEventsForSubscriptionAsync(subscription.Id))
-            {
-                if (record.State == EventState.Matched)
-                {
-                    await write.UpdateEventAsync(record with
-                    {
-                        State = EventState.Received,
-                        ProcessId = null,
-                        SubscriptionId = null,
-                        Note = $"Процесс #{process.Id[^6..]} завершился, не применив событие.",
-                    });
-                    effects.RouteEvents = true;
-                }
-            }
+            await ReturnMatchedEventsAsync(write, subscription.Id, $"Процесс #{process.Id[^6..]} завершился, не применив событие.", effects);
         }
 
         if (process.ParentProcessId is not null)
@@ -544,6 +593,55 @@ public sealed partial class ProcessEngine
         }
 
         return journal;
+    }
+
+    /// <summary>
+    /// Назначенное, но не применённое событие возвращается на сопоставление — его может ждать другой процесс.
+    /// Запуск по триггерам для него не повторяется: оно уже однажды было сопоставлено.
+    /// </summary>
+    private async Task ReturnMatchedEventsAsync(IStoreWrite write, long subscriptionId, string note, CommitEffects effects)
+    {
+        foreach (var record in await write.GetEventsForSubscriptionAsync(subscriptionId))
+        {
+            if (record.State == EventState.Matched && await write.TryUpdateEventAsync(record with
+                {
+                    State = EventState.Unmatched,
+                    ProcessId = null,
+                    SubscriptionId = null,
+                    Note = note,
+                    HandledAt = _time.GetUtcNow(),
+                }, EventState.Matched))
+            {
+                effects.Rematch.Add(record.Id);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Шаг, который ждал событие, ресурс или вызванный сценарий, перезапускается или пропускается по решению пользователя:
+    /// прежнее ожидание снимается, назначенное ему событие возвращается на сопоставление, место в очереди освобождается.
+    /// </summary>
+    private async Task ReleaseTokenWaitAsync(IStoreWrite write, string processId, TokenRecord token, CommitEffects effects)
+    {
+        switch (token.WaitKind)
+        {
+            case WaitKind.Event when long.TryParse(token.WaitRef, NumberStyles.Integer, CultureInfo.InvariantCulture, out var subscriptionId):
+                if (await write.GetSubscriptionAsync(subscriptionId) is { } subscription)
+                {
+                    await write.TrySetSubscriptionStateAsync(subscription.Id, subscription.State, SubscriptionState.Cancelled, null);
+                    await ReturnMatchedEventsAsync(write, subscription.Id,
+                        $"Процесс #{processId[^6..]} перешёл к другому шагу, не применив событие.", effects);
+                    if (subscription is { Purpose: SubscriptionPurpose.ChildProcess, State: SubscriptionState.Active, CorrelationKey: { } childId })
+                    {
+                        effects.CancelChildren.Add(childId);
+                    }
+                }
+
+                break;
+            case WaitKind.Resource when token.WaitRef is { } key:
+                await write.RemoveWaiterAsync(key, processId);
+                break;
+        }
     }
 
     // ───────────────────────────── Дочерние процессы ─────────────────────────────

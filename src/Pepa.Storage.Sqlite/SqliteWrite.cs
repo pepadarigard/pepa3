@@ -188,16 +188,20 @@ internal sealed class SqliteWrite(SqliteConnection connection, SqliteTransaction
             c.Parameters.AddWithValue("$e", externalId);
         }, ReadEvent)).FirstOrDefault();
 
-    public Task UpdateEventAsync(EventRecord record) =>
-        RunAsync("""
-                 UPDATE events SET state = $state, process_id = $process_id, subscription_id = $subscription_id,
-                     candidates = $candidates, started_processes = $started_processes, note = $note, handled_at = $handled_at
-                 WHERE id = $id;
-                 """, c =>
+    public async Task<bool> TryUpdateEventAsync(EventRecord record, EventState expected) =>
+        await RunAsync("""
+                       UPDATE events SET state = $state, process_id = $process_id, subscription_id = $subscription_id,
+                           candidates = $candidates, started_processes = $started_processes, note = $note, handled_at = $handled_at
+                       WHERE id = $id AND state = $expected;
+                       """, c =>
         {
             BindEvent(c, record);
             c.Parameters.AddWithValue("$id", record.Id);
-        });
+            c.Parameters.AddWithValue("$expected", expected.ToString());
+        }) > 0;
+
+    public async Task<EventRecord?> GetEventAsync(long id) =>
+        (await Query("SELECT * FROM events WHERE id = $id;", c => c.Parameters.AddWithValue("$id", id), ReadEvent)).FirstOrDefault();
 
     public Task<IReadOnlyList<EventRecord>> GetEventsForSubscriptionAsync(long subscriptionId) =>
         Query("SELECT * FROM events WHERE subscription_id = $s ORDER BY id;",
@@ -347,6 +351,9 @@ internal sealed class SqliteWrite(SqliteConnection connection, SqliteTransaction
             c.Parameters.AddWithValue("$created_at", Date(trigger.CreatedAt));
             c.Parameters.AddWithValue("$updated_at", Date(trigger.UpdatedAt));
         });
+
+    public async Task<TriggerRecord?> GetTriggerAsync(string id) =>
+        (await Query("SELECT * FROM triggers WHERE id = $id;", c => c.Parameters.AddWithValue("$id", id), ReadTrigger)).FirstOrDefault();
 
     public async Task<bool> DeleteTriggerAsync(string id) =>
         await RunAsync("DELETE FROM triggers WHERE id = $id;", c => c.Parameters.AddWithValue("$id", id)) > 0;

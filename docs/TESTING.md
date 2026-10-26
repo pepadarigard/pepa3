@@ -28,6 +28,7 @@
 
 | Категория | Тесты |
 |---|---|
+| ресурс профиля браузера/AdsPower | `BlockResourceTests.*`, `AdsPowerTests.Second_process_with_same_profile_waits_for_the_first` |
 | последовательные шаги | `ExecutionTests.Sequential_steps_run_in_order_once_each` |
 | условия, циклы, переменные | `Condition_routes_by_variable`, `Loop_with_counter_runs_body_expected_number_of_times`, `Action_output_is_saved_to_variable`, `Variable_type_mismatch_stops_process_with_clear_reason`, `Inputs_are_validated_against_declared_variables` |
 | тайм-ауты и ожидания | `WaitAndConcurrencyTests.Wait_completes_only_after_its_time`, `Waiting_process_does_not_occupy_a_worker`, `Action_timeout_gives_unknown_result_and_checks_external_system`, `Next_time_of_day_is_today_or_tomorrow` |
@@ -50,6 +51,17 @@
 неизменность запущенного процесса при правке сценария, защита рабочей папки (`..`, абсолютные пути, ссылки,
 имена Windows), проверка результата каждого файлового действия, безопасность API (токен, Host), блокировка
 второго экземпляра, сохранность выбранной рабочей папки между запусками.
+
+Браузер и AdsPower (`Pepa.Adapters.Browser.Tests`) проверяются на настоящем Chromium и маленьком тестовом сайте:
+открыть, ввести, нажать с проверкой, прочитать, снимок, закрыть; отсутствующий и неоднозначный элемент не
+нажимается; потерянный после перезапуска браузер сообщается. AdsPower — на имитации Local API, которая, как
+настоящий AdsPower, запускает браузер с портом отладки: открытие и закрытие профиля, ключ API, запасной v1,
+пауза между запросами, второй процесс ждёт профиль, переподключение после перезапуска без повторного открытия,
+закрытый пользователем профиль. Браузер для тестов: `PEPA_TEST_BROWSER_PATH` или `PEPA_TEST_BROWSER_CHANNEL`
+(в CI — Edge на Windows и Chrome на Linux); без браузера эти тесты пропускаются.
+
+`ReviewRegressionTests` — гонки, найденные ревью этапа 2 и воспроизведённые детерминированно (удаление расписания
+во время запуска, событие до перезапуска, назначение события во время возврата, сбой во время ожидания и т.д.).
 
 Проверка самих тестов: намеренная поломка восстановления (не помечать прерванные шаги «неизвестно») и обработки
 неизвестного итога (считать его обычной ошибкой) роняет соответствующие тесты. Так же проверены тесты этапа 2:

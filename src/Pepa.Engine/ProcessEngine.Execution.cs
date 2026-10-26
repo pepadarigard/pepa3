@@ -364,7 +364,7 @@ public sealed partial class ProcessEngine
     private async Task<bool> ApplyResultAsync(ProcessRecord process, ScenarioGraph graph, TokenRecord token,
         NodeDefinition node, NodeTypeDescriptor descriptor, StepRecord step, NodeResult result, string? resolution,
         StepState successState = StepState.Succeeded, Func<IStoreWrite, Task<NodeResult?>>? decide = null,
-        Func<IStoreWrite, long, Task>? extraWrites = null)
+        Func<IStoreWrite, long, NodeResult, CommitEffects, Task>? extraWrites = null)
     {
         var effects = new CommitEffects();
         var committed = await CommitResultAsync(process, graph, token, node, descriptor, step, result, resolution, successState,
@@ -382,10 +382,9 @@ public sealed partial class ProcessEngine
 
     private async Task<ProcessRecord?> CommitResultAsync(ProcessRecord process, ScenarioGraph graph, TokenRecord token,
         NodeDefinition node, NodeTypeDescriptor descriptor, StepRecord step, NodeResult result, string? resolution,
-        StepState successState, Func<IStoreWrite, Task<NodeResult?>>? decide, Func<IStoreWrite, long, Task>? extraWrites,
+        StepState successState, Func<IStoreWrite, Task<NodeResult?>>? decide, Func<IStoreWrite, long, NodeResult, CommitEffects, Task>? extraWrites,
         CommitEffects effects)
     {
-        var now = _time.GetUtcNow();
         var label = Label(node, descriptor);
 
         // Подготовка вне транзакции: дочернему процессу нужен проверенный сценарий.
@@ -400,6 +399,9 @@ public sealed partial class ProcessEngine
         }
 
         await using var write = await _store.BeginWriteAsync();
+
+        // Время — после получения права записи: подписка и событие, записанные позже, не должны получить более раннее время.
+        var now = _time.GetUtcNow();
         if (decide is not null)
         {
             var decided = await decide(write);
@@ -492,7 +494,7 @@ public sealed partial class ProcessEngine
 
         if (extraWrites is not null)
         {
-            await extraWrites(write, stepId);
+            await extraWrites(write, stepId, result, effects);
         }
 
         // Дочерний процесс создаётся в той же транзакции: он начнёт работу только после её подтверждения.
@@ -589,7 +591,7 @@ public sealed partial class ProcessEngine
                     TokenId = t.Id,
                     StepId = stepId,
                     NodeId = node.Id,
-                    Source = spec.Source,
+                    Source = NormalizeSource(spec.Source),
                     EventType = string.IsNullOrWhiteSpace(spec.EventType) ? null : spec.EventType,
                     CorrelationKey = string.IsNullOrEmpty(spec.CorrelationKey) ? null : spec.CorrelationKey,
                     MatchExpression = string.IsNullOrWhiteSpace(spec.MatchExpression) ? null : spec.MatchExpression,
@@ -613,7 +615,10 @@ public sealed partial class ProcessEngine
                                                     (waitEvent.TimeoutAt is { } until ? $" до {FormatLocal(until)}." : ".")));
                 }
 
-                effects.Reclaim.Add((spec.Source, now - TimeSpan.FromSeconds(Math.Max(0, spec.LookbackSeconds))));
+                effects.Reclaim.Add(new ReclaimRequest(NormalizeSource(spec.Source),
+                    string.IsNullOrWhiteSpace(spec.EventType) ? null : spec.EventType,
+                    string.IsNullOrEmpty(spec.CorrelationKey) ? null : spec.CorrelationKey,
+                    now - TimeSpan.FromSeconds(Math.Max(0, spec.LookbackSeconds))));
                 break;
             }
 

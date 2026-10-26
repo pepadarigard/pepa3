@@ -19,6 +19,12 @@ public sealed record EngineOptions
     /// <summary>Как часто проверять наступление сроков ожидания.</summary>
     public TimeSpan TimerInterval { get; init; } = TimeSpan.FromSeconds(1);
 
+    /// <summary>
+    /// Запуск по расписанию, опоздавший больше чем на это время (например, компьютер спал), не выполняется,
+    /// а учитывается как пропущенный — как запуски, пропущенные при закрытом приложении.
+    /// </summary>
+    public TimeSpan ScheduleLateGrace { get; init; } = TimeSpan.FromMinutes(10);
+
     /// <summary>Сколько ждать завершения выполняющихся шагов при закрытии приложения.</summary>
     public TimeSpan ShutdownGracePeriod { get; init; } = TimeSpan.FromSeconds(15);
 }
