@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Блоки для окон Windows и мыши с клавиатурой. Сама работа с окнами — за IDesktop (реализация для Windows — отдельно). -->
+  <ItemGroup>
+    <ProjectReference Include="..\Pepa.Core\Pepa.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Pepa.Adapters.Desktop.Tests" />
+  </ItemGroup>
+</Project>

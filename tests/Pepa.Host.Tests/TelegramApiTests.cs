@@ -75,3 +75,22 @@ public sealed class TelegramApiTests
         Assert.False(File.Exists(Path.Combine(f.DataDirectory, "telegram", "account.json")));
     }
 }
+
+/// <summary>Блоки окон Windows в сервере без окна: описаны для конструктора, но честно недоступны.</summary>
+public sealed class DesktopApiTests
+{
+    [Fact]
+    public async Task Desktop_blocks_are_described_and_windows_list_explains_why_it_is_unavailable()
+    {
+        await using var f = await HostFixture.StartAsync(seedSamples: false);
+        var types = await f.GetAsync("/api/node-types");
+        Assert.Contains(types["categories"]!.AsArray(), c => c!["id"]!.GetValue<string>() == "desktop");
+        var click = types["nodeTypes"]!.AsArray().Single(t => t!["type"]!.GetValue<string>() == "desktop.click")!;
+        Assert.Contains("мышь и клавиатуру", click["resourceHint"]!.GetValue<string>());
+        Assert.Equal("desktop-windows", click["fields"]!.AsArray().Single(x => x!["name"]!.GetValue<string>() == "window")!["lookup"]!.GetValue<string>());
+
+        var (status, error) = await f.SendAsync(HttpMethod.Get, "/api/integrations/desktop/windows");
+        Assert.Equal(409, status);
+        Assert.Contains("Pepa.exe", error!["error"]!.GetValue<string>());
+    }
+}

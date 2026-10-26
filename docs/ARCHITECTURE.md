@@ -13,7 +13,7 @@
  │        │                                                                                    │
  │  Pepa.Core: модель сценария, описания блоков, проверка, выражения (Jint)                    │
  │        │                                                                                    │
- │  Адаптеры: FileSystem, Browser (Playwright + AdsPower), Telegram (дальше: UI Automation)    │
+ │  Адаптеры: FileSystem, Browser (Playwright + AdsPower), Telegram, Desktop (UI Automation) │
  └─────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -47,7 +47,7 @@ Windows-сервере без включённого ПК пользовател
 | Scheduler and Queues | `Pepa.Engine` (таймер ожиданий, очередь исполнителей, расписания `ProcessEngine.Triggers.cs`) | есть |
 | Resource Manager | `Pepa.Engine/ProcessEngine.Platform.cs` (ресурсы, очередь, взаимные блокировки) | есть |
 | Persistence Layer | `Pepa.Storage.Sqlite` | есть |
-| Integration Adapters | `Pepa.Adapters.*` | файлы, браузер, AdsPower, Telegram — есть; Windows — этап 4 |
+| Integration Adapters | `Pepa.Adapters.*` | файлы, браузер, AdsPower, Telegram, окна Windows (`Desktop` + `Desktop.Windows`) |
 | Permission System | рабочая папка (`Workspace`), запрет системных папок | начато |
 | Observability | шаги, журнал процесса, журнал платформы `logs/` | есть |
 | AI Provider Layer | — | этап 5 |

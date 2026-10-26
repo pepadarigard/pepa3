@@ -229,4 +229,6 @@ public sealed record TelegramLoginRequest(int ApiId, string? ApiHash, string? Ph
 
 public sealed record TelegramCodeRequest(string? Value);
 
+public sealed record DesktopWindowDto(string Title, string Process);
+
 public sealed record AdsPowerProfileDto(string Id, string? Number, string Name, string? Group);

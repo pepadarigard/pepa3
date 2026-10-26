@@ -1,5 +1,6 @@
 import type {
   AdsPowerProfile,
+  DesktopWindow,
   TelegramStatus,
   Info,
   NodeTypes,
@@ -148,6 +149,8 @@ export const api = {
 
   checkAdsPower: () => request<{ ok: boolean; message: string }>("POST", "/integrations/adspower/check"),
   adsPowerProfiles: () => request<AdsPowerProfile[]>("GET", "/integrations/adspower/profiles"),
+
+  desktopWindows: () => request<DesktopWindow[]>("GET", "/integrations/desktop/windows"),
 
   telegram: () => request<TelegramStatus>("GET", "/integrations/telegram"),
   telegramLogin: (login: { apiId: number; apiHash: string | null; phone: string }) =>

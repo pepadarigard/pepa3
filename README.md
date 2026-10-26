@@ -8,9 +8,9 @@
 > история, восстановление после перезапуска, файловые действия, события (ожидание, отправка, сопоставление,
 > конфликты, защита от повторов), ресурсы с очередью, запуск по расписанию и по событию, вызов сценария из
 > сценария, перебор списков, браузер (Edge/Chrome), профили AdsPower и Telegram (свой аккаунт: отправить
-> сообщение и дождаться ответа). Windows-приложения — следующий шаг (см. [docs/ROADMAP.md](docs/ROADMAP.md)).
-> AdsPower и Telegram проверены на имитациях — на своём ПК начните с «Настройки → AdsPower → Проверить связь»
-> и «Интеграции → Telegram → Подключить».
+> сообщение и дождаться ответа), окна Windows (UI Automation), мышь и клавиатура (см. [docs/ROADMAP.md](docs/ROADMAP.md)).
+> AdsPower, Telegram и окна Windows проверены на имитациях — на своём ПК начните с «Настройки → AdsPower → Проверить
+> связь» и «Интеграции → Telegram → Подключить».
 
 ## Как запустить на Windows
 
@@ -72,6 +72,8 @@ src/Pepa.Storage.Sqlite     хранилище
 src/Pepa.Adapters.FileSystem  файловые действия
 src/Pepa.Adapters.Browser   браузер (Playwright) и AdsPower
 src/Pepa.Adapters.Telegram  Telegram (пользовательский аккаунт, MTProto)
+src/Pepa.Adapters.Desktop   блоки окон Windows, мыши и клавиатуры (за IDesktop)
+src/Pepa.Adapters.Desktop.Windows  UI Automation (FlaUI) и SendInput — только Windows
 src/Pepa.Host               локальный API, настройки, примеры
 src/Pepa.Server             запуск без окна
 src/Pepa.Desktop            окно Windows (WPF + WebView2)

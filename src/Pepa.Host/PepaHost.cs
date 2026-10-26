@@ -10,6 +10,7 @@ using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging;
 using Pepa.Adapters.Browser;
 using Pepa.Adapters.FileSystem;
+using Pepa.Adapters.Desktop;
 using Pepa.Adapters.Telegram;
 using Pepa.Core.Expressions;
 using Pepa.Core.Nodes;
@@ -99,8 +100,10 @@ public sealed class PepaHost : IAsyncDisposable
             ServerAddress = options.TelegramServerAddress,
             ConnectTimeout = options.TelegramConnectTimeout,
         };
+        var desktop = options.Desktop ?? new UnavailableDesktop(
+            "Окна Windows, мышь и клавиатура доступны только в приложении Pepa для Windows (Pepa.exe), а сейчас Pepa запущена без окна.");
         var registry = new NodeRegistry().RegisterLogicNodes().RegisterFlowNodes().RegisterFileNodes(workspace)
-            .RegisterBrowserNodes(browsers, workspace).RegisterTelegramNodes(telegram);
+            .RegisterBrowserNodes(browsers, workspace).RegisterTelegramNodes(telegram).RegisterDesktopNodes(desktop);
         var token = options.Token ?? Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
         var hostContext = new HostContext
         {
@@ -148,6 +151,7 @@ public sealed class PepaHost : IAsyncDisposable
         builder.Services.AddSingleton(adsPower);
         builder.Services.AddSingleton(browsers);
         builder.Services.AddSingleton(telegram);
+        builder.Services.AddSingleton(desktop);
         builder.Services.AddSingleton(sp => new ProcessEngine(
             sp.GetRequiredService<IPepaStore>(),
             sp.GetRequiredService<NodeRegistry>(),

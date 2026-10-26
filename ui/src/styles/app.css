@@ -42,6 +42,7 @@
   --cat-flow: #d97706;
   --cat-browser: #059669;
   --cat-telegram: #0284c7;
+  --cat-desktop: #db2777;
   --cat-other: #a855f7;
 
   --radius-sm: 6px;
@@ -89,6 +90,7 @@
     --cat-flow: #fbbf24;
     --cat-browser: #34d399;
     --cat-telegram: #38bdf8;
+    --cat-desktop: #f472b6;
     --cat-other: #c084fc;
     color-scheme: dark;
   }
@@ -131,6 +133,7 @@
   --cat-flow: #fbbf24;
   --cat-browser: #34d399;
   --cat-telegram: #38bdf8;
+  --cat-desktop: #f472b6;
   --cat-other: #c084fc;
   color-scheme: dark;
 }

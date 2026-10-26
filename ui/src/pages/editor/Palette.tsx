@@ -40,7 +40,7 @@ export function Palette({ categories, descriptors, onAdd }: { categories: NodeCa
         );
       })}
       <div className="small faint" style={{ padding: "0 4px" }}>
-        Блоки для окон Windows и для мыши с клавиатурой появятся здесь на следующих этапах.
+        Запись действий и помощник ИИ — на следующих этапах.
       </div>
     </aside>
   );

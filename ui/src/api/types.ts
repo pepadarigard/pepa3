@@ -404,6 +404,11 @@ export interface TelegramStatus {
   phone: string | null;
 }
 
+export interface DesktopWindow {
+  title: string;
+  process: string;
+}
+
 export interface AdsPowerProfile {
   id: string;
   number: string | null;

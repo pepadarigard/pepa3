@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Окна Windows через UI Automation (FlaUI), мышь и клавиатура через SendInput. Работает только в Windows. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <!-- Позволяет собирать не на Windows (работает только на Windows). -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <!-- LibraryImport (SendInput) генерирует небезопасный код маршалинга. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Pepa.Adapters.Desktop\Pepa.Adapters.Desktop.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="FlaUI.UIA3" />
+  </ItemGroup>
+</Project>

@@ -37,6 +37,12 @@ public sealed record PepaHostOptions
 
     /// <summary>Сколько ждать ответа Telegram при подключении и входе.</summary>
     public TimeSpan TelegramConnectTimeout { get; init; } = TimeSpan.FromSeconds(45);
+
+    /// <summary>
+    /// Окна Windows, мышь и клавиатура (реализация из оконного приложения). null — блоки окон есть в конструкторе,
+    /// но при запуске честно сообщают, что работают только в приложении Pepa для Windows.
+    /// </summary>
+    public Adapters.Desktop.IDesktop? Desktop { get; init; }
 }
 
 public static class HostPaths

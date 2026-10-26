@@ -501,6 +501,10 @@ public sealed class ReviewRegressionTests(ITestOutputHelper output)
             Config = new JsonObject { ["mode"] = "interval", ["everyMinutes"] = 60 }, CreatedAt = default, UpdatedAt = default,
         });
 
+        // Цикл расписаний должен успеть уснуть на своём таймере (TimerInterval = 3 ч): если перемотать время раньше,
+        // таймер заведётся уже после перемотки и не сработает. Под нагрузкой первый проход цикла бывает медленным.
+        await Task.Delay(500);
+
         // Компьютер «спал»: цикл расписаний проснулся через 3 часа.
         h.Time.Advance(TimeSpan.FromHours(3));
         await Until(async () => (await h.Store.GetTriggerAsync(trigger.Id))!.MissedRuns > 0);

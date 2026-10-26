@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { FieldDescriptor, Json, VariableDefinition } from "../../api/types";
 import { useScenarios } from "../../api/hooks";
 import { api } from "../../api/client";
-import type { AdsPowerProfile } from "../../api/types";
+import type { AdsPowerProfile, DesktopWindow } from "../../api/types";
 import { formatDuration } from "../../lib/format";
 
 interface Props {
@@ -114,6 +114,7 @@ export function FieldEditor({ field, value, onChange, variables, onCreateVariabl
       )}
       {control}
       {field.lookup === "adspower-profiles" && <AdsPowerPicker onPick={(id) => onChange(id)} />}
+      {field.lookup === "desktop-windows" && <WindowPicker onPick={(title) => onChange(title)} />}
       {error ? <span className="field-error">{error}</span> : field.help && <span className="field-help">{field.help}</span>}
     </div>
   );
@@ -222,6 +223,44 @@ function ScenarioSelect({ value, invalid, onChange }: { value: string; invalid: 
 }
 
 /** Выбор профиля из запущенного AdsPower (по кнопке: Local API ограничивает частоту запросов). */
+/** Выбор окна из открытых сейчас (только в приложении Pepa для Windows). */
+function WindowPicker({ onPick }: { onPick: (title: string) => void }) {
+  const [state, setState] = useState<{ loading: boolean; windows: DesktopWindow[] | null; error: string | null }>({
+    loading: false,
+    windows: null,
+    error: null,
+  });
+  const load = async () => {
+    setState({ loading: true, windows: null, error: null });
+    try {
+      setState({ loading: false, windows: await api.desktopWindows(), error: null });
+    } catch (e) {
+      setState({ loading: false, windows: null, error: e instanceof Error ? e.message : String(e) });
+    }
+  };
+  if (!state.windows) {
+    return (
+      <div className="stack" style={{ gap: 4 }}>
+        <button type="button" className="chip day" onClick={load} disabled={state.loading} style={{ alignSelf: "flex-start" }}>
+          {state.loading ? "Загрузка окон…" : "Выбрать из открытых окон"}
+        </button>
+        {state.error && <span className="field-error">{state.error}</span>}
+      </div>
+    );
+  }
+  if (state.windows.length === 0) return <span className="field-help">Открытых окон нет.</span>;
+  return (
+    <select className="select" defaultValue="" onChange={(e) => e.target.value && onPick(e.target.value)}>
+      <option value="">— выберите окно ({state.windows.length}) —</option>
+      {state.windows.map((w, i) => (
+        <option key={`${w.process}-${w.title}-${i}`} value={w.title}>
+          {w.title} · {w.process}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 function AdsPowerPicker({ onPick }: { onPick: (id: string) => void }) {
   const [state, setState] = useState<{ loading: boolean; profiles: AdsPowerProfile[] | null; error: string | null }>({
     loading: false,

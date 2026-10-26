@@ -100,6 +100,8 @@ export function categoryColor(category: string): string {
       return "var(--cat-browser)";
     case "telegram":
       return "var(--cat-telegram)";
+    case "desktop":
+      return "var(--cat-desktop)";
     default:
       return "var(--cat-other)";
   }

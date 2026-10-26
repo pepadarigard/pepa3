@@ -3,6 +3,8 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Windows;
 using System.Windows.Threading;
+using Pepa.Adapters.Desktop;
+using Pepa.Adapters.Desktop.Windows;
 using Pepa.Host;
 
 namespace Pepa.Desktop;
@@ -14,6 +16,7 @@ namespace Pepa.Desktop;
 public partial class App : Application
 {
     private PepaHost? _host;
+    private UiaDesktop? _desktop;
     private EventWaitHandle? _activation;
     private string _dataDirectory = HostPaths.DefaultDataDirectory();
 
@@ -25,12 +28,24 @@ public partial class App : Application
         _dataDirectory = ParseDataDirectory(e.Args) ?? _dataDirectory;
         var activationName = $"Local\\Pepa.Activate.{Hash(_dataDirectory)}";
 
+        IDesktop? desktop = null;
+        try
+        {
+            desktop = _desktop = new UiaDesktop();
+        }
+        catch (Exception ex)
+        {
+            // Без UI Automation блоки окон честно сообщат причину; остальная Pepa работает.
+            desktop = new UnavailableDesktop($"UI Automation Windows недоступна: {ex.Message}");
+        }
+
         try
         {
             _host = await PepaHost.StartAsync(new PepaHostOptions
             {
                 DataDirectory = _dataDirectory,
                 IsDesktop = true,
+                Desktop = desktop,
             });
         }
         catch (InstanceAlreadyRunningException)
@@ -69,6 +84,7 @@ public partial class App : Application
     protected override void OnExit(ExitEventArgs e)
     {
         _activation?.Dispose();
+        _desktop?.Dispose();
         base.OnExit(e);
     }
 

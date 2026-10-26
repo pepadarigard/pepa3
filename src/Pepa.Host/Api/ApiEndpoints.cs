@@ -121,6 +121,26 @@ internal static class ApiEndpoints
             }
         });
 
+        api.MapGet("/integrations/desktop/windows", async (Adapters.Desktop.IDesktop desktop, CancellationToken ct) =>
+        {
+            if (desktop.UnavailableReason is { } reason)
+            {
+                return Results.Json(new ErrorDto(reason), Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status409Conflict);
+            }
+
+            try
+            {
+                var windows = await desktop.ListWindowsAsync(ct);
+                return Results.Ok(windows.OrderBy(w => w.ProcessName, StringComparer.OrdinalIgnoreCase).ThenBy(w => w.Title)
+                    .Select(w => new DesktopWindowDto(w.Title, w.ProcessName)).ToList());
+            }
+            catch (Adapters.Desktop.DesktopException ex)
+            {
+                return Results.Json(new ErrorDto($"Windows не дал список окон: {ex.Message}"), Core.Serialization.PepaJson.Options,
+                    statusCode: StatusCodes.Status502BadGateway);
+            }
+        });
+
         api.MapGet("/overview", async (IPepaStore store, ProcessMapper mapper, CancellationToken ct) =>
         {
             var active = await store.ListProcessesAsync(new ProcessQuery { Statuses = ActiveStatuses, Limit = 500 }, ct);
