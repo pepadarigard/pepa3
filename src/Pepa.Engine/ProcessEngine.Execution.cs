@@ -45,6 +45,8 @@ public sealed partial class ProcessEngine
     /// <returns>true — процесс не закончил работу и должен встать в очередь снова.</returns>
     private async Task<bool> RunSliceAsync(string processId, ProcessSlot slot, CancellationToken stop)
     {
+        string? lastToken = null;
+        var checkWaits = false;
         for (var i = 0; i < _options.StepsPerSlice; i++)
         {
             var process = await _store.GetProcessAsync(processId);
@@ -70,12 +72,16 @@ public sealed partial class ProcessEngine
 
             var tokens = await _store.GetTokensAsync(processId);
             var now = _time.GetUtcNow();
-            var token = tokens.FirstOrDefault(t => t.State == TokenState.Ready)
-                        ?? tokens.FirstOrDefault(t => t is { State: TokenState.Waiting, WaitKind: WaitKind.Timer or WaitKind.Retry }
-                                                      && t.WakeAt <= now);
-            if (token is null)
+            // Ветви — по очереди: следующая после той, что выполнялась шагом раньше, — занятая ветвь не задерживает другие.
+            var due = tokens.Where(t => t.State == TokenState.Ready ||
+                                        (t is { State: TokenState.Waiting, WaitKind: WaitKind.Timer or WaitKind.Retry } && t.WakeAt <= now))
+                .OrderBy(t => t.Id, StringComparer.Ordinal).ToList();
+            var token = due.FirstOrDefault(t => lastToken is not null && string.CompareOrdinal(t.Id, lastToken) > 0) ?? due.FirstOrDefault();
+            if (token is null || checkWaits)
             {
-                // Ожидание события или ресурса: проверить, не пришло ли то, чего ждём (или тайм-аут).
+                // Ожидание события или ресурса: проверить, не пришло ли то, чего ждём (или тайм-аут). Пока другие ветви
+                // работают — после каждого их шага, чтобы ответ или тайм-аут не ждали, пока ветвь освободится.
+                checkWaits = false;
                 var resolved = false;
                 foreach (var waiting in tokens.Where(t => t is { State: TokenState.Waiting, WaitKind: WaitKind.Event or WaitKind.Resource }))
                 {
@@ -121,6 +127,8 @@ public sealed partial class ProcessEngine
             }
 
             await ExecuteTokenAsync(process, Graph(process), token, slot);
+            lastToken = token.Id;
+            checkWaits = tokens.Count > 1;
         }
 
         return true;

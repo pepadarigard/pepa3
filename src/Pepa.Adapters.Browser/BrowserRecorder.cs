@@ -154,7 +154,27 @@ public sealed class BrowserRecorder(BrowserSessions sessions) : IAsyncDisposable
                 }
 
                 await Task.Delay(150, cancellationToken);
-                await Drained().WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
+                try
+                {
+                    await Drained().WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
+                }
+                catch (TimeoutException)
+                {
+                    // Страница не ответила на разбор последнего действия — запись всё равно остановить и браузер закрыть,
+                    // а не оставить его открытым с незаконченной записью.
+                    lock (_gate)
+                    {
+                        if (_actions.Count > 0)
+                        {
+                            _actions[^1] = _actions[^1] with
+                            {
+                                Note = string.Join("; ", new[] { _actions[^1].Note, "после этого шага действие могло не записаться — проверьте конец записи" }
+                                    .Where(n => !string.IsNullOrEmpty(n))),
+                            };
+                        }
+                    }
+                }
+
                 await sessions.CloseAsync(SessionOwner, SessionName, stopProfile: false, cancellationToken);
                 _session = null;
             }

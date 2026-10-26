@@ -46,8 +46,14 @@ public sealed class ScenarioAssistant
     /// <summary>Сколько ждать один ответ модели (она думает перед ответом).</summary>
     public TimeSpan RequestTimeout { get; init; } = TimeSpan.FromMinutes(5);
 
-    /// <summary>Повторы запроса при сбое связи или перегрузке сервиса (их делает SDK).</summary>
+    /// <summary>
+    /// Повторы запроса, когда сервис перегружен или вернул внутреннюю ошибку (ответа не было — ничего не потрачено). Тайм-аут
+    /// не повторяется: модель могла дописать ответ, и повтор оплачивался бы ещё раз.
+    /// </summary>
     public int MaxRetries { get; init; } = 2;
+
+    /// <summary>Пауза перед повтором (растёт: 1×, 3×, 9×…).</summary>
+    public TimeSpan RetryDelay { get; init; } = TimeSpan.FromSeconds(3);
 
     public async Task<AssistantDraft> DraftAsync(string apiKey, AssistantRequest request, CancellationToken cancellationToken)
     {
@@ -115,8 +121,8 @@ public sealed class ScenarioAssistant
         }
 
         return BaseUrl is { } url
-            ? new AnthropicClient { ApiKey = apiKey.Trim(), Timeout = RequestTimeout, MaxRetries = MaxRetries, BaseUrl = url }
-            : new AnthropicClient { ApiKey = apiKey.Trim(), Timeout = RequestTimeout, MaxRetries = MaxRetries };
+            ? new AnthropicClient { ApiKey = apiKey.Trim(), Timeout = RequestTimeout, MaxRetries = 0, BaseUrl = url }
+            : new AnthropicClient { ApiKey = apiKey.Trim(), Timeout = RequestTimeout, MaxRetries = 0 };
     }
 
     private async Task<string> AskAsync(AnthropicClient client, string message, Usage usage, CancellationToken cancellationToken)
@@ -139,13 +145,21 @@ public sealed class ScenarioAssistant
         };
 
         BetaMessage response;
-        try
+        for (var attempt = 0; ; attempt++)
         {
-            response = await client.Beta.Messages.Create(parameters, cancellationToken);
-        }
-        catch (Exception ex) when (Translate(ex) is { } error)
-        {
-            throw error;
+            try
+            {
+                response = await client.Beta.Messages.Create(parameters, cancellationToken);
+                break;
+            }
+            catch (Exception ex) when (ex is AnthropicRateLimitException or Anthropic5xxException && attempt < MaxRetries)
+            {
+                await Task.Delay(RetryDelay * Math.Pow(3, attempt), cancellationToken);
+            }
+            catch (Exception ex) when (Translate(ex) is { } error)
+            {
+                throw error;
+            }
         }
 
         usage.Add(response.Usage.InputTokens + (response.Usage.CacheCreationInputTokens ?? 0), response.Usage.OutputTokens,

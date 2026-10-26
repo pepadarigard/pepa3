@@ -216,17 +216,17 @@ public sealed partial class ProcessEngine
                                 ["processId"] = c.Process.Id,
                                 ["scenarioName"] = c.Process.ScenarioName,
                             }).ToArray()),
-                            Note = $"Событие одинаково подходит {top.Count} процессам. Выберите, кому его отдать.",
+                            Note = Waiters(top.Select(c => c.Process.Id).ToList()) + " Выберите, кому его отдать.",
                             HandledAt = _time.GetUtcNow(),
                         }, expected))
                     {
                         return record.State;
                     }
 
-                    foreach (var candidate in top)
+                    foreach (var processId in top.Select(c => c.Process.Id).Distinct())
                     {
-                        await write.AddJournalAsync(Journal(candidate.Process.Id, JournalLevel.Warning,
-                            $"Событие #{record.Id} «{record.Source}» подходит сразу нескольким процессам. " +
+                        await write.AddJournalAsync(Journal(processId, JournalLevel.Warning,
+                            $"Событие #{record.Id} «{record.Source}» подходит сразу нескольким ожиданиям. " +
                             "Оно не отдано никому — нужно решение на странице «Выполнение»."));
                     }
 
@@ -499,5 +499,16 @@ public sealed partial class ProcessEngine
             EventState.Conflict => "Событие снова подходит нескольким процессам — выберите вручную.",
             _ => "Подходящих процессов по-прежнему нет.",
         });
+    }
+
+    /// <summary>Кому подходит событие: разным процессам или нескольким ветвям одного процесса.</summary>
+    private static string Waiters(IReadOnlyList<string> processIds)
+    {
+        var processes = processIds.Distinct(StringComparer.Ordinal).Count();
+        return processes == 1
+            ? $"Событие одинаково подходит {processIds.Count} ожиданиям в параллельных ветвях одного процесса."
+            : processes == processIds.Count
+                ? $"Событие одинаково подходит {processes} процессам."
+                : $"Событие одинаково подходит {processIds.Count} ожиданиям в {processes} процессах.";
     }
 }

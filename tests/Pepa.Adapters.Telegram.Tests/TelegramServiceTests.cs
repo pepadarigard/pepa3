@@ -216,6 +216,30 @@ public sealed class TelegramServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Clock_correction_follows_when_the_computer_clock_is_set_right()
+    {
+        var events = new ConcurrentQueue<EventInput>();
+        var shift = TimeSpan.FromMinutes(10);
+        var service = new TelegramService(_data, e => { events.Enqueue(e); return Task.CompletedTask; })
+        {
+            ServerAddress = "127.0.0.1:1",
+            // Часы компьютера спешат на 10 минут, потом пользователь их поправляет.
+            WallClockForTests = () => DateTimeOffset.UtcNow + shift,
+            ServerClockForTests = () => Task.FromResult(DateTime.UtcNow),
+        };
+        var manager = await service.ConnectForTestsAsync(Account);
+        await InjectAsync(manager, 1, 400, "до").WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        shift = TimeSpan.Zero;
+        await InjectAsync(manager, 2, 401, "после").WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        var times = events.Select(e => e.OccurredAt!.Value - DateTimeOffset.UtcNow).ToArray();
+        Assert.InRange(times[0], TimeSpan.FromMinutes(9.8), TimeSpan.FromMinutes(10.1));
+        Assert.InRange(times[1], TimeSpan.FromSeconds(-15), TimeSpan.FromSeconds(5));
+        Assert.DoesNotContain("спешат", service.Status.Message ?? "");
+        await service.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
     public async Task Message_that_could_not_be_accepted_keeps_the_old_state_so_it_comes_again()
     {
         Directory.CreateDirectory(Path.Combine(_data, "telegram"));

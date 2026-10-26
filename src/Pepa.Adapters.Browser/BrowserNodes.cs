@@ -35,8 +35,9 @@ public static class BrowserNodes
 
     internal static readonly FieldDescriptor SessionField = new()
     {
-        Name = "session", Label = "Окно браузера", Kind = FieldKind.Text, Default = "main", Required = true,
-        Help = "Имя открытого браузера, с которым работает блок. Если браузер в процессе один — оставьте «main».",
+        Name = "session", Label = "Окно браузера", Kind = FieldKind.Text, Default = "main", Required = true, SharedState = "browser",
+        Help = "Имя открытого браузера, с которым работает блок. Если браузер в процессе один — оставьте «main». " +
+               "Параллельным ветвям, работающим с браузером, нужны разные окна.",
     };
 
     internal static FieldDescriptor SelectorField(string label = "Элемент", bool required = true) => new()

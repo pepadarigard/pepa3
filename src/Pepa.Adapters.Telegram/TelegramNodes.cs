@@ -166,10 +166,19 @@ public sealed class SendTelegramNode(ITelegramGateway telegram, IWorkspace works
         {
             return NodeResult.Fail(ex.Message, ex.Retryable);
         }
-        catch (TelegramAlreadySentException ex)
+        catch (TelegramAlreadySentException)
         {
-            // Проверка найдёт сообщение прошлой попытки в истории чата.
-            return new NodeResult.Unknown(ex.Message);
+            // Telegram узнал ключ прошлой попытки: сообщение уже отправлено, второго не будет. Это не «неизвестно» — найти его в
+            // истории, чтобы заполнить итог; не нашлось (текст с тех пор изменился) — всё равно отправлено, номер неизвестен.
+            if (await VerifyAsync(context, cancellationToken) is { Outcome: VerificationOutcome.Done } found)
+            {
+                return new NodeResult.Success(Ports.Out, found.VariableUpdates ?? new Dictionary<string, JsonNode?>(), found.Output,
+                    $"Сообщение уже было отправлено прошлой попыткой ({found.Message}) — второй раз не отправлено.", MessageLevel.Warning);
+            }
+
+            return new NodeResult.Success(Ports.Out, new Dictionary<string, JsonNode?>(), null,
+                "Сообщение уже было отправлено прошлой попыткой (Telegram узнал его) — второй раз не отправлено. В истории чата оно не нашлось " +
+                "(возможно, текст с тех пор изменился), поэтому номер сообщения неизвестен.", MessageLevel.Warning);
         }
 
         var output = Output(chat, sent.MessageId, sent.Date);

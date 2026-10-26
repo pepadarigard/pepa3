@@ -172,9 +172,11 @@ public sealed class PressTelegramButtonNode(ITelegramGateway telegram) : INodeEx
         {
             return NodeResult.Fail(ex.Message, ex.Retryable);
         }
-        catch (TelegramAlreadySentException ex)
+        catch (TelegramAlreadySentException)
         {
-            return new NodeResult.Unknown(ex.Message);
+            // Текст кнопки уже отправлен прошлой попыткой (Telegram узнал ключ) — второй раз не отправлен.
+            return new NodeResult.Success(Ports.Out, SaveTo(context, output), output,
+                $"Кнопка клавиатуры «{button.Text}» уже была нажата прошлой попыткой — второй раз не нажата.", MessageLevel.Warning);
         }
     }
 

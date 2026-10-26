@@ -105,6 +105,12 @@ public sealed record FieldDescriptor
 
     /// <summary>Откуда конструктор может предложить значения (например, «adspower-profiles» — профили AdsPower).</summary>
     public string? Lookup { get; init; }
+
+    /// <summary>
+    /// Поле выбирает общее состояние процесса (например, «browser» — открытое окно браузера): блоки разных параллельных
+    /// ветвей с одним значением этого поля работали бы с одним и тем же (одна вкладка) — проверка схемы это запрещает.
+    /// </summary>
+    public string? SharedState { get; init; }
 }
 
 /// <summary>Роль блока в структуре схемы (для проверки параллельных участков).</summary>

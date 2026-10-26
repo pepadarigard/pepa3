@@ -16,13 +16,14 @@ public sealed class ScenarioAssistantTests : IDisposable
 
     private static NodeRegistry Registry() => new NodeRegistry().RegisterLogicNodes().RegisterFlowNodes();
 
-    private ScenarioAssistant Assistant(int maxRepairs = 2)
+    private ScenarioAssistant Assistant(int maxRepairs = 2, int maxRetries = 0)
     {
         var registry = Registry();
         return new ScenarioAssistant(registry, new ScenarioValidator(registry, new JintExpressionEvaluator()), [Example()])
         {
             BaseUrl = _api.Url,
-            MaxRetries = 0,
+            MaxRetries = maxRetries,
+            RetryDelay = TimeSpan.FromMilliseconds(10),
             MaxRepairs = maxRepairs,
         };
     }
@@ -168,6 +169,20 @@ public sealed class ScenarioAssistantTests : IDisposable
     }
 
     [Fact]
+    public async Task Infinite_numbers_from_the_model_are_problems_not_a_crash()
+    {
+        var odd = Draft(
+            [Block("pause", "wait", ("amount", "Infinity"), ("unit", "seconds")), Block("done", "end")],
+            [Link("pause", "out", "done")],
+            [new JsonObject { ["name"] = "count", ["type"] = "number", ["description"] = "Сколько", ["isInput"] = false, ["default"] = "1e999" }]);
+        _api.ReplyDraft(odd);
+
+        var draft = await Assistant(maxRepairs: 0).DraftAsync("sk-ant-test", Ask(), TestContext.Current.CancellationToken);
+        Assert.Contains(draft.Problems, p => p.Contains("Infinity", StringComparison.Ordinal));
+        Assert.Null(Assert.Single(draft.Variables).Default);
+    }
+
+    [Fact]
     public async Task Existing_variables_are_not_declared_again_and_are_described_to_the_model()
     {
         _api.ReplyDraft(ValidDraft());
@@ -177,6 +192,22 @@ public sealed class ScenarioAssistantTests : IDisposable
         Assert.Empty(draft.Variables);
         Assert.Empty(draft.Problems);
         Assert.Contains("Число из формы", UserText(_api.Requests.Single().Body!));
+    }
+
+    [Fact]
+    public async Task Overloaded_service_is_asked_again_but_only_a_few_times()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        _api.ReplyError(529, "overloaded_error", "Overloaded");
+        _api.ReplyDraft(ValidDraft());
+        var draft = await Assistant(maxRetries: 1).DraftAsync("sk-ant-test", Ask(), ct);
+        Assert.Equal(2, _api.Requests.Count);
+        Assert.NotEmpty(draft.Nodes);
+
+        _api.ReplyError(529, "overloaded_error", "Overloaded");
+        _api.ReplyError(529, "overloaded_error", "Overloaded");
+        await Assert.ThrowsAsync<AssistantException>(() => Assistant(maxRetries: 1).DraftAsync("sk-ant-test", Ask(), ct));
+        Assert.Equal(4, _api.Requests.Count);
     }
 
     [Fact]

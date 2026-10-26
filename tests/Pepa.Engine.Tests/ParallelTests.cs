@@ -242,6 +242,27 @@ public sealed class ParallelTests
     }
 
     [Fact]
+    public async Task Busy_branch_does_not_hold_up_the_other()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        // Ветвь 1 — долгий цикл без ожиданий; ветвь 2 — один шаг. Ветвь 2 выполняется сразу, а не после всего цикла.
+        var id = await h.RunAsync(new ScenarioBuilder("Занятая ветвь")
+            .Variable("i", VariableType.Number, JsonValue.Create(0)).Variable("seen", VariableType.Any)
+            .Node("start", "start").Node("split", "parallel")
+            .Node("more", "condition", new { expression = "vars.i < 50" })
+            .Node("inc", "variable.set", new { variable = "i", value = "vars.i + 1" })
+            .Node("note", "variable.set", new { variable = "seen", value = "vars.i" })
+            .Node("join", "join").Node("end", "end")
+            .Edge("start", "split").Edge("split", "more", "b1").Edge("split", "note", "b2")
+            .Edge("more", "inc", Ports.True).Edge("inc", "more").Edge("more", "join", Ports.False)
+            .Edge("note", "join").Edge("join", "end")
+            .Build());
+        var done = await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Equal(50, done.Variables["i"]!.GetValue<double>());
+        Assert.True(done.Variables["seen"]!.GetValue<double>() <= 2, $"ветвь 2 выполнилась, когда i = {done.Variables["seen"]}");
+    }
+
+    [Fact]
     public async Task Nested_parallel_sections_join_in_order()
     {
         await using var h = await EngineHarness.CreateAsync();
@@ -304,5 +325,55 @@ public sealed class ParallelTests
             .Edge("start", "check").Edge("check", "split", Ports.True).Edge("check", "fail", Ports.False)
             .Edge("split", "a", "b1").Edge("split", "b", "b2").Edge("a", "join").Edge("a", "fail", Ports.Error).Edge("b", "join")
             .Edge("join", "end").Build()));
+
+        // Общий обработчик ошибок обеих ветвей, ведущий только к «Завершению», — тоже допустим.
+        Assert.Empty(Codes(new ScenarioBuilder("Общий обработчик")
+            .Node("start", "start").Node("split", "parallel")
+            .Node("a", "test.action", new { key = "a" }).Node("b", "test.action", new { key = "b" }).Node("join", "join")
+            .Node("note", "log", new { message = "ошибка в ветви" }).Node("end", "end").Node("fail", "end", new { outcome = "failure" })
+            .Edge("start", "split").Edge("split", "a", "b1").Edge("split", "b", "b2")
+            .Edge("a", "join").Edge("b", "join").Edge("a", "note", Ports.Error).Edge("b", "note", Ports.Error).Edge("note", "fail")
+            .Edge("join", "end").Build()));
+    }
+
+    /// <summary>Блок с «окном», как у браузера: одно окно — одно общее состояние процесса.</summary>
+    private sealed class WindowNode : Core.Nodes.INodeExecutor
+    {
+        public Core.Nodes.NodeTypeDescriptor Descriptor { get; } = new()
+        {
+            Type = "test.window",
+            Category = "test",
+            Title = "Шаг в окне",
+            Description = "Работает с окном браузера.",
+            Outputs = [new Core.Nodes.PortDescriptor(Ports.Out, "Далее")],
+            Fields =
+            [
+                new Core.Nodes.FieldDescriptor
+                {
+                    Name = "session", Label = "Окно браузера", Kind = Core.Nodes.FieldKind.Text, Default = "main", SharedState = "browser",
+                },
+            ],
+        };
+
+        public ValueTask<Core.Nodes.NodeResult> ExecuteAsync(Core.Nodes.NodeExecutionContext context, CancellationToken cancellationToken) =>
+            ValueTask.FromResult<Core.Nodes.NodeResult>(Core.Nodes.NodeResult.Ok());
+    }
+
+    [Fact]
+    public async Task Branches_may_not_work_in_the_same_browser_window()
+    {
+        await using var h = await EngineHarness.CreateAsync(extraNodes: r => r.Register(new WindowNode()));
+        Core.Validation.ValidationIssue[] Errors(object a, object b) => h.Engine.Validator.Validate(new ScenarioBuilder("Окна")
+                .Node("start", "start").Node("split", "parallel")
+                .Node("a", "test.window", a).Node("b", "test.window", b).Node("join", "join").Node("end", "end")
+                .Edge("start", "split").Edge("split", "a", "b1").Edge("split", "b", "b2").Edge("a", "join").Edge("b", "join").Edge("join", "end")
+                .Build()).Issues
+            .Where(i => i.Severity == Core.Validation.IssueSeverity.Error).ToArray();
+
+        var shared = Assert.Single(Errors(new { }, new { session = "main" }));
+        Assert.Equal("parallel.shared.state", shared.Code);
+        Assert.Contains("«main»", shared.Message);
+        Assert.Empty(Errors(new { session = "main" }, new { session = "второе" }));
+        Assert.Empty(Errors(new { session = "{{ vars.window }}" }, new { }));
     }
 }

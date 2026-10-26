@@ -234,7 +234,9 @@ internal sealed class DraftConverter(NodeRegistry registry, ScenarioValidator va
         switch (field.Kind)
         {
             case FieldKind.Number or FieldKind.Seconds:
-                if (!double.TryParse(value.Trim().Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out var number))
+                // «NaN», «Infinity», «1e999» — не числа для поля: их не записать в сценарий.
+                if (!double.TryParse(value.Trim().Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out var number) ||
+                    !double.IsFinite(number))
                 {
                     return null;
                 }
@@ -272,7 +274,11 @@ internal sealed class DraftConverter(NodeRegistry registry, ScenarioValidator va
 
         return type switch
         {
-            VariableType.Number when double.TryParse(text.Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out var n) => JsonValue.Create(n),
+            // Не число (или «бесконечность») — без значения по умолчанию, а не текст в числовой переменной.
+            VariableType.Number => double.TryParse(text.Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out var n) &&
+                                   double.IsFinite(n)
+                ? JsonValue.Create(n)
+                : null,
             VariableType.Boolean when bool.TryParse(text, out var b) => JsonValue.Create(b),
             VariableType.List or VariableType.Object => TryParseJson(text),
             _ => JsonValue.Create(text),

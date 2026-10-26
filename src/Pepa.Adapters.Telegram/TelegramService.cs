@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -418,6 +419,8 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
         var name = user is null ? "аккаунт" : $"{user}{(user.MainUsername is { Length: > 0 } un ? $" (@{un})" : "")}";
         SetStatus(TelegramState.Connected, name, Warning);
         Logger.LogInformation("Telegram подключён: {Account}.", name);
+        // Сверить часы сразу, а не в обработчике первого сообщения (там библиотека ждёт под своей блокировкой).
+        StartClockCheck(connection);
 
         // Чаты из списка диалогов — чтобы находить их по ключу user:/chat:/channel: без поиска по имени. Загрузка в фоне:
         // у большого аккаунта она долгая (и Telegram может попросить подождать), а подключение от неё не зависит.
@@ -1009,23 +1012,69 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
     /// Pepa была закрыта, успел ли ответ до тайм-аута). Если часы компьютера спешат или отстают, без поправки свежий ответ
     /// можно принять за старый — и наоборот.
     /// </summary>
-    private Task<TimeSpan> ClockOffsetAsync(Connection connection)
+    /// <summary>Для проверок: часы компьютера (их «переводят»), по умолчанию — настоящие.</summary>
+    internal Func<DateTimeOffset> WallClockForTests { get; init; } = () => DateTimeOffset.UtcNow;
+
+    private Task<ClockSample> StartClockCheck(Connection connection)
     {
         lock (connection)
         {
-            return connection.ClockOffset ??= MeasureClockOffsetAsync(connection);
+            return connection.Clock ??= MeasureClockOffsetAsync(connection);
         }
     }
 
-    private async Task<TimeSpan> MeasureClockOffsetAsync(Connection connection)
+    /// <summary>
+    /// Поправка часов для сообщения. Сверка ещё идёт — ждём недолго (обработчик держит библиотеку), иначе без поправки.
+    /// Если часы Windows перевели после сверки, поправка меняется ровно на величину скачка (видно по монотонному таймеру).
+    /// </summary>
+    private async Task<TimeSpan> ClockOffsetAsync(Connection connection)
+    {
+        var measuring = StartClockCheck(connection);
+        try
+        {
+            if (!measuring.IsCompleted && await Task.WhenAny(measuring, Task.Delay(TimeSpan.FromSeconds(3), connection.Life.Token)) != measuring)
+            {
+                return TimeSpan.Zero;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            return TimeSpan.Zero;
+        }
+
+        var sample = await measuring;
+        var jump = WallClockForTests() - sample.Wall - Stopwatch.GetElapsedTime(sample.Timestamp);
+        if (jump.Duration() < TimeSpan.FromSeconds(30))
+        {
+            return sample.Offset;
+        }
+
+        var adjusted = new ClockSample(sample.Offset + jump, WallClockForTests(), Stopwatch.GetTimestamp());
+        lock (connection)
+        {
+            connection.Clock = Task.FromResult(adjusted);
+        }
+
+        Logger.LogWarning("Часы компьютера перевели на {Seconds:0} с — поправка времени сообщений Telegram пересчитана.", jump.TotalSeconds);
+        ReportClockOffset(adjusted.Offset);
+        return adjusted.Offset;
+    }
+
+    private async Task<ClockSample> MeasureClockOffsetAsync(Connection connection)
+    {
+        var offset = await MeasureOffsetAsync(connection);
+        return new ClockSample(offset, WallClockForTests(), Stopwatch.GetTimestamp());
+    }
+
+    private async Task<TimeSpan> MeasureOffsetAsync(Connection connection)
     {
         try
         {
-            var before = DateTimeOffset.UtcNow;
+            var before = WallClockForTests();
             var serverTime = ServerClockForTests is { } clock
                 ? await clock()
                 : (await connection.Client.Updates_GetState().WaitAsync(TimeSpan.FromSeconds(15), connection.Life.Token)).date;
-            var after = DateTimeOffset.UtcNow;
+            var after = WallClockForTests();
             var server = new DateTimeOffset(DateTime.SpecifyKind(serverTime, DateTimeKind.Utc));
             var offset = before + (after - before) / 2 - server;
             if (after - before > TimeSpan.FromSeconds(5) || offset.Duration() < TimeSpan.FromSeconds(3))
@@ -1035,13 +1084,7 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
             }
 
             Logger.LogWarning("Часы компьютера отличаются от часов Telegram на {Seconds:0} с — время сообщений поправлено.", offset.TotalSeconds);
-            if (offset.Duration() > TimeSpan.FromMinutes(2))
-            {
-                _clockWarning = $"Часы компьютера {(offset > TimeSpan.Zero ? "спешат" : "отстают")} на {FormatOffset(offset)}. " +
-                                "Pepa учитывает это для сообщений Telegram, но лучше включить синхронизацию времени в Windows.";
-                SetStatus(Status.State, Status.Account, Warning);
-            }
-
+            ReportClockOffset(offset);
             return offset;
         }
         catch (Exception ex)
@@ -1051,6 +1094,18 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
             return TimeSpan.Zero;
         }
     }
+
+    private void ReportClockOffset(TimeSpan offset)
+    {
+        _clockWarning = offset.Duration() > TimeSpan.FromMinutes(2)
+            ? $"Часы компьютера {(offset > TimeSpan.Zero ? "спешат" : "отстают")} на {FormatOffset(offset)}. " +
+              "Pepa учитывает это для сообщений Telegram, но лучше включить синхронизацию времени в Windows."
+            : null;
+        SetStatus(Status.State, Status.Account, Warning);
+    }
+
+    /// <summary>Поправка и когда она измерена: по часам компьютера и по монотонному таймеру (<see cref="Stopwatch"/>).</summary>
+    private sealed record ClockSample(TimeSpan Offset, DateTimeOffset Wall, long Timestamp);
 
     private static string FormatOffset(TimeSpan offset)
     {
@@ -1858,10 +1913,10 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
         public volatile bool Tainted;
 
         /// <summary>
-        /// Насколько часы компьютера отличаются от часов Telegram (прибавить к времени Telegram). Измеряется один раз на
-        /// подключение, до первого принятого сообщения.
+        /// Насколько часы компьютера отличаются от часов Telegram (прибавить к времени Telegram). Измеряется сразу после
+        /// подключения; при переводе часов Windows пересчитывается.
         /// </summary>
-        public Task<TimeSpan>? ClockOffset;
+        public Task<ClockSample>? Clock;
 
         public void MarkDirty() => Interlocked.Exchange(ref _dirty, 1);
 

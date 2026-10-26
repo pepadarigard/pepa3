@@ -10,6 +10,7 @@ namespace Pepa.Core.Validation;
 /// </summary>
 internal sealed class ParallelCheck(
     IReadOnlyDictionary<string, NodeTypeDescriptor> descriptors,
+    IReadOnlyDictionary<string, NodeDefinition> nodes,
     IReadOnlyList<EdgeDefinition> edges,
     Func<string, string> name,
     Action<string, string, string?> error)
@@ -24,6 +25,9 @@ internal sealed class ParallelCheck(
     private readonly Dictionary<string, (string Join, HashSet<string> Region)?> _resolved = new(StringComparer.Ordinal);
 
     private readonly Dictionary<string, string> _joinOwner = new(StringComparer.Ordinal);
+
+    /// <summary>Блок, после которого — только путь к «Завершению» (без слияний и разделений): его могут делить ветви.</summary>
+    private readonly Dictionary<string, bool> _endsOnly = new(StringComparer.Ordinal);
 
     public void Run()
     {
@@ -136,7 +140,82 @@ internal sealed class ParallelCheck(
         }
 
         _joinOwner[join] = split;
+        CheckSharedState(split, branchOf);
         return _resolved[split] = (join, region);
+    }
+
+    /// <summary>Блоки разных ветвей не должны работать с одним общим состоянием (одним окном браузера).</summary>
+    private void CheckSharedState(string split, Dictionary<string, int> branchOf)
+    {
+        var users = new Dictionary<string, (HashSet<int> Branches, List<string> Nodes)>(StringComparer.Ordinal);
+        foreach (var (node, branch) in branchOf)
+        {
+            if (!descriptors.TryGetValue(node, out var descriptor) || !nodes.TryGetValue(node, out var definition))
+            {
+                continue;
+            }
+
+            foreach (var field in descriptor.Fields.Where(f => f.SharedState is not null))
+            {
+                var value = (definition.Config[field.Name] is System.Text.Json.Nodes.JsonValue configured && configured.TryGetValue<string>(out var text)
+                    ? text
+                    : field.Default?.ToString()) ?? "";
+                value = value.Trim();
+                if (value.Contains("{{", StringComparison.Ordinal))
+                {
+                    // Значение вычисляется при выполнении — заранее не проверить.
+                    continue;
+                }
+
+                var key = $"{field.SharedState}\u0000{value}";
+                if (!users.TryGetValue(key, out var entry))
+                {
+                    users[key] = entry = ([], []);
+                }
+
+                entry.Branches.Add(branch);
+                entry.Nodes.Add(node);
+            }
+        }
+
+        foreach (var (key, entry) in users.Where(u => u.Value.Branches.Count > 1))
+        {
+            var value = key[(key.IndexOf('\u0000') + 1)..];
+            error("parallel.shared.state",
+                $"Параллельные ветви блока {name(split)} работают с одним окном браузера «{value}» ({string.Join(", ", entry.Nodes.Take(4).Select(name))}): " +
+                "шаги ветвей перемешались бы на одной вкладке. Дайте ветвям разные окна (поле «Окно браузера») или перенесите шаги браузера " +
+                "до или после параллельного участка.", entry.Nodes[0]);
+        }
+    }
+
+    /// <summary>После блока — только путь к «Завершению»: обычные блоки без слияний, разделений и циклов.</summary>
+    private bool EndsOnly(string node, HashSet<string>? visiting = null)
+    {
+        if (_endsOnly.TryGetValue(node, out var known))
+        {
+            return known;
+        }
+
+        if (!descriptors.TryGetValue(node, out var descriptor))
+        {
+            return false;
+        }
+
+        if (descriptor.IsEnd)
+        {
+            return _endsOnly[node] = true;
+        }
+
+        visiting ??= new HashSet<string>(StringComparer.Ordinal);
+        if (descriptor.Flow != NodeFlow.Normal || !visiting.Add(node))
+        {
+            return false;
+        }
+
+        var outgoing = _outgoing.GetValueOrDefault(node) ?? [];
+        var result = outgoing.Count > 0 && outgoing.All(e => EndsOnly(e.Target, visiting));
+        visiting.Remove(node);
+        return _endsOnly[node] = result;
     }
 
     /// <summary>Обойти ветвь до слияния (вложенные участки — целиком), собрать её блоки; вернуть встреченные слияния.</summary>
@@ -169,8 +248,9 @@ internal sealed class ParallelCheck(
                 continue;
             }
 
-            // «Завершение» заканчивает весь процесс: его можно делить между ветвями и основной схемой.
-            if (descriptor.IsEnd)
+            // «Завершение» заканчивает весь процесс: его можно делить между ветвями и основной схемой — как и путь, который
+            // ведёт только к нему (например, общий обработчик ошибок «Записать в журнал» → «Завершение»).
+            if (descriptor.IsEnd || EndsOnly(node))
             {
                 continue;
             }

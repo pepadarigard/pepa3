@@ -274,9 +274,12 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
     const entryIndex = entryId ? data.nodes.findIndex((n) => n.id === entryId) : -1;
     const start = editor.state.nodes.find((n) => isStart(n.id));
     const startOut = start ? editor.state.edges.filter((e) => e.source === start.id) : [];
-    // Новый сценарий — заготовка «Начало → Конец»: её заменяют вставленные блоки (отменить — Ctrl+Z).
-    const placeholder = editor.state.nodes.length === 2 && startOut.length === 1 &&
-      editor.state.nodes.find((n) => n.id === startOut[0].target)?.data.definition.type === "end" ? startOut[0].target : null;
+    // Новый сценарий — заготовка «Начало → Конец»: её заменяют вставленные блоки (отменить — Ctrl+Z). Только нетронутая:
+    // «Завершение» с подписью, заметкой или своим сообщением — уже часть сценария, его не удаляем.
+    const end = startOut.length === 1 ? editor.state.nodes.find((n) => n.id === startOut[0].target)?.data.definition : undefined;
+    const blankEnd = !!end && end.type === "end" && !end.label && !end.note &&
+      Object.entries(end.config ?? {}).every(([key, value]) => value === "" || value === null || value === undefined || (key === "outcome" && value === "success"));
+    const placeholder = editor.state.nodes.length === 2 && blankEnd ? startOut[0].target : null;
     const connect = entryIndex >= 0 && !!start && (startOut.length === 0 || placeholder !== null);
     const startEdge = connect ? [toFlowEdge({ id: newId("e"), source: start.id, sourcePort: "out", target: pasted.nodes[entryIndex].id })] : [];
     editor.commit((s) => ({
@@ -284,10 +287,10 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
       nodes: [...s.nodes.filter((n) => !connect || n.id !== placeholder).map((n) => ({ ...n, selected: false })), ...pasted.nodes],
       edges: [...s.edges.filter((e) => !connect || e.target !== placeholder).map((e) => ({ ...e, selected: false })), ...pasted.edges, ...startEdge],
     }));
-    return connect;
     if (pasted.variables.length > 0) {
       feedback.toast(`Добавлены переменные: ${pasted.variables.map((v) => v.name).join(", ")}`, "info");
     }
+    return connect;
   }, [editor, feedback, isStart]);
 
   const groupOrigin = (data: BlockClipboard) => ({
