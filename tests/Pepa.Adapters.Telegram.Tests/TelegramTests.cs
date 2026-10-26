@@ -16,7 +16,9 @@ public sealed class TelegramTests
     private static async Task<(EngineHarness H, FakeTelegram T)> SetupAsync(bool withFaults = false)
     {
         var telegram = new FakeTelegram();
-        var h = await EngineHarness.CreateAsync(withFaults: withFaults, extraNodes: r => r.RegisterTelegramNodes(telegram));
+        EngineHarness? harness = null;
+        var h = harness = await EngineHarness.CreateAsync(withFaults: withFaults,
+            extraNodes: r => r.RegisterTelegramNodes(telegram, new Pepa.Adapters.FileSystem.Workspace(() => Path.Combine(harness!.Directory, "workspace"))));
         return (h, telegram);
     }
 

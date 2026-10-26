@@ -111,6 +111,36 @@ public sealed class Workspace(Func<string> rootProvider) : IWorkspace
     public string ToRelative(string fullPath) =>
         Path.GetRelativePath(Root, fullPath).Replace(Path.DirectorySeparatorChar, '/');
 
+    /// <summary>
+    /// Имя файла из чужого источника (вложение, присланный файл), пригодное для рабочей папки: без папок, запрещённых
+    /// символов, зарезервированных имён Windows и точки или пробела в конце. Пустое или негодное — <paramref name="fallback"/>.
+    /// </summary>
+    public static string SafeFileName(string? name, string fallback)
+    {
+        var leaf = (name ?? "").Replace('\\', '/');
+        leaf = leaf[(leaf.LastIndexOf('/') + 1)..];
+        var safe = new string(leaf.Select(c => char.IsControl(c) || Array.IndexOf(ForbiddenChars, c) >= 0 ? '_' : c).ToArray())
+            .Trim().TrimEnd('.', ' ');
+        if (safe.Length == 0 || safe.All(c => c == '.'))
+        {
+            return fallback;
+        }
+
+        if (ReservedNames.Contains(safe.Split('.')[0].TrimEnd()))
+        {
+            safe = "_" + safe;
+        }
+
+        const int MaxLength = 150;
+        if (safe.Length > MaxLength)
+        {
+            var extension = Path.GetExtension(safe) is { Length: <= 16 } e ? e : "";
+            safe = safe[..(MaxLength - extension.Length)].TrimEnd('.', ' ') + extension;
+        }
+
+        return safe;
+    }
+
     private static bool IsReparsePoint(string path)
     {
         try

@@ -35,13 +35,49 @@ public sealed record TelegramIncomingMessage
 
     /// <summary>Поправка на часы компьютера (их отличие от часов Telegram): время события сравнивается с часами компьютера.</summary>
     public TimeSpan ClockOffset { get; init; }
+
+    /// <summary>Кнопки под сообщением (бот) или клавиатура бота.</summary>
+    public IReadOnlyList<TelegramButton> Buttons { get; init; } = [];
+
+    /// <summary>Вложение (фото, документ, голосовое…), если есть.</summary>
+    public TelegramMedia? Media { get; init; }
 }
+
+public enum TelegramButtonKind
+{
+    /// <summary>Кнопка под сообщением: нажатие сообщает боту, бот отвечает (всплывающим текстом, новым сообщением…).</summary>
+    Callback,
+
+    /// <summary>Кнопка-ссылка: открывает адрес.</summary>
+    Url,
+
+    /// <summary>Кнопка клавиатуры бота: нажатие отправляет её текст сообщением.</summary>
+    Text,
+
+    /// <summary>Другие (оплата, игра, запрос телефона…) — Pepa их не нажимает.</summary>
+    Other,
+}
+
+/// <param name="Row">Ряд (с 1).</param>
+/// <param name="Column">Место в ряду (с 1).</param>
+/// <param name="Keyboard">Клавиатура бота (под полем ввода), а не кнопки под сообщением.</param>
+public sealed record TelegramButton(int Row, int Column, string Text, TelegramButtonKind Kind, string? Url = null, bool Keyboard = false);
+
+/// <param name="Kind">photo, document, video, voice, audio, sticker, other.</param>
+public sealed record TelegramMedia(string Kind, string? FileName, long? Size, string? MimeType);
 
 /// <summary>Сообщение, отправленное процессом.</summary>
 public sealed record TelegramSentMessage(TelegramPeer Chat, int MessageId, DateTimeOffset Date);
 
-/// <summary>Сообщение из истории чата (для проверки, отправлено ли сообщение).</summary>
-public sealed record TelegramHistoryMessage(int MessageId, bool Outgoing, string Text, DateTimeOffset Date);
+/// <summary>Сообщение из истории чата (для проверки, отправлено ли сообщение; кнопки и вложение — для «Нажать кнопку» и «Сохранить вложение»).</summary>
+public sealed record TelegramHistoryMessage(int MessageId, bool Outgoing, string Text, DateTimeOffset Date)
+{
+    public IReadOnlyList<TelegramButton> Buttons { get; init; } = [];
+    public TelegramMedia? Media { get; init; }
+}
+
+/// <summary>Ответ бота на нажатие кнопки (всплывающее уведомление или ссылка); бот может и ничего не ответить.</summary>
+public sealed record TelegramCallbackAnswer(string? Message, string? Url, bool Alert);
 
 public enum TelegramState
 {
@@ -88,10 +124,28 @@ public interface ITelegramGateway
 
     /// <summary>Сообщения чата с номером больше <paramref name="afterId"/>, новые первыми, не больше <paramref name="max"/>.</summary>
     Task<IReadOnlyList<TelegramHistoryMessage>> MessagesAfterAsync(TelegramPeer chat, int afterId, int max, CancellationToken cancellationToken);
+
+    /// <summary>Сообщение чата по номеру; null — его нет (удалено или номер неверный).</summary>
+    Task<TelegramHistoryMessage?> GetMessageAsync(TelegramPeer chat, int messageId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Нажать кнопку под сообщением (<see cref="TelegramButtonKind.Callback"/>): Telegram передаёт нажатие боту и возвращает
+    /// его ответ. Кнопка ищется заново по месту и тексту — если сообщение изменилось, нажатия не будет.
+    /// </summary>
+    Task<TelegramCallbackAnswer> PressAsync(TelegramPeer chat, int messageId, TelegramButton button, CancellationToken cancellationToken);
+
+    /// <summary>Отправить файл (с подписью). <paramref name="randomId"/> — ключ от повторов, как у сообщения.</summary>
+    Task<TelegramSentMessage> SendFileAsync(TelegramPeer chat, string path, string? caption, long randomId, CancellationToken cancellationToken);
+
+    /// <summary>Сохранить вложение сообщения в файл; возвращает размер.</summary>
+    Task<long> DownloadAsync(TelegramPeer chat, int messageId, string targetPath, CancellationToken cancellationToken);
 }
 
 /// <summary>Telegram не подключён или недоступен — действие не выполнялось.</summary>
 public sealed class TelegramUnavailableException(string message) : Exception(message);
+
+/// <summary>В сообщении нет файла или фото — сохранять нечего.</summary>
+public sealed class TelegramNoMediaException(string message) : Exception(message);
 
 /// <summary>Чат не найден — действие не выполнялось.</summary>
 public sealed class TelegramChatNotFoundException(string message) : Exception(message);
@@ -127,7 +181,27 @@ public static class TelegramEvents
             ["replyTo"] = message.ReplyToMessageId,
             ["chat"] = PeerJson(message.Chat),
             ["from"] = message.From is null ? null : PeerJson(message.From),
+            ["buttons"] = new JsonArray(message.Buttons.Select(b => (JsonNode)ButtonJson(b)).ToArray()),
+            ["media"] = message.Media is { } media ? MediaJson(media) : null,
         },
+    };
+
+    public static JsonObject ButtonJson(TelegramButton button) => new()
+    {
+        ["row"] = button.Row,
+        ["column"] = button.Column,
+        ["text"] = button.Text,
+        ["kind"] = button.Kind.ToString().ToLowerInvariant(),
+        ["url"] = button.Url,
+        ["keyboard"] = button.Keyboard,
+    };
+
+    public static JsonObject MediaJson(TelegramMedia media) => new()
+    {
+        ["kind"] = media.Kind,
+        ["fileName"] = media.FileName,
+        ["size"] = media.Size,
+        ["mimeType"] = media.MimeType,
     };
 
     public static JsonObject PeerJson(TelegramPeer peer) => new()

@@ -103,7 +103,7 @@ public sealed class PepaHost : IAsyncDisposable
         var desktop = options.Desktop ?? new UnavailableDesktop(
             "Окна Windows, мышь и клавиатура доступны только в приложении Pepa для Windows (Pepa.exe), а сейчас Pepa запущена без окна.");
         var registry = new NodeRegistry().RegisterLogicNodes().RegisterFlowNodes().RegisterFileNodes(workspace)
-            .RegisterBrowserNodes(browsers, workspace).RegisterTelegramNodes(telegram).RegisterDesktopNodes(desktop);
+            .RegisterBrowserNodes(browsers, workspace).RegisterTelegramNodes(telegram, workspace).RegisterDesktopNodes(desktop);
         var token = options.Token ?? Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
         var hostContext = new HostContext
         {

@@ -10,6 +10,7 @@ import {
   Box,
   Camera,
   CircleX,
+  Download,
   Fingerprint,
   Globe,
   Keyboard,
@@ -85,6 +86,7 @@ const nodeIcons: Record<string, LucideIcon> = {
   "scan-search": ScanSearch,
   camera: Camera,
   "circle-x": CircleX,
+  download: Download,
 };
 
 export function NodeIcon({ name, ...props }: { name: string } & LucideProps) {

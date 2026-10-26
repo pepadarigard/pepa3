@@ -119,6 +119,79 @@ internal sealed class FakeTelegram : ITelegramGateway
         return Task.FromResult(new TelegramSentMessage(chat, message.MessageId, message.Date));
     }
 
+    /// <summary>Нажатые кнопки под сообщениями: (номер сообщения, текст кнопки).</summary>
+    public ConcurrentQueue<(int MessageId, string Text)> Pressed { get; } = new();
+
+    /// <summary>Что ответит бот на нажатие.</summary>
+    public string? BotAnswer { get; set; }
+
+    /// <summary>Отправленные файлы: (чат, имя файла, подпись).</summary>
+    public ConcurrentQueue<(TelegramPeer Chat, string FileName, string? Caption)> Files { get; } = new();
+
+    /// <summary>Содержимое вложений по номеру сообщения.</summary>
+    public ConcurrentDictionary<int, byte[]> Attachments { get; } = new();
+
+    /// <summary>Сообщение бота с кнопками (и, если нужно, вложением) в истории чата.</summary>
+    public TelegramHistoryMessage AddBotMessage(TelegramPeer chat, string text, IReadOnlyList<TelegramButton>? buttons = null,
+        TelegramMedia? media = null, byte[]? content = null)
+    {
+        var message = new TelegramHistoryMessage(Interlocked.Increment(ref _nextId), false, text, DateTimeOffset.UtcNow)
+        {
+            Buttons = buttons ?? [],
+            Media = media,
+        };
+        History.Enqueue((chat, message));
+        if (content is not null)
+        {
+            Attachments[message.MessageId] = content;
+        }
+
+        return message;
+    }
+
+    public Task<TelegramHistoryMessage?> GetMessageAsync(TelegramPeer chat, int messageId, CancellationToken cancellationToken) =>
+        Task.FromResult(All(chat).FirstOrDefault(m => m.MessageId == messageId));
+
+    /// <summary>Нажатие уходит, но ответ теряется (обрыв связи).</summary>
+    public bool PressLosesAnswer { get; set; }
+
+    public Task<TelegramCallbackAnswer> PressAsync(TelegramPeer chat, int messageId, TelegramButton button, CancellationToken cancellationToken)
+    {
+        Pressed.Enqueue((messageId, button.Text));
+        return PressLosesAnswer
+            ? Task.FromException<TelegramCallbackAnswer>(new IOException("Связь оборвалась после нажатия."))
+            : Task.FromResult(new TelegramCallbackAnswer(BotAnswer, null, false));
+    }
+
+    public Task<TelegramSentMessage> SendFileAsync(TelegramPeer chat, string path, string? caption, long randomId, CancellationToken cancellationToken)
+    {
+        if (!_usedRandomIds.TryAdd(randomId, true))
+        {
+            throw new TelegramAlreadySentException();
+        }
+
+        Files.Enqueue((chat, Path.GetFileName(path), caption));
+        var message = new TelegramHistoryMessage(Interlocked.Increment(ref _nextId), true, TelegramEvents.NormalizeText(caption ?? ""), DateTimeOffset.UtcNow)
+        {
+            Media = new TelegramMedia("document", Path.GetFileName(path), new FileInfo(path).Length, "application/octet-stream"),
+        };
+        History.Enqueue((chat, message));
+        if (LoseConfirmation)
+        {
+            throw new IOException("Связь оборвалась после отправки.");
+        }
+
+        return Task.FromResult(new TelegramSentMessage(chat, message.MessageId, message.Date));
+    }
+
+    public async Task<long> DownloadAsync(TelegramPeer chat, int messageId, string targetPath, CancellationToken cancellationToken)
+    {
+        var content = Attachments.GetValueOrDefault(messageId) ?? throw new TelegramNoMediaException($"В сообщении №{messageId} нет файла.");
+        Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+        await File.WriteAllBytesAsync(targetPath, content, cancellationToken);
+        return content.Length;
+    }
+
     public Task<IReadOnlyList<TelegramHistoryMessage>> MessagesAfterAsync(TelegramPeer chat, int afterId, int max, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<TelegramHistoryMessage>>(All(chat).Where(m => m.MessageId > afterId)
             .OrderByDescending(m => m.MessageId).Take(max).ToList());

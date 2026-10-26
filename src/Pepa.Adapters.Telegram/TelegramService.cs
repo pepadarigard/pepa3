@@ -669,6 +669,8 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
             Text = message.message ?? "",
             Date = new DateTimeOffset(DateTime.SpecifyKind(message.date, DateTimeKind.Utc)),
             ReplyToMessageId = message.reply_to is MessageReplyHeader { reply_to_msg_id: var replyTo } && replyTo != 0 ? replyTo : null,
+            Buttons = ButtonsOf(message.reply_markup),
+            Media = MediaOf(message.media),
         };
 
         var delay = TimeSpan.FromSeconds(1);
@@ -1093,13 +1095,45 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
         }
     }
 
-    public async Task<TelegramSentMessage> SendAsync(TelegramPeer chat, string text, long randomId, CancellationToken cancellationToken)
+    public Task<TelegramSentMessage> SendAsync(TelegramPeer chat, string text, long randomId, CancellationToken cancellationToken)
     {
         var (connection, input) = Target(chat);
+        return SendCoreAsync(connection, chat, randomId, () => connection.Client.Messages_SendMessage(input, text, randomId), cancellationToken);
+    }
+
+    public async Task<TelegramSentMessage> SendFileAsync(TelegramPeer chat, string path, string? caption, long randomId, CancellationToken cancellationToken)
+    {
+        var (connection, input) = Target(chat);
+        InputFileBase uploaded;
+        try
+        {
+            // Загрузка файла — ещё не отправка: сбой здесь значит «не отправлено».
+            await using var stream = File.OpenRead(path);
+            uploaded = await connection.Client.UploadFileAsync(stream, Path.GetFileName(path)).WaitAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new TelegramSendRejectedException($"Файл не прочитался ({ex.Message}) — ничего не отправлено.", retryable: false);
+        }
+        catch (Exception ex) when (ex is not (OperationCanceledException or TelegramUnavailableException))
+        {
+            throw Unavailable(connection, ex, "загрузить файл в Telegram (ничего не отправлено)");
+        }
+
+        var media = new InputMediaUploadedDocument(uploaded, MimeType(path),
+            new DocumentAttributeFilename { file_name = Path.GetFileName(path) });
+        return await SendCoreAsync(connection, chat, randomId,
+            () => connection.Client.Messages_SendMedia(input, media, caption ?? "", randomId), cancellationToken);
+    }
+
+    /// <summary>Отправка с понятной классификацией ошибок: отказ Telegram — не отправлено, сбой связи — итог неизвестен.</summary>
+    private async Task<TelegramSentMessage> SendCoreAsync(Connection connection, TelegramPeer chat, long randomId, Func<Task<UpdatesBase>> send,
+        CancellationToken cancellationToken)
+    {
         UpdatesBase updates;
         try
         {
-            updates = await connection.Client.Messages_SendMessage(input, text, randomId).WaitAsync(cancellationToken);
+            updates = await send().WaitAsync(cancellationToken);
         }
         catch (RpcException ex) when (IsSessionRevoked(ex))
         {
@@ -1153,6 +1187,197 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
         return new TelegramSentMessage(chat, messageId, new DateTimeOffset(DateTime.SpecifyKind(date, DateTimeKind.Utc)));
     }
 
+    public async Task<TelegramHistoryMessage?> GetMessageAsync(TelegramPeer chat, int messageId, CancellationToken cancellationToken)
+    {
+        var (connection, input) = Target(chat);
+        var message = await FetchAsync(connection, input, messageId, cancellationToken);
+        return message is null ? null : History(message);
+    }
+
+    public async Task<TelegramCallbackAnswer> PressAsync(TelegramPeer chat, int messageId, TelegramButton button, CancellationToken cancellationToken)
+    {
+        var (connection, input) = Target(chat);
+        var message = await FetchAsync(connection, input, messageId, cancellationToken)
+                      ?? throw new TelegramSendRejectedException($"Сообщения №{messageId} в чате нет — кнопка не нажата.", retryable: false);
+        // Кнопка — заново из сообщения: бот мог поменять кнопки, и нажимать по старому месту нельзя.
+        var current = message.reply_markup is ReplyInlineMarkup inline && button.Row - 1 < inline.rows.Length && button.Row >= 1 &&
+                      button.Column - 1 < inline.rows[button.Row - 1].buttons.Length && button.Column >= 1
+            ? inline.rows[button.Row - 1].buttons[button.Column - 1]
+            : null;
+        if (current is null || current.text != button.Text)
+        {
+            throw new TelegramSendRejectedException($"Кнопки «{button.Text}» в сообщении уже нет (бот поменял кнопки) — ничего не нажато.", retryable: false);
+        }
+
+        if (current.type is not InlineButtonTypeCallback callback)
+        {
+            throw new TelegramSendRejectedException($"Кнопку «{button.Text}» так нажать нельзя — ничего не нажато.", retryable: false);
+        }
+
+        if (callback.flags.HasFlag(InlineButtonTypeCallback.Flags.requires_password))
+        {
+            throw new TelegramSendRejectedException($"Кнопка «{button.Text}» требует пароль двухэтапной проверки — такие Pepa не нажимает.", retryable: false);
+        }
+
+        try
+        {
+            var answer = await connection.Client.Messages_GetBotCallbackAnswer(input, message.id, callback.data).WaitAsync(cancellationToken);
+            return new TelegramCallbackAnswer(answer.message, answer.url, answer.flags.HasFlag(Messages_BotCallbackAnswer.Flags.alert));
+        }
+        catch (RpcException ex) when (ex.Message.Contains("BOT_RESPONSE_TIMEOUT", StringComparison.Ordinal))
+        {
+            // Нажатие дошло до бота, он просто не ответил всплывающим текстом.
+            return new TelegramCallbackAnswer(null, null, false);
+        }
+        catch (RpcException ex) when (IsSessionRevoked(ex))
+        {
+            OnSessionRevoked(connection);
+            throw new TelegramSendRejectedException(SessionExpiredHint, retryable: false);
+        }
+        catch (RpcException ex) when (ex.Code == 420 || ex.Message.Contains("FLOOD", StringComparison.Ordinal))
+        {
+            throw new TelegramSendRejectedException($"Telegram просит подождать ({ex.Message}) — кнопка не нажата.", retryable: true);
+        }
+        catch (RpcException ex) when (ex.Code is >= 400 and < 500)
+        {
+            throw new TelegramSendRejectedException($"Telegram не принял нажатие ({ex.Message}) — кнопка не нажата.", retryable: false);
+        }
+    }
+
+    public async Task<long> DownloadAsync(TelegramPeer chat, int messageId, string targetPath, CancellationToken cancellationToken)
+    {
+        var (connection, input) = Target(chat);
+        var message = await FetchAsync(connection, input, messageId, cancellationToken)
+                      ?? throw new TelegramChatNotFoundException($"Сообщения №{messageId} в чате нет.");
+        Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+        var temp = targetPath + ".part";
+        try
+        {
+            await using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                switch (message.media)
+                {
+                    case MessageMediaDocument { document: Document document }:
+                        await connection.Client.DownloadFileAsync(document, stream).WaitAsync(cancellationToken);
+                        break;
+                    case MessageMediaPhoto { photo: Photo photo }:
+                        await connection.Client.DownloadFileAsync(photo, stream).WaitAsync(cancellationToken);
+                        break;
+                    default:
+                        throw new TelegramNoMediaException($"В сообщении №{messageId} нет файла или фото.");
+                }
+
+                await stream.FlushAsync(cancellationToken);
+            }
+
+            File.Move(temp, targetPath, overwrite: true);
+            return new FileInfo(targetPath).Length;
+        }
+        catch (Exception ex) when (ex is not (OperationCanceledException or TelegramNoMediaException or IOException or UnauthorizedAccessException))
+        {
+            throw Unavailable(connection, ex, "скачать файл из Telegram");
+        }
+        finally
+        {
+            if (File.Exists(temp))
+            {
+                File.Delete(temp);
+            }
+        }
+    }
+
+    private async Task<Message?> FetchAsync(Connection connection, InputPeer input, int messageId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var found = await connection.Client.GetMessages(input, new InputMessageID { id = messageId }).WaitAsync(cancellationToken);
+            return found.Messages.OfType<Message>().FirstOrDefault(m => m.id == messageId);
+        }
+        catch (Exception ex) when (ex is not (OperationCanceledException or TelegramUnavailableException))
+        {
+            throw Unavailable(connection, ex, "прочитать сообщение");
+        }
+    }
+
+    private static TelegramHistoryMessage History(Message m) =>
+        new(m.id, m.flags.HasFlag(Message.Flags.out_), m.message ?? "", new DateTimeOffset(DateTime.SpecifyKind(m.date, DateTimeKind.Utc)))
+        {
+            Buttons = ButtonsOf(m.reply_markup),
+            Media = MediaOf(m.media),
+        };
+
+    /// <summary>Кнопки сообщения: под сообщением (inline) или клавиатура бота.</summary>
+    internal static IReadOnlyList<TelegramButton> ButtonsOf(ReplyMarkup? markup)
+    {
+        var result = new List<TelegramButton>();
+        switch (markup)
+        {
+            case ReplyInlineMarkup inline:
+                for (var r = 0; r < inline.rows.Length; r++)
+                {
+                    for (var c = 0; c < inline.rows[r].buttons.Length; c++)
+                    {
+                        var button = inline.rows[r].buttons[c];
+                        result.Add(button.type switch
+                        {
+                            InlineButtonTypeCallback => new TelegramButton(r + 1, c + 1, button.text, TelegramButtonKind.Callback),
+                            InlineButtonTypeUrl url => new TelegramButton(r + 1, c + 1, button.text, TelegramButtonKind.Url, url.url),
+                            _ => new TelegramButton(r + 1, c + 1, button.text, TelegramButtonKind.Other),
+                        });
+                    }
+                }
+
+                break;
+            case ReplyKeyboardMarkup keyboard:
+                for (var r = 0; r < keyboard.rows.Length; r++)
+                {
+                    for (var c = 0; c < keyboard.rows[r].buttons.Length; c++)
+                    {
+                        var button = keyboard.rows[r].buttons[c];
+                        // Простая кнопка клавиатуры (без особого вида) отправляет свой текст.
+                        result.Add(new TelegramButton(r + 1, c + 1, button.text,
+                            button.type is null ? TelegramButtonKind.Text : TelegramButtonKind.Other, Keyboard: true));
+                    }
+                }
+
+                break;
+        }
+
+        return result;
+    }
+
+    internal static TelegramMedia? MediaOf(MessageMedia? media) => media switch
+    {
+        MessageMediaPhoto { photo: Photo } => new TelegramMedia("photo", null, null, "image/jpeg"),
+        MessageMediaDocument { document: Document document } doc => new TelegramMedia(
+            doc.flags.HasFlag(MessageMediaDocument.Flags.voice) ? "voice"
+            : doc.flags.HasFlag(MessageMediaDocument.Flags.video) || doc.flags.HasFlag(MessageMediaDocument.Flags.round) ? "video"
+            : document.attributes?.OfType<DocumentAttributeSticker>().Any() == true ? "sticker"
+            : document.mime_type?.StartsWith("audio/", StringComparison.Ordinal) == true ? "audio"
+            : "document",
+            document.Filename, document.size, document.mime_type),
+        _ => null,
+    };
+
+    private static string MimeType(string path) => Path.GetExtension(path).ToLowerInvariant() switch
+    {
+        ".pdf" => "application/pdf",
+        ".png" => "image/png",
+        ".jpg" or ".jpeg" => "image/jpeg",
+        ".gif" => "image/gif",
+        ".webp" => "image/webp",
+        ".txt" => "text/plain",
+        ".csv" => "text/csv",
+        ".json" => "application/json",
+        ".zip" => "application/zip",
+        ".docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ".mp4" => "video/mp4",
+        ".mp3" => "audio/mpeg",
+        ".ogg" => "audio/ogg",
+        _ => "application/octet-stream",
+    };
+
     public async Task<IReadOnlyList<TelegramHistoryMessage>> MessagesAfterAsync(TelegramPeer chat, int afterId, int max, CancellationToken cancellationToken)
     {
         var (connection, input) = Target(chat);
@@ -1169,9 +1394,7 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
                     break;
                 }
 
-                result.AddRange(page.Messages.OfType<Message>().Where(m => m.id > afterId)
-                    .Select(m => new TelegramHistoryMessage(m.id, m.flags.HasFlag(Message.Flags.out_), m.message ?? "",
-                        new DateTimeOffset(DateTime.SpecifyKind(m.date, DateTimeKind.Utc)))));
+                result.AddRange(page.Messages.OfType<Message>().Where(m => m.id > afterId).Select(History));
                 offsetId = page.Messages.Min(m => m.ID);
                 if (page.Messages.Length < 100 || offsetId <= afterId + 1)
                 {

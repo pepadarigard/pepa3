@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Pepa.Adapters.FileSystem;
 using Pepa.Core;
 using Pepa.Core.Model;
 using Pepa.Core.Nodes;
@@ -11,10 +12,12 @@ public static class TelegramNodes
 {
     public static readonly NodeCategory Category = new("telegram", "Telegram", 30);
 
-    public static NodeRegistry RegisterTelegramNodes(this NodeRegistry registry, ITelegramGateway telegram) => registry
+    public static NodeRegistry RegisterTelegramNodes(this NodeRegistry registry, ITelegramGateway telegram, IWorkspace workspace) => registry
         .RegisterCategory(Category)
-        .Register(new SendTelegramNode(telegram))
-        .Register(new WaitTelegramNode(telegram));
+        .Register(new SendTelegramNode(telegram, workspace))
+        .Register(new WaitTelegramNode(telegram))
+        .Register(new PressTelegramButtonNode(telegram))
+        .Register(new DownloadTelegramFileNode(telegram, workspace));
 
     internal static readonly FieldDescriptor ChatField = new()
     {
@@ -28,7 +31,7 @@ public static class TelegramNodes
 
 // ───────────── Отправить сообщение ─────────────
 
-public sealed class SendTelegramNode(ITelegramGateway telegram) : INodeExecutor
+public sealed class SendTelegramNode(ITelegramGateway telegram, IWorkspace workspace) : INodeExecutor
 {
     public const string TypeName = "telegram.send";
 
@@ -37,8 +40,8 @@ public sealed class SendTelegramNode(ITelegramGateway telegram) : INodeExecutor
         Type = TypeName,
         Category = TelegramNodes.Category.Id,
         Title = "Отправить сообщение в Telegram",
-        Description = "Отправляет сообщение от вашего аккаунта Telegram. Если итог неизвестен (обрыв связи), Pepa проверит " +
-                      "историю чата, а не отправит сообщение второй раз.",
+        Description = "Отправляет сообщение (и, если нужно, файл из рабочей папки) от вашего аккаунта Telegram. Если итог неизвестен " +
+                      "(обрыв связи), Pepa проверит историю чата, а не отправит сообщение второй раз.",
         Icon = "send",
         Effect = NodeEffect.External,
         SupportsVerification = true,
@@ -49,8 +52,14 @@ public sealed class SendTelegramNode(ITelegramGateway telegram) : INodeExecutor
             TelegramNodes.ChatField,
             new FieldDescriptor
             {
-                Name = "text", Label = "Текст", Kind = FieldKind.MultilineTemplate, Required = true,
+                Name = "text", Label = "Текст", Kind = FieldKind.MultilineTemplate,
                 Placeholder = "Заказ {{ vars.order }} готов",
+                Help = "С файлом — подпись к нему (до 1024 символов).",
+            },
+            new FieldDescriptor
+            {
+                Name = "file", Label = "Файл из рабочей папки", Kind = FieldKind.Path, Placeholder = "отчёты/{{ vars.order }}.pdf",
+                Help = "Необязательно. Отправляется как файл (без сжатия).",
             },
             new FieldDescriptor
             {
@@ -92,12 +101,38 @@ public sealed class SendTelegramNode(ITelegramGateway telegram) : INodeExecutor
         return checkpoint;
     }
 
+    public IEnumerable<NodeConfigIssue> Validate(NodeDefinition node)
+    {
+        if (string.IsNullOrWhiteSpace(node.Config.GetString("text")) && string.IsNullOrWhiteSpace(node.Config.GetString("file")))
+        {
+            yield return new NodeConfigIssue("Укажите текст сообщения или файл.", "text");
+        }
+    }
+
+    /// <summary>Файл для отправки (полный путь) или null — только текст.</summary>
+    private string? FileOf(NodeExecutionContext context)
+    {
+        if (context.GetString("file") is not { } file || file.Trim().Length == 0)
+        {
+            return null;
+        }
+
+        var full = workspace.Resolve(file.Trim());
+        return File.Exists(full) ? full : throw new NodeInputException($"Файла «{workspace.ToRelative(full)}» нет в рабочей папке.");
+    }
+
     public async ValueTask<NodeResult> ExecuteAsync(NodeExecutionContext context, CancellationToken cancellationToken)
     {
         var text = context.GetString("text") ?? "";
-        if (text.Trim().Length == 0)
+        var file = FileOf(context);
+        if (text.Trim().Length == 0 && file is null)
         {
             throw new NodeInputException("Текст сообщения пустой.");
+        }
+
+        if (file is not null && text.Length > 1024)
+        {
+            throw new NodeInputException($"Подпись к файлу длиннее 1024 символов ({text.Length}) — Telegram такую не примет.");
         }
 
         if (text.Length > 4096)
@@ -115,7 +150,9 @@ public sealed class SendTelegramNode(ITelegramGateway telegram) : INodeExecutor
         {
             chat = await telegram.ResolveAsync(context.RequireString("chat"), cancellationToken);
             // Ошибка связи во время самой отправки — итог неизвестен: движок проверит историю чата, а не отправит снова.
-            sent = await telegram.SendAsync(chat, text, randomId, cancellationToken);
+            sent = file is null
+                ? await telegram.SendAsync(chat, text, randomId, cancellationToken)
+                : await telegram.SendFileAsync(chat, file, text.Length > 0 ? text : null, randomId, cancellationToken);
         }
         catch (TelegramUnavailableException ex)
         {
@@ -136,7 +173,8 @@ public sealed class SendTelegramNode(ITelegramGateway telegram) : INodeExecutor
         }
 
         var output = Output(chat, sent.MessageId, sent.Date);
-        return NodeResult.Ok(Ports.Out, SaveTo(context, output), output, $"Отправлено в Telegram «{chat.Title}»: {TelegramNodes.Preview(text)}");
+        return NodeResult.Ok(Ports.Out, SaveTo(context, output), output,
+            $"Отправлено в Telegram «{chat.Title}»: {(file is null ? "" : $"файл «{Path.GetFileName(file)}» ")}{TelegramNodes.Preview(text)}".TrimEnd());
     }
 
     public async ValueTask<VerificationResult> VerifyAsync(NodeExecutionContext context, CancellationToken cancellationToken)
@@ -147,6 +185,7 @@ public sealed class SendTelegramNode(ITelegramGateway telegram) : INodeExecutor
         }
 
         var text = TelegramEvents.NormalizeText(context.GetString("text") ?? "");
+        var fileName = context.GetString("file") is { Length: > 0 } file ? Path.GetFileName(file.Trim()) : null;
         try
         {
             var chat = await telegram.ResolveAsync(context.RequireString("chat"), cancellationToken);
@@ -157,7 +196,10 @@ public sealed class SendTelegramNode(ITelegramGateway telegram) : INodeExecutor
 
             var newer = await telegram.MessagesAfterAsync(chat, (int)afterNumber, VerifyScanLimit, cancellationToken);
             // Самое раннее своё сообщение с этим текстом после отметки — то, что отправил этот шаг.
-            var found = newer.Where(m => m.Outgoing && TelegramEvents.NormalizeText(m.Text) == text).MinBy(m => m.MessageId);
+            // С файлом — сообщение с этим файлом и подписью.
+            var found = newer.Where(m => m.Outgoing && TelegramEvents.NormalizeText(m.Text) == text &&
+                                         (fileName is null ? m.Media is null : m.Media?.FileName == fileName))
+                .MinBy(m => m.MessageId);
             if (found is not null)
             {
                 var output = Output(chat, found.MessageId, found.Date);

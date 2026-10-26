@@ -104,4 +104,28 @@ public sealed class WorkspaceTests : IDisposable
         var full = _workspace.Resolve("a\\b\\c.txt");
         Assert.Equal("a/b/c.txt", _workspace.ToRelative(full));
     }
+
+    [Theory]
+    [InlineData("чек.pdf", "чек.pdf")]
+    [InlineData("../../секрет/отчёт: Q1?.pdf", "отчёт_ Q1_.pdf")]
+    [InlineData("C:\\Windows\\win.ini", "win.ini")]
+    [InlineData("con.txt", "_con.txt")]
+    [InlineData("имя. . ", "имя")]
+    [InlineData("..", "запасное.bin")]
+    [InlineData("  ", "запасное.bin")]
+    [InlineData(null, "запасное.bin")]
+    public void Foreign_file_names_become_safe_names_inside_the_workspace(string? name, string expected)
+    {
+        var safe = Workspace.SafeFileName(name, "запасное.bin");
+        Assert.Equal(expected, safe);
+        Assert.Equal(Path.Combine(_workspace.Root, safe), _workspace.Resolve(safe));
+    }
+
+    [Fact]
+    public void Very_long_foreign_name_is_shortened_but_keeps_its_extension()
+    {
+        var safe = Workspace.SafeFileName(new string('я', 400) + ".pdf", "x");
+        Assert.Equal(150, safe.Length);
+        Assert.EndsWith("я.pdf", safe);
+    }
 }

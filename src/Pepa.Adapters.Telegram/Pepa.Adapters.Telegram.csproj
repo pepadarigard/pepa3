@@ -2,6 +2,7 @@
   <!-- Telegram через пользовательский аккаунт (MTProto, WTelegramClient): отправка сообщений и входящие как события Pepa. -->
   <ItemGroup>
     <ProjectReference Include="..\Pepa.Core\Pepa.Core.csproj" />
+    <ProjectReference Include="..\Pepa.Adapters.FileSystem\Pepa.Adapters.FileSystem.csproj" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="WTelegramClient" />
