@@ -1,5 +1,7 @@
-import { AppWindow, Bot, FolderOpen, Globe, Keyboard, Send, type LucideIcon } from "lucide-react";
+import { AppWindow, BellRing, Bot, Copy, FolderOpen, Globe, Keyboard, Send, type LucideIcon } from "lucide-react";
+import { getToken } from "../api/client";
 import { useInfo } from "../api/hooks";
+import { useFeedback } from "../components/feedback";
 import { Badge, Button } from "../components/ui";
 import { native } from "../lib/native";
 import { navigate } from "../router";
@@ -26,7 +28,7 @@ const integrations: Integration[] = [
     status: "planned",
     description: "Запуск существующих профилей через Local API и подключение к ним браузерных действий.",
     details:
-      "Этап 4. Перед реализацией — проверка документации Local API и его доступности на вашем тарифе. Профиль будет ресурсом: один активный процесс на профиль.",
+      "Этап 4. Перед реализацией — проверка документации Local API и его доступности на вашем тарифе. Профиль будет ресурсом: один активный процесс на профиль (менеджер ресурсов уже работает).",
   },
   {
     icon: Send,
@@ -47,12 +49,23 @@ const integrations: Integration[] = [
     title: "Мышь и клавиатура",
     status: "planned",
     description: "Действия физическим вводом — как общий ресурс, который нельзя занять двум процессам сразу.",
-    details: "Этапы 2 и 4: сначала менеджер ресурсов, затем само действие.",
+    details: "Менеджер ресурсов готов; сами действия мышью и клавиатурой — этап 4.",
   },
 ];
 
 export function IntegrationsPage() {
   const info = useInfo();
+  const feedback = useFeedback();
+  const endpoint = `${window.location.origin}/api/events`;
+  const example = `curl -X POST ${endpoint} -H "X-Pepa-Token: ${getToken() ?? "…"}" -H "Content-Type: application/json" -d "{\"source\":\"http\",\"type\":\"order\",\"correlationKey\":\"A-100\",\"payload\":{\"text\":\"готово\"}}"`;
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(example);
+      feedback.toast("Пример скопирован");
+    } catch {
+      feedback.toast("Не удалось скопировать — выделите текст вручную.", "error");
+    }
+  };
   return (
     <div className="page">
       <header className="page-header">
@@ -83,6 +96,32 @@ export function IntegrationsPage() {
             {native.available() && info.data && (
               <Button size="small" variant="ghost" onClick={() => native.openFolder(info.data!.workspaceRoot).catch(() => undefined)}>Открыть папку</Button>
             )}
+          </div>
+        </div>
+      </div>
+
+      <div className="card integration-card">
+        <div className="integration-icon" style={{ background: "var(--success-soft)", color: "var(--success)" }}>
+          <BellRing size={20} />
+        </div>
+        <div className="stack" style={{ gap: 6, flex: 1, minWidth: 0 }}>
+          <div className="row">
+            <h2>События</h2>
+            <Badge tone="success">Работает</Badge>
+          </div>
+          <p className="muted small">
+            Процессы ждут события блоком «Ждать событие» и отправляют их блоком «Отправить событие». Событие можно отправить
+            вручную на странице «Выполнение» или из своей программы на этом компьютере — запросом к локальному адресу Pepa.
+            Повтор с тем же «ключом от повторов» не создаёт второе событие.
+          </p>
+          <pre className="code-block" title={example}>{example}</pre>
+          <p className="small faint">
+            Токен в заголовке меняется при каждом запуске Pepa и доступен только с этого компьютера. Постоянный ключ для внешних
+            программ появится вместе с интеграциями (этап 4).
+          </p>
+          <div className="row">
+            <Button size="small" icon={Copy} onClick={copy}>Скопировать пример</Button>
+            <Button size="small" variant="ghost" onClick={() => navigate({ page: "runs" })}>Открыть события</Button>
           </div>
         </div>
       </div>

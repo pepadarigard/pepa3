@@ -23,9 +23,20 @@ export function startEventStream(queryClient: QueryClient, onState: (state: Conn
       queryClient.invalidateQueries({ queryKey: ["processes"] });
       queryClient.invalidateQueries({ queryKey: ["overview"] });
       queryClient.invalidateQueries({ queryKey: ["scenarios"] });
+      // Ресурсы и события меняются вместе с процессами (занят/освобождён, событие применено).
+      queryClient.invalidateQueries({ queryKey: ["resources"] });
+      queryClient.invalidateQueries({ queryKey: ["events"] });
       if (event.id) {
         queryClient.invalidateQueries({ queryKey: ["process", event.id] });
       }
+    } else if (event.type === "events") {
+      queryClient.invalidateQueries({ queryKey: ["events"] });
+      queryClient.invalidateQueries({ queryKey: ["overview"] });
+    } else if (event.type === "resources") {
+      queryClient.invalidateQueries({ queryKey: ["resources"] });
+    } else if (event.type === "triggers") {
+      queryClient.invalidateQueries({ queryKey: ["triggers"] });
+      queryClient.invalidateQueries({ queryKey: ["overview"] });
     } else if (event.type === "scenarios") {
       queryClient.invalidateQueries({ queryKey: ["scenarios"] });
     } else if (event.type === "scenario" && event.id) {
@@ -38,7 +49,7 @@ export function startEventStream(queryClient: QueryClient, onState: (state: Conn
       controller = new AbortController();
       onState("connecting");
       try {
-        const response = await fetch("/api/events", {
+        const response = await fetch("/api/stream", {
           headers: { "X-Pepa-Token": getToken() ?? "" },
           signal: controller.signal,
         });

@@ -1,4 +1,4 @@
-import type { ProcessStatus, ProcessSummary, StepState } from "../api/types";
+import type { EventState, ProcessStatus, ProcessSummary, StepState } from "../api/types";
 import { ru } from "../i18n/ru";
 import { formatMoment, relative } from "./format";
 
@@ -25,6 +25,30 @@ export const stepTone: Record<StepState, Tone> = {
   cancelled: "muted",
 };
 
+export const eventTone: Record<EventState, Tone> = {
+  received: "info",
+  matched: "warn",
+  delivered: "success",
+  unmatched: "muted",
+  conflict: "attention",
+  ignored: "muted",
+};
+
+/** Чего ждёт процесс — коротко, для таблиц. */
+export function waitText(p: ProcessSummary): string | null {
+  if (p.waitKind === "timer" && p.wakeAt) return `Ждёт до ${formatMoment(p.wakeAt)} (${relative(p.wakeAt)})`;
+  if (p.waitKind === "retry" && p.wakeAt) return `Повтор после ошибки ${relative(p.wakeAt)}`;
+  if ((p.waitKind === "event" || p.waitKind === "resource") && p.waitingFor) {
+    const limit = p.wakeAt ? `, не дольше чем до ${formatMoment(p.wakeAt)}` : "";
+    return p.waitingFor.startsWith("событие получено") || p.waitingFor.startsWith("вызванный сценарий завершился")
+      ? capitalize(p.waitingFor)
+      : `Ждёт ${p.waitingFor}${limit}`;
+  }
+  return null;
+}
+
+const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+
 export const isActive = (status: ProcessStatus) =>
   status === "running" || status === "waiting" || status === "paused" || status === "needsAttention";
 
@@ -39,7 +63,7 @@ export function explainProcess(p: ProcessSummary): { title: string; text: string
       };
     case "waiting":
       return {
-        title: p.wakeAt ? `Ждёт до ${formatMoment(p.wakeAt)} (${relative(p.wakeAt)})` : "Ожидает",
+        title: waitText(p) ?? (p.wakeAt ? `Ждёт до ${formatMoment(p.wakeAt)} (${relative(p.wakeAt)})` : "Ожидает"),
         text:
           "Ожидание сохранено и не занимает ресурсов. Если закрыть приложение, после запуска процесс будет " +
           "приостановлен — его нужно будет возобновить вручную.",

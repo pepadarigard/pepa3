@@ -1,5 +1,12 @@
 import {
+  BellRing,
   Box,
+  Lock,
+  LockOpen,
+  Repeat,
+  Rocket,
+  Send,
+  Workflow,
   Copy,
   FileInput,
   FilePenLine,
@@ -35,6 +42,13 @@ const nodeIcons: Record<string, LucideIcon> = {
   "file-search": FileSearch,
   "list-tree": ListTree,
   box: Box,
+  "bell-ring": BellRing,
+  send: Send,
+  lock: Lock,
+  "lock-open": LockOpen,
+  workflow: Workflow,
+  rocket: Rocket,
+  repeat: Repeat,
 };
 
 export function NodeIcon({ name, ...props }: { name: string } & LucideProps) {
@@ -48,6 +62,8 @@ export function categoryColor(category: string): string {
       return "var(--cat-logic)";
     case "files":
       return "var(--cat-files)";
+    case "flow":
+      return "var(--cat-flow)";
     default:
       return "var(--cat-other)";
   }

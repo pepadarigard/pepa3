@@ -1,11 +1,11 @@
 import { useMemo, useState } from "react";
 import { ReactFlow } from "@xyflow/react";
-import { AlertTriangle, ArrowLeft, CircleAlert, Info, ListChecks, Pencil, RotateCw, ScrollText, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, BellRing, CircleAlert, Info, ListChecks, Lock, Pencil, RotateCw, ScrollText, Workflow, X } from "lucide-react";
 import { useDescriptors, useProcess } from "../api/hooks";
-import type { NodeTypeDescriptor, ProcessDetails, ScenarioDefinition, Step } from "../api/types";
-import { processIcons, ProcessActions, ProcessStatusBadge, StepStateBadge } from "../components/process";
+import type { NodeTypeDescriptor, ProcessDetails, ScenarioDefinition, Step, Wait } from "../api/types";
+import { processIcons, ProcessActions, ProcessStatusBadge, ProcessTable, StepStateBadge } from "../components/process";
 import { useRunScenario } from "../components/RunDialog";
-import { Button, Card, Empty, ErrorState, Loading } from "../components/ui";
+import { Badge, Button, Card, Empty, ErrorState, Loading } from "../components/ui";
 import { ru } from "../i18n/ru";
 import { durationBetween, formatDateTime, formatMoment, preview } from "../lib/format";
 import { toFlowEdges, toFlowNodes, type PepaEdge, type PepaNode } from "../lib/graph";
@@ -87,6 +87,8 @@ export function ProcessPage({ id }: { id: string }) {
           {p.allowedActions.length > 0 && <div style={{ marginTop: 6 }}><ProcessActions process={p} /></div>}
         </div>
       </div>
+
+      <Relations data={data} />
 
       <Card title="Схема" actions={selectedNode && <Button size="small" variant="ghost" icon={X} onClick={() => setSelectedNode(null)}>Показать все шаги</Button>}>
         <ProcessGraph definition={data.definition} details={data} descriptors={descriptors} selected={selectedNode} onSelect={(nodeId) => { setSelectedNode(nodeId); setSelectedStep(null); }} />
@@ -269,5 +271,60 @@ function ProcessGraph({ definition, details, descriptors, selected, onSelect }: 
         />
       </FlowContext.Provider>
     </div>
+  );
+}
+
+const waitTone: Record<Wait["state"], Tone> = { active: "warn", fulfilled: "success", expired: "muted", cancelled: "muted" };
+
+/** Связи процесса: кто его вызвал, кого вызвал он, чего ждал и какие ресурсы держит. */
+function Relations({ data }: { data: ProcessDetails }) {
+  const waits = data.waits.filter((w) => w.purpose === "event");
+  if (!data.parent && data.children.length === 0 && waits.length === 0 && data.heldResources.length === 0) return null;
+  return (
+    <Card title="Связи и ожидания">
+      <div className="stack" style={{ padding: 14, gap: 12 }}>
+        {data.parent && (
+          <div className="row wrap small">
+            <Workflow size={15} className="muted" /> Запущен из процесса
+            <a href={`#/process/${data.parent.id}`}>«{data.parent.scenarioName}» #{data.parent.shortId}</a>
+            <Badge tone={processTone[data.parent.status]}>{ru.processStatus[data.parent.status]}</Badge>
+          </div>
+        )}
+        {data.heldResources.length > 0 && (
+          <div className="row wrap small">
+            <Lock size={15} className="muted" /> Занятые ресурсы:
+            {data.heldResources.map((key) => <code key={key}>{key}</code>)}
+            <span className="faint">— освободятся сами, когда процесс завершится.</span>
+          </div>
+        )}
+        {waits.length > 0 && (
+          <div className="stack" style={{ gap: 6 }}>
+            <div className="row small"><BellRing size={15} className="muted" /> Ожидания событий</div>
+            {[...waits].reverse().map((w) => (
+              <div key={w.id} className="row wrap small" style={{ paddingLeft: 22 }}>
+                <Badge tone={waitTone[w.state]}>{ru.subscriptionState[w.state]}</Badge>
+                <span>
+                  «{w.source}{w.eventType ? ` / ${w.eventType}` : ""}»
+                  {w.correlationKey && <> с ключом «{w.correlationKey}»</>}
+                  {w.matchExpression && <> и условием <code>{w.matchExpression}</code></>}
+                </span>
+                <span className="faint">
+                  с {formatMoment(w.createdAt)}
+                  {w.expiresAt && <> до {formatMoment(w.expiresAt)}</>}
+                  {w.priority !== 0 && <> · приоритет {w.priority}</>}
+                  {w.eventId && <> · событие #{w.eventId}</>}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+        {data.children.length > 0 && (
+          <div className="stack" style={{ gap: 6 }}>
+            <div className="row small"><Workflow size={15} className="muted" /> Запущенные сценарии · {data.children.length}</div>
+            <ProcessTable processes={data.children} showActions={false} />
+          </div>
+        )}
+      </div>
+    </Card>
   );
 }

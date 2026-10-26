@@ -9,7 +9,7 @@ import { FieldEditor } from "./FieldEditor";
 import type { Meta } from "./useEditor";
 
 const effectText: Record<string, { text: string; tone: "neutral" | "info" | "attention" }> = {
-  none: { text: "Логика — без внешних действий", tone: "neutral" },
+  none: { text: "Без внешних действий — сохраняется вместе с шагом", tone: "neutral" },
   readOnly: { text: "Только чтение — повтор безопасен", tone: "info" },
   external: { text: "Внешнее действие — без повторов вслепую", tone: "attention" },
 };

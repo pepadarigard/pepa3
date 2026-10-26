@@ -41,6 +41,14 @@ export const useProcess = (id: string | undefined) =>
 
 export const useSettings = () => useQuery({ queryKey: ["settings"], queryFn: api.settings });
 
+export const useEvents = (view: "open" | "conflict" | "unmatched" | "all" = "all") =>
+  useQuery({ queryKey: ["events", view], queryFn: () => api.events(view), refetchInterval: 15_000 });
+
+export const useResources = () => useQuery({ queryKey: ["resources"], queryFn: api.resources, refetchInterval: 15_000 });
+
+export const useTriggers = (scenarioId?: string) =>
+  useQuery({ queryKey: ["triggers", scenarioId ?? ""], queryFn: () => api.triggers(scenarioId), refetchInterval: 30_000 });
+
 /** Управление процессом: пауза, остановка, решения пользователя. */
 export function useProcessControl() {
   const client = useQueryClient();

@@ -39,6 +39,7 @@
 
   --cat-logic: #6366f1;
   --cat-files: #0891b2;
+  --cat-flow: #d97706;
   --cat-other: #a855f7;
 
   --radius-sm: 6px;
@@ -83,6 +84,7 @@
     --muted-soft: rgba(152, 162, 179, 0.1);
     --cat-logic: #818cf8;
     --cat-files: #22d3ee;
+    --cat-flow: #fbbf24;
     --cat-other: #c084fc;
     color-scheme: dark;
   }
@@ -122,6 +124,7 @@
   --muted-soft: rgba(152, 162, 179, 0.1);
   --cat-logic: #818cf8;
   --cat-files: #22d3ee;
+  --cat-flow: #fbbf24;
   --cat-other: #c084fc;
   color-scheme: dark;
 }
@@ -867,6 +870,43 @@ table.table {
   color: var(--accent);
 }
 
+.chip.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.chip.day {
+  font-family: inherit;
+  font-size: 12.5px;
+  padding: 4px 10px;
+}
+
+/* ───────────── Автозапуск ───────────── */
+
+.trigger-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  flex-wrap: wrap;
+}
+
+.trigger-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: var(--accent-soft);
+  color: var(--accent);
+  flex: none;
+}
+
 .tabs {
   display: flex;
   gap: 2px;
@@ -1467,6 +1507,19 @@ pre.json {
   color: var(--attention);
 }
 
+.pnode-port.event,
+.pnode-port.done {
+  color: var(--success);
+}
+
+.pnode-port.timeout {
+  color: var(--warn);
+}
+
+.pnode-port.item {
+  color: var(--accent);
+}
+
 .pnode-flag {
   position: absolute;
   top: -8px;
@@ -1574,6 +1627,19 @@ pre.json {
   background: var(--attention);
 }
 
+.react-flow__handle.port-event,
+.react-flow__handle.port-done {
+  background: var(--success);
+}
+
+.react-flow__handle.port-timeout {
+  background: var(--warn);
+}
+
+.react-flow__handle.port-item {
+  background: var(--accent);
+}
+
 .react-flow__edge:hover .react-flow__edge-path {
   stroke: var(--accent);
 }
@@ -1589,6 +1655,15 @@ pre.json {
 
 .react-flow__edge.edge-false .react-flow__edge-path {
   stroke: color-mix(in srgb, var(--attention) 70%, var(--border-strong));
+}
+
+.react-flow__edge.edge-timeout .react-flow__edge-path {
+  stroke: var(--warn);
+  stroke-dasharray: 5 4;
+}
+
+.react-flow__edge.edge-item .react-flow__edge-path {
+  stroke: var(--accent);
 }
 
 .react-flow__minimap {
@@ -1656,4 +1731,27 @@ pre.json {
   place-items: center;
   height: 100%;
   padding: 24px;
+}
+
+.link-button {
+  border: 0;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+}
+
+.code-block {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text-2);
+  max-height: 120px;
+  overflow: auto;
 }

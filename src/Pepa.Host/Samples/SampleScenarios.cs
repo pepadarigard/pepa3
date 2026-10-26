@@ -6,7 +6,17 @@ namespace Pepa.Host.Samples;
 /// <summary>Примеры, которые создаются при первом запуске: показывают основные возможности и сразу работают.</summary>
 public static class SampleScenarios
 {
-    public static IReadOnlyList<ScenarioDefinition> All() => [Hello(), Loop(), WaitAndErrors(), SortFolder()];
+    public static IReadOnlyList<ScenarioDefinition> All() => [.. Versioned().Select(s => s.Scenario)];
+
+    /// <summary>Текущая версия набора примеров: при обновлении Pepa добавляются только новые.</summary>
+    public const int CurrentVersion = 2;
+
+    /// <summary>Примеры с номером версии набора, в которой они появились.</summary>
+    public static IReadOnlyList<(int Version, ScenarioDefinition Scenario)> Versioned() =>
+    [
+        (1, Hello()), (1, Loop()), (1, WaitAndErrors()), (1, SortFolder()),
+        (2, WaitForReply()), (2, GreetEveryone()),
+    ];
 
     private static NodeDefinition N(string id, string type, double x, double y, JsonObject? config = null,
         string? label = null, NodeSettings? settings = null) => new()
@@ -153,5 +163,89 @@ public static class SampleScenarios
             E("start", "ensure"), E("ensure", "list"), E("list", "check"), E("check", "move", Ports.True),
             E("check", "end", Ports.False), E("move", "next"), E("next", "check"),
         ],
+    };
+
+    public static ScenarioDefinition WaitForReply() => new()
+    {
+        Name = "Пример 5. Занять профиль и ждать ответ",
+        Description = "Занимает ресурс «профиль», ждёт событие-ответ по номеру заказа (до 10 минут) и сохраняет его в файл. " +
+                      "Отправьте событие вручную на странице «Выполнение»: источник manual, вид reply, ключ — номер заказа.",
+        Variables =
+        [
+            new VariableDefinition { Name = "order", Type = VariableType.Text, Default = "A-100", IsInput = true, Description = "Номер заказа" },
+            new VariableDefinition { Name = "reply", Type = VariableType.Any, Description = "Полученное событие" },
+        ],
+        Nodes =
+        [
+            N("start", "start", 0, 120),
+            N("lock", "resource.acquire", 260, 120, new JsonObject
+            {
+                ["key"] = "пример:профиль-1",
+                ["title"] = "Профиль браузера (пример)",
+                ["timeoutSeconds"] = 300,
+            }, "Занять профиль"),
+            N("hint", "log", 540, 120, new JsonObject
+            {
+                ["message"] = "Профиль занят. Жду ответ по заказу {{ vars.order }}: отправьте событие manual / reply с ключом {{ vars.order }}.",
+                ["level"] = "info",
+            }, "Подсказка"),
+            N("wait", "event.wait", 820, 120, new JsonObject
+            {
+                ["source"] = "manual",
+                ["eventType"] = "reply",
+                ["correlationKey"] = "{{ vars.order }}",
+                ["timeoutSeconds"] = 600,
+                ["saveTo"] = "reply",
+            }, "Ждать ответ"),
+            N("save", "file.write", 1100, 0, new JsonObject
+            {
+                ["path"] = "примеры/ответы/{{ vars.order }}.txt",
+                ["content"] = "Ответ по заказу {{ vars.order }}: {{ vars.reply.payload }}",
+                ["mode"] = "overwrite",
+            }, "Сохранить ответ"),
+            N("free", "resource.release", 1380, 0, new JsonObject { ["key"] = "пример:профиль-1" }, "Освободить профиль"),
+            N("done", "end", 1660, 0, new JsonObject { ["outcome"] = "success", ["message"] = "Ответ сохранён: примеры/ответы/{{ vars.order }}.txt" }),
+            N("late", "end", 1100, 260, new JsonObject { ["outcome"] = "failure", ["message"] = "Ответ по заказу {{ vars.order }} не пришёл за 10 минут." }, "Ответа нет"),
+            N("busy", "end", 540, 300, new JsonObject { ["outcome"] = "failure", ["message"] = "Профиль 5 минут был занят другим процессом." }, "Профиль занят"),
+        ],
+        Edges =
+        [
+            E("start", "lock"), E("lock", "hint"), E("lock", "busy", Ports.Timeout), E("hint", "wait"),
+            E("wait", "save", Ports.Event), E("wait", "late", Ports.Timeout), E("save", "free"), E("free", "done"),
+        ],
+    };
+
+    public static ScenarioDefinition GreetEveryone() => new()
+    {
+        Name = "Пример 6. Для каждого из списка",
+        Description = "Перебирает список имён и для каждого создаёт файл. Список можно задать при запуске.",
+        Variables =
+        [
+            new VariableDefinition
+            {
+                Name = "names", Type = VariableType.List, Default = new JsonArray("Анна", "Борис", "Вера"), IsInput = true,
+                Description = "Кого поприветствовать",
+            },
+            new VariableDefinition { Name = "name", Type = VariableType.Text, Description = "Текущее имя" },
+            new VariableDefinition { Name = "index", Type = VariableType.Number, Default = 0, Description = "Номер имени (с 0)" },
+        ],
+        Nodes =
+        [
+            N("start", "start", 0, 120),
+            N("each", "loop.forEach", 260, 120, new JsonObject
+            {
+                ["items"] = "vars.names",
+                ["itemVariable"] = "name",
+                ["indexVariable"] = "index",
+            }, "Для каждого имени"),
+            N("write", "file.write", 540, 0, new JsonObject
+            {
+                ["path"] = "примеры/список/{{ vars.index + 1 }}-{{ vars.name }}.txt",
+                ["content"] = "Привет, {{ vars.name }}!",
+                ["mode"] = "overwrite",
+            }, "Записать файл"),
+            N("end", "end", 540, 260, new JsonObject { ["outcome"] = "success", ["message"] = "Создано файлов: {{ vars.names.length }}" }),
+        ],
+        Edges = [E("start", "each"), E("each", "write", Ports.Item), E("write", "each"), E("each", "end", Ports.Done)],
     };
 }

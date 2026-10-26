@@ -140,6 +140,8 @@ public sealed class PepaHost : IAsyncDisposable
         var engine = app.Services.GetRequiredService<ProcessEngine>();
         var events = app.Services.GetRequiredService<EventHub>();
         engine.Changed += change => events.Publish("process", change.ProcessId);
+        engine.EventsChanged += () => events.Publish("events");
+        engine.TriggersChanged += () => events.Publish("triggers");
 
         hostContext.Recovery = await engine.StartAsync(cancellationToken);
         if (options.SeedSamples)
@@ -199,22 +201,29 @@ public sealed class PepaHost : IAsyncDisposable
 
     private static async Task SeedSamplesAsync(IPepaStore store, ScenarioService scenarios, ILogger logger)
     {
+        // Набор примеров версионирован: после обновления Pepa добавляются только новые, удалённые пользователем не возвращаются.
         var settings = await store.GetSettingsAsync();
-        if (settings.ContainsKey("samples.seeded"))
+        var version = settings.TryGetValue("samples.version", out var text) && int.TryParse(text, out var parsed)
+            ? parsed
+            : settings.ContainsKey("samples.seeded") ? 1 : 0;
+        if (version >= SampleScenarios.CurrentVersion)
         {
             return;
         }
 
-        // В обратном порядке: список сценариев отсортирован по времени изменения, «Пример 1» окажется сверху.
-        foreach (var sample in SampleScenarios.All().Reverse())
+        // В обратном порядке: список сценариев отсортирован по времени изменения, меньший номер окажется выше.
+        var added = 0;
+        foreach (var (_, sample) in SampleScenarios.Versioned().Where(s => s.Version > version).Reverse())
         {
             await scenarios.CreateAsync(sample);
+            added++;
         }
 
         await using var write = await store.BeginWriteAsync();
         await write.SetSettingAsync("samples.seeded", DateTimeOffset.UtcNow.ToString("O"));
+        await write.SetSettingAsync("samples.version", SampleScenarios.CurrentVersion.ToString(System.Globalization.CultureInfo.InvariantCulture));
         await write.CommitAsync();
-        logger.LogInformation("Созданы примеры сценариев.");
+        logger.LogInformation("Добавлены примеры сценариев: {Count}.", added);
     }
 
     /// <summary>Сколько процессов выполняется или ждёт (для предупреждения при закрытии окна).</summary>

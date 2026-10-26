@@ -217,6 +217,11 @@ public sealed class TriggerTests
         Assert.Equal(new DateTimeOffset(2026, 3, 2, 11, 0, 0, TimeSpan.Zero), ScheduleCalculator.Next(hourly, monday, utc));
         Assert.Equal(3, ScheduleCalculator.CountBetween(hourly, monday, monday.AddHours(3), utc));
 
+        // Интервал отсчитывается от местной полуночи: в зоне +05:30 «каждый час» — в :00 по местному времени.
+        var india = TimeZoneInfo.CreateCustomTimeZone("test+0530", TimeSpan.FromMinutes(330), "test", "test");
+        Assert.Equal(new DateTimeOffset(2026, 3, 2, 11, 0, 0, TimeSpan.FromMinutes(330)),
+            ScheduleCalculator.Next(hourly, new DateTimeOffset(2026, 3, 2, 10, 10, 0, TimeSpan.FromMinutes(330)), india));
+
         Assert.NotNull(ScheduleCalculator.Validate(new JsonObject { ["mode"] = "daily", ["time"] = "25:00" }));
         Assert.NotNull(ScheduleCalculator.Validate(new JsonObject { ["mode"] = "daily", ["time"] = "09:00", ["days"] = new JsonArray(8) }));
         Assert.Null(ScheduleCalculator.Validate(weekdays));

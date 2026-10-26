@@ -2,8 +2,8 @@ import { AlertTriangle, Ban, CheckCircle2, Hourglass, Loader2, Pause, Play, Rota
 import type { ProcessAction, ProcessStatus, ProcessSummary, ResumeAction, StepState } from "../api/types";
 import { useProcessControl } from "../api/hooks";
 import { ru } from "../i18n/ru";
-import { durationBetween, formatMoment, relative } from "../lib/format";
-import { processTone, stepTone } from "../lib/status";
+import { durationBetween, formatMoment } from "../lib/format";
+import { processTone, stepTone, waitText } from "../lib/status";
 import { navigate } from "../router";
 import { Badge, Button } from "./ui";
 import { useFeedback } from "./feedback";
@@ -125,14 +125,13 @@ export function ProcessTable({ processes, showScenario = true, showActions = tru
               {showScenario && (
                 <td>
                   <div style={{ fontWeight: 560 }}>{p.scenarioName}</div>
-                  <div className="faint small mono">#{p.shortId}</div>
+                  <div className="faint small mono">#{p.shortId}{p.parentProcessId ? ` · вызван из #${p.parentProcessId.slice(-6)}` : ""}</div>
                 </td>
               )}
               <td style={{ maxWidth: 360 }}>
                 <div className="truncate" title={p.statusMessage ?? undefined}>
-                  {p.status === "waiting" && p.wakeAt
-                    ? `Ждёт до ${formatMoment(p.wakeAt)} (${relative(p.wakeAt)})`
-                    : p.statusMessage ?? (p.currentNodeLabel ? `Шаг «${p.currentNodeLabel}»` : "—")}
+                  {(p.status === "waiting" || p.status === "paused" ? waitText(p) : null) ??
+                    p.statusMessage ?? (p.currentNodeLabel ? `Шаг «${p.currentNodeLabel}»` : "—")}
                 </div>
               </td>
               <td className="muted">{formatMoment(p.createdAt)}</td>

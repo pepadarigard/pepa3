@@ -15,7 +15,7 @@ import {
   type NodeChange,
   type ReactFlowInstance,
 } from "@xyflow/react";
-import { ArrowLeft, LayoutGrid, Play, Plus, Redo2, Save, Shapes, Undo2, Workflow } from "lucide-react";
+import { ArrowLeft, CalendarClock, LayoutGrid, Play, Plus, Redo2, Save, Shapes, Undo2, Workflow } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
 import { useNodeTypes, useScenario, useScenarios } from "../../api/hooks";
@@ -23,6 +23,7 @@ import type { NodeDefinition, NodeTypes, Scenario, ValidationReport } from "../.
 import { rememberEditedScenario } from "../../App";
 import { useFeedback } from "../../components/feedback";
 import { useRunScenario } from "../../components/RunDialog";
+import { useTriggersDialog } from "../../components/triggers";
 import { Badge, Button, Card, Empty, ErrorState, Loading } from "../../components/ui";
 import { formatMoment } from "../../lib/format";
 import { autoLayout, connect, createNode, NODE_WIDTH, newId, type PepaEdge, type PepaNode } from "../../lib/graph";
@@ -74,6 +75,7 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
   const feedback = useFeedback();
   const queryClient = useQueryClient();
   const runner = useRunScenario();
+  const triggersDialog = useTriggersDialog();
   const dirty = editor.snapshot !== savedSnapshot;
 
   useEffect(() => rememberEditedScenario(scenario.id), [scenario.id]);
@@ -329,6 +331,10 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
         <Button size="small" variant="ghost" iconOnly icon={Undo2} title="Отменить (Ctrl+Z)" disabled={!editor.canUndo} onClick={editor.undo} />
         <Button size="small" variant="ghost" iconOnly icon={Redo2} title="Вернуть (Ctrl+Y)" disabled={!editor.canRedo} onClick={editor.redo} />
         <Button size="small" icon={LayoutGrid} title="Расставить блоки автоматически" onClick={layout}>Упорядочить</Button>
+        <Button size="small" icon={CalendarClock} title="Запуск по расписанию и по событиям"
+          onClick={() => triggersDialog.open(scenario.id, state.meta.name || scenario.name)}>
+          Автозапуск
+        </Button>
         <Button size="small" icon={Save} busy={saving} disabled={!dirty} onClick={() => void save()} title="Сохранить (Ctrl+S)">Сохранить</Button>
         <Button size="small" variant="primary" icon={Play} onClick={() => void run()} title={report.isValid ? "Запустить новый процесс" : "Есть ошибки — запуск невозможен"}>
           Запустить
@@ -395,6 +401,7 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
         </aside>
       </div>
       {runner.element}
+      {triggersDialog.element}
     </div>
   );
 }

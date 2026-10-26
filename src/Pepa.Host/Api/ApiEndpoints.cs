@@ -52,6 +52,8 @@ internal static class ApiEndpoints
                 new ProcessQuery { Statuses = FinishedStatuses, CreatedAfter = startOfDay, Limit = 10_000 }, ct);
             var recent = await store.ListProcessesAsync(new ProcessQuery { Statuses = FinishedStatuses, Limit = 8 }, ct);
             var activeDtos = await mapper.SummariesAsync(active, ct);
+            var conflicts = await store.ListEventsAsync(new EventQuery { States = [EventState.Conflict], Limit = 1000 }, ct);
+            var triggers = await mapper.TriggersAsync(await store.ListTriggersAsync(null, ct), ct);
             return new OverviewDto(
                 new OverviewCountsDto(
                     active.Count(p => p.Status == ProcessStatus.Running),
@@ -62,7 +64,10 @@ internal static class ApiEndpoints
                     finishedToday.Count(p => p.Status is ProcessStatus.Failed or ProcessStatus.Cancelled)),
                 activeDtos.Where(p => p.Status == ProcessStatus.NeedsAttention).ToList(),
                 activeDtos.Where(p => p.Status != ProcessStatus.NeedsAttention).ToList(),
-                await mapper.SummariesAsync(recent, ct));
+                await mapper.SummariesAsync(recent, ct),
+                conflicts.Count,
+                triggers.Where(t => t.MissedRuns > 0).ToList(),
+                triggers.Where(t => t is { Enabled: true, NextRunAt: not null }).OrderBy(t => t.NextRunAt).Take(5).ToList());
         });
 
         // ───────────── Сценарии ─────────────
@@ -109,7 +114,8 @@ internal static class ApiEndpoints
             }
 
             events.Publish("scenarios");
-            return Results.Ok(new MessageDto("Сценарий удалён. История его запусков сохранена."));
+            events.Publish("triggers");
+            return Results.Ok(new MessageDto("Сценарий удалён вместе с его расписаниями. История его запусков сохранена."));
         });
 
         api.MapPost("/scenarios/{id}/duplicate", async (string id, ScenarioService scenarios, EventHub events, CancellationToken ct) =>
@@ -156,13 +162,21 @@ internal static class ApiEndpoints
             var tokens = await store.GetTokensAsync(id, ct);
             var steps = await store.GetStepsAsync(id, ct);
             var journal = await store.GetJournalAsync(id, ct);
+            var subscriptions = await store.GetSubscriptionsAsync(id, ct);
+            var parent = process.ParentProcessId is { } parentId ? await store.GetProcessAsync(parentId, ct) : null;
+            var children = await store.GetChildProcessesAsync(id, ct);
+            var held = (await store.ListResourcesAsync(ct)).Where(r => r.HolderProcessId == id).Select(r => r.Key).ToList();
             return Results.Ok(new ProcessDetailsDto(
-                mapper.Summary(process, tokens),
+                mapper.Summary(process, tokens, subscriptions.ToDictionary(s => s.Id)),
                 process.Variables,
                 process.LastError,
                 steps.Select(ProcessMapper.Step).ToList(),
                 journal.Select(ProcessMapper.Journal).ToList(),
-                Core.Serialization.PepaJson.Deserialize<ScenarioDefinition>(process.DefinitionJson)));
+                Core.Serialization.PepaJson.Deserialize<ScenarioDefinition>(process.DefinitionJson),
+                parent is null ? null : ProcessMapper.Ref(parent),
+                await mapper.SummariesAsync(children, ct),
+                subscriptions.Select(ProcessMapper.Wait).ToList(),
+                held));
         });
 
         api.MapPost("/processes/{id}/pause", async (string id, ProcessEngine engine, CancellationToken ct) =>
@@ -174,8 +188,79 @@ internal static class ApiEndpoints
         api.MapPost("/processes/{id}/resume", async (string id, ResumeRequest request, ProcessEngine engine, CancellationToken ct) =>
             new MessageDto((await engine.ResumeAsync(id, request.Action, ct)).Message));
 
+        // ───────────── События ─────────────
+        api.MapGet("/events", async (string? view, int? limit, IPepaStore store, ProcessMapper mapper, CancellationToken ct) =>
+        {
+            var states = view switch
+            {
+                "open" => new[] { EventState.Received, EventState.Matched, EventState.Conflict },
+                "conflict" => [EventState.Conflict],
+                "unmatched" => [EventState.Unmatched],
+                _ => null,
+            };
+            var records = await store.ListEventsAsync(new EventQuery { States = states, Limit = Math.Clamp(limit ?? 200, 1, 1000) }, ct);
+            return await mapper.EventsAsync(records, ct);
+        });
+
+        api.MapPost("/events", async (PublishEventRequest request, ProcessEngine engine, CancellationToken ct) =>
+        {
+            var result = await engine.PublishEventAsync(new Core.EventInput
+            {
+                Source = request.Source?.Trim() ?? "",
+                Type = request.Type?.Trim() ?? "",
+                CorrelationKey = string.IsNullOrEmpty(request.CorrelationKey) ? null : request.CorrelationKey,
+                ExternalId = string.IsNullOrWhiteSpace(request.ExternalId) ? null : request.ExternalId.Trim(),
+                Payload = request.Payload?.DeepClone(),
+            }, ct);
+            return new PublishEventResponse(result.EventId, result.Duplicate);
+        });
+
+        api.MapPost("/events/{id:long}/resolve", async (long id, ResolveEventRequest request, ProcessEngine engine, CancellationToken ct) =>
+            new MessageDto((await engine.ResolveEventAsync(id, request.SubscriptionId, ct)).Message));
+
+        api.MapPost("/events/{id:long}/reroute", async (long id, ProcessEngine engine, CancellationToken ct) =>
+            new MessageDto((await engine.RerouteEventAsync(id, ct)).Message));
+
+        // ───────────── Ресурсы ─────────────
+        api.MapGet("/resources", (ProcessMapper mapper, CancellationToken ct) => mapper.ResourcesAsync(ct));
+
+        api.MapPost("/resources/release", async (ReleaseResourceRequest request, ProcessEngine engine, EventHub events,
+            CancellationToken ct) =>
+        {
+            var result = await engine.ForceReleaseResourceAsync(request.Key, ct);
+            events.Publish("resources");
+            return new MessageDto(result.Message);
+        });
+
+        // ───────────── Триггеры ─────────────
+        api.MapGet("/triggers", async (string? scenarioId, IPepaStore store, ProcessMapper mapper, CancellationToken ct) =>
+            await mapper.TriggersAsync(await store.ListTriggersAsync(string.IsNullOrWhiteSpace(scenarioId) ? null : scenarioId, ct), ct));
+
+        api.MapPost("/triggers", async (SaveTriggerRequest request, ProcessEngine engine, ProcessMapper mapper, CancellationToken ct) =>
+            await SaveTriggerAsync(null, request, engine, mapper, ct));
+
+        api.MapPut("/triggers/{id}", async (string id, SaveTriggerRequest request, ProcessEngine engine, ProcessMapper mapper,
+            IPepaStore store, CancellationToken ct) =>
+            await store.GetTriggerAsync(id, ct) is null
+                ? NotFound("Запуск по расписанию или событию не найден.")
+                : Results.Ok(await SaveTriggerAsync(id, request, engine, mapper, ct)));
+
+        api.MapDelete("/triggers/{id}", async (string id, ProcessEngine engine, CancellationToken ct) =>
+            await engine.DeleteTriggerAsync(id, ct)
+                ? Results.Ok(new MessageDto("Удалено."))
+                : NotFound("Запуск по расписанию или событию не найден."));
+
+        api.MapPost("/triggers/{id}/run", async (string id, ProcessEngine engine, CancellationToken ct) =>
+            new RunResponse(await engine.RunTriggerNowAsync(id, ct)));
+
+        api.MapPost("/triggers/{id}/dismiss", async (string id, ProcessEngine engine, CancellationToken ct) =>
+        {
+            await engine.DismissMissedRunsAsync(id, ct);
+            return new MessageDto("Пропущенные запуски отмечены как просмотренные.");
+        });
+
         // ───────────── Поток изменений ─────────────
-        api.MapGet("/events", async (HttpContext http, EventHub hub) =>
+        api.MapGet("/stream", async (HttpContext http, EventHub hub) =>
         {
             var cancellation = http.RequestAborted;
             http.Response.Headers.ContentType = "text/event-stream; charset=utf-8";
@@ -218,6 +303,25 @@ internal static class ApiEndpoints
                 hub.Unsubscribe(subscription);
             }
         });
+    }
+
+    private static async Task<TriggerDto> SaveTriggerAsync(string? id, SaveTriggerRequest request, ProcessEngine engine,
+        ProcessMapper mapper, CancellationToken ct)
+    {
+        var saved = await engine.SaveTriggerAsync(new TriggerRecord
+        {
+            Id = id ?? "",
+            ScenarioId = request.ScenarioId,
+            Kind = request.Kind,
+            Enabled = request.Enabled,
+            Name = request.Name ?? "",
+            Config = (System.Text.Json.Nodes.JsonObject)request.Config.DeepClone(),
+            Inputs = request.Inputs?.DeepClone() as System.Text.Json.Nodes.JsonObject,
+            Overlap = request.Overlap ?? "skip",
+            CreatedAt = default,
+            UpdatedAt = default,
+        }, ct);
+        return (await mapper.TriggersAsync([saved], ct))[0];
     }
 
     private static SettingsDto ToDto(SettingsService settings)

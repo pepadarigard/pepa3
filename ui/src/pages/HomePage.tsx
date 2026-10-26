@@ -1,9 +1,10 @@
-import { AlertTriangle, CheckCircle2, FolderOpen, Hourglass, Loader2, Play, Plus, RotateCcw, Workflow } from "lucide-react";
+import { AlertTriangle, CalendarClock, CheckCircle2, FolderOpen, Hourglass, Loader2, Play, Plus, RotateCcw, Workflow } from "lucide-react";
 import { useInfo, useOverview, useScenarios } from "../api/hooks";
 import { ProcessActions, ProcessStatusBadge, ProcessTable } from "../components/process";
 import { useRunScenario } from "../components/RunDialog";
 import { Button, Callout, Card, Empty, ErrorState, Loading } from "../components/ui";
-import { formatMoment } from "../lib/format";
+import { TriggerRow } from "../components/triggers";
+import { formatMoment, plural, relative } from "../lib/format";
 import { native } from "../lib/native";
 import { attentionAdvice, explainProcess } from "../lib/status";
 import { navigate } from "../router";
@@ -40,7 +41,29 @@ export function HomePage() {
         >
           Приложение закрывалось, пока работали процессы. Ничего не продолжилось само: приостановлено — {recovery?.paused ?? 0},
           шагов с неизвестным итогом — {recovery?.unknownSteps ?? 0}. Проверьте каждый процесс и возобновите вручную.
+          {(recovery?.releasedResources ?? 0) > 0 && <> Освобождено ресурсов завершённых процессов — {recovery?.releasedResources}.</>}
         </Callout>
+      )}
+
+      {data.eventConflicts > 0 && (
+        <Callout
+          tone="attention"
+          title={`${data.eventConflicts} ${plural(data.eventConflicts, "событие ждёт", "события ждут", "событий ждут")} вашего решения`}
+          actions={<Button size="small" onClick={() => navigate({ page: "runs" })}>Выбрать получателя</Button>}
+        >
+          Событие одинаково подошло нескольким процессам, поэтому Pepa никому его не отдала, чтобы не ошибиться.
+        </Callout>
+      )}
+
+      {data.missedTriggers.length > 0 && (
+        <Card title={<h2 className="row"><CalendarClock size={17} style={{ color: "var(--attention)" }} /> Пропущенные запуски по расписанию</h2>}>
+          <div className="stack" style={{ padding: 14 }}>
+            <p className="small muted" style={{ margin: 0 }}>
+              Пока Pepa была закрыта, наступило время запуска. Сами эти запуски не выполняются — решите, нужно ли запустить сейчас.
+            </p>
+            {data.missedTriggers.map((t) => <TriggerRow key={t.id} trigger={t} showScenario />)}
+          </div>
+        </Card>
       )}
 
       <div className="grid-stats">
@@ -118,6 +141,26 @@ export function HomePage() {
           )}
         </Card>
       </div>
+
+      {data.upcomingTriggers.length > 0 && (
+        <Card title="Ближайшие запуски по расписанию">
+          <div className="picker-list">
+            {data.upcomingTriggers.map((t) => (
+              <div key={t.id} className="picker-item" onClick={() => navigate({ page: "editor", id: t.scenarioId })}>
+                <CalendarClock size={18} className="muted" />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div className="truncate" style={{ fontWeight: 560 }}>{t.scenarioName}</div>
+                  <div className="small faint truncate">{t.name ? `${t.name} · ` : ""}{t.description}</div>
+                </div>
+                <div className="small muted" style={{ textAlign: "right" }}>
+                  {formatMoment(t.nextRunAt)}
+                  <div className="faint">{relative(t.nextRunAt)}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
 
       <Card title="Последние завершённые" actions={<a href="#/history" className="small">История</a>}>
         {data.recent.length > 0 ? (

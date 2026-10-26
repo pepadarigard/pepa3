@@ -12,7 +12,7 @@
 | Файлы | `tests/Pepa.Adapters.FileSystem.Tests` | рабочая папка, каждое действие и его проверка результата, сквозные сценарии с движком |
 | API | `tests/Pepa.Host.Tests` | настоящий экземпляр на случайном порту: доступ, сценарии, запуск, настройки, блокировка экземпляра, поток событий, перезапуск |
 | Интерфейс (модули) | `ui/src/**/*.test.ts` (vitest) | преобразование сценария ↔ схема, раскладка, помощники блоков |
-| Интерфейс (сквозная) | `ui/e2e/smoke.cjs` (Playwright) | живой сервер + Chromium: запуск с вводом, конструктор (добавить блок, связать, сохранить, отменить/вернуть, запустить), пауза/продолжение/остановка, история, тёмная тема |
+| Интерфейс (сквозная) | `ui/e2e/smoke.cjs` (Playwright) | живой сервер + Chromium: запуск с вводом, конструктор (добавить блок, связать, сохранить, отменить/вернуть, запустить), пауза/продолжение/остановка, занятие ресурса и ожидание события с отправкой события из интерфейса, автозапуск по расписанию, история, тёмная тема |
 
 ### Инструменты имитации
 
@@ -32,8 +32,13 @@
 | условия, циклы, переменные | `Condition_routes_by_variable`, `Loop_with_counter_runs_body_expected_number_of_times`, `Action_output_is_saved_to_variable`, `Variable_type_mismatch_stops_process_with_clear_reason`, `Inputs_are_validated_against_declared_variables` |
 | тайм-ауты и ожидания | `WaitAndConcurrencyTests.Wait_completes_only_after_its_time`, `Waiting_process_does_not_occupy_a_worker`, `Action_timeout_gives_unknown_result_and_checks_external_system`, `Next_time_of_day_is_today_or_tomorrow` |
 | независимые параллельные процессы | `Instances_of_one_scenario_have_independent_variables`, `Independent_processes_run_in_parallel`, `Failure_of_one_process_does_not_affect_another` |
-| конфликт ресурсов | — этап 2 (менеджер ресурсов) |
-| несколько событий, неоднозначное сопоставление, дедупликация | — этап 2 (система событий) |
+| конфликт ресурсов | `ResourceTests.Second_process_waits_until_resource_is_released`, `Queue_is_served_in_order_of_requests`, `Waiting_for_resource_does_not_block_other_processes`, `Resource_is_released_automatically_when_process_ends`, `Cancelling_holder_passes_resource_to_next_in_queue`, `Resource_wait_timeout_follows_timeout_branch`, `Paused_waiter_keeps_its_place_but_is_skipped_while_paused`, `Deadlock_is_detected_and_stops_with_explanation`, `After_restart_paused_holder_keeps_resource_and_stale_locks_are_released` |
+| несколько событий | `EventTests.Event_goes_only_to_the_process_with_matching_key`, `Several_events_each_go_to_one_waiter_and_extra_ones_stay_unmatched`, `Event_without_waiting_process_is_stored_and_starts_nothing`, `Process_can_signal_another_process_with_send_event` |
+| неоднозначное сопоставление | `EventTests.Ambiguous_event_is_not_given_to_anyone_until_user_decides`, `Higher_priority_wins_without_conflict`, `Match_condition_filters_events`, `PlatformApiTests.Conflicting_event_is_listed_and_resolved_by_user` |
+| дедупликация | `EventTests.Repeated_event_with_same_external_id_is_processed_once`, `TriggerTests.Event_trigger_starts_process_once_with_values_from_event`, `PlatformApiTests.Reply_sample_waits_for_event_holds_resource_and_saves_answer` |
+| события и перезапуск | `EventTests.Event_for_paused_process_is_applied_only_after_resume`, `After_restart_waiting_process_gets_event_only_after_manual_resume`, `Cancelled_waiter_returns_assigned_event_for_rematching`, `Earlier_event_is_taken_only_within_lookback_window`, `Timeout_follows_timeout_branch_and_late_event_is_not_taken` |
+| расписания и запуск по событию | `TriggerTests.Interval_schedule_starts_one_process_per_occurrence`, `Overlapping_run_is_skipped_while_previous_is_still_working`, `Runs_missed_while_closed_are_counted_but_not_started`, `Waiting_process_takes_event_before_triggers`, `Schedule_calculator_handles_days_and_one_time_runs` |
+| вызов сценария, перебор списка | `SubprocessAndLoopTests.*`: итог дочернего процесса, ошибка, остановка вместе с родителем, тайм-аут, пауза родителя, перезапуск обоих, предел вложенности, перебор, пустой список, вложенный цикл с ранним выходом, позиция цикла после перезапуска |
 | остановка после ошибки | `ErrorHandlingTests.Failure_without_handler_stops_process_before_next_step`, `Retries_exhausted_stop_the_process`, `FileScenarioTests.Path_escape_stops_process_without_touching_files` |
 | сохранение состояния и восстановление | `RecoveryTests.Waiting_state_survives_restart_with_remaining_time`, `Process_paused_by_user_stays_paused_after_restart`, `HostLifecycleTests.Waiting_process_is_paused_after_restart_and_resumes_manually` |
 | сбой между внешним действием и сохранением результата | `RecoveryTests.Crash_between_action_and_saving_result_never_repeats_the_action`, `Crash_with_inconclusive_verification_requires_user_decision`, `Storage_failure_on_result_marks_process_for_attention_without_restart`, `FileScenarioTests.Crash_after_append_does_not_append_twice`, `Crash_before_write_reached_disk_writes_once_after_verification` |
@@ -47,7 +52,9 @@
 второго экземпляра, сохранность выбранной рабочей папки между запусками.
 
 Проверка самих тестов: намеренная поломка восстановления (не помечать прерванные шаги «неизвестно») и обработки
-неизвестного итога (считать его обычной ошибкой) роняет соответствующие тесты.
+неизвестного итога (считать его обычной ошибкой) роняет соответствующие тесты. Так же проверены тесты этапа 2:
+отдача события при равных кандидатах, выдача ресурса приостановленному процессу и продолжение цикла при новом
+входе — каждая поломка роняет свой тест.
 
 ## Как запустить
 

@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { FieldDescriptor, Json, VariableDefinition } from "../../api/types";
+import { useScenarios } from "../../api/hooks";
+import { formatDuration } from "../../lib/format";
 
 interface Props {
   field: FieldDescriptor;
@@ -42,6 +44,21 @@ export function FieldEditor({ field, value, onChange, variables, onCreateVariabl
         <NumberInput value={typeof effective === "number" ? effective : undefined} min={field.min} max={field.max} invalid={!!error} onChange={onChange} />
       );
       break;
+    case "seconds":
+      control = (
+        <div className="stack" style={{ gap: 4 }}>
+          <div className="row" style={{ gap: 8 }}>
+            <NumberInput value={typeof effective === "number" ? effective : undefined} min={field.min} max={field.max} invalid={!!error}
+              placeholder={field.placeholder} onChange={onChange} />
+            <span className="faint small" style={{ whiteSpace: "nowrap" }}>сек</span>
+          </div>
+          {typeof effective === "number" && effective >= 60 && <span className="faint small">= {formatDuration(effective * 1000)}</span>}
+        </div>
+      );
+      break;
+    case "scenario":
+      control = <ScenarioSelect value={text} invalid={!!error} onChange={onChange} />;
+      break;
     case "time":
       control = <input className={`input${invalid}`} type="time" value={text} onChange={(e) => onChange(e.target.value || undefined)} />;
       break;
@@ -57,6 +74,7 @@ export function FieldEditor({ field, value, onChange, variables, onCreateVariabl
       break;
     case "expression":
     case "condition":
+    case "matchCondition":
       control = (
         <WithInserts field={field} variables={variables} onInsert={(snippet) => onChange(text ? `${text} ${snippet}` : snippet)}>
           <textarea
@@ -100,13 +118,19 @@ export function FieldEditor({ field, value, onChange, variables, onCreateVariabl
 
 /** Подсказки-вставки переменных для шаблонов и выражений. */
 function WithInserts({ field, variables, onInsert, children }: { field: FieldDescriptor; variables: VariableDefinition[]; onInsert: (snippet: string) => void; children: React.ReactNode }) {
-  const isExpression = field.kind === "expression" || field.kind === "condition";
+  const isExpression = field.kind === "expression" || field.kind === "condition" || field.kind === "matchCondition";
   const isTemplate = field.kind === "template" || field.kind === "multilineTemplate" || field.kind === "path";
-  if ((!isExpression && !isTemplate) || variables.length === 0) return <>{children}</>;
+  const eventChips = field.kind === "matchCondition" ? ["event.payload", "event.correlationKey", "event.type"] : [];
+  if ((!isExpression && !isTemplate) || (variables.length === 0 && eventChips.length === 0)) return <>{children}</>;
   return (
     <>
       {children}
       <div className="chips">
+        {eventChips.map((chip) => (
+          <button key={chip} type="button" className="chip" title="Данные пришедшего события" onClick={() => onInsert(chip)}>
+            {chip}
+          </button>
+        ))}
         {variables.map((v) => (
           <button key={v.name} type="button" className="chip" title={v.description || `Вставить ${v.name}`}
             onClick={() => onInsert(isExpression ? `vars.${v.name}` : `{{ vars.${v.name} }}`)}>
@@ -118,7 +142,7 @@ function WithInserts({ field, variables, onInsert, children }: { field: FieldDes
   );
 }
 
-function NumberInput({ value, min, max, invalid, onChange }: { value: number | undefined; min: number | null; max: number | null; invalid: boolean; onChange: (v: Json | undefined) => void }) {
+function NumberInput({ value, min, max, invalid, placeholder, onChange }: { value: number | undefined; min: number | null; max: number | null; invalid: boolean; placeholder?: string | null; onChange: (v: Json | undefined) => void }) {
   const [text, setText] = useState(value === undefined ? "" : String(value));
   const last = useRef(value);
   useEffect(() => {
@@ -134,6 +158,7 @@ function NumberInput({ value, min, max, invalid, onChange }: { value: number | u
       value={text}
       min={min ?? undefined}
       max={max ?? undefined}
+      placeholder={placeholder ?? undefined}
       onChange={(e) => {
         setText(e.target.value);
         const n = Number(e.target.value);
@@ -171,6 +196,24 @@ function VariableSelect({ value, variables, invalid, onChange, onCreate }: { val
       ))}
       {value && !declared && <option value={value}>{value} (не объявлена)</option>}
       {onCreate && <option value="__new">＋ Новая переменная…</option>}
+    </select>
+  );
+}
+
+function ScenarioSelect({ value, invalid, onChange }: { value: string; invalid: boolean; onChange: (v: Json | undefined) => void }) {
+  const scenarios = useScenarios();
+  const list = scenarios.data ?? [];
+  const known = list.some((s) => s.id === value);
+  return (
+    <select className={`select${invalid ? " invalid" : ""}`} value={value} onChange={(e) => onChange(e.target.value || undefined)}>
+      <option value="">— выберите сценарий —</option>
+      {list.map((s) => (
+        <option key={s.id} value={s.id}>
+          {s.name}
+          {s.errorCount > 0 ? " (есть ошибки)" : ""}
+        </option>
+      ))}
+      {value && !known && !scenarios.isLoading && <option value={value}>Сценарий не найден ({value.slice(-6)})</option>}
     </select>
   );
 }

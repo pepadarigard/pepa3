@@ -63,6 +63,7 @@ public sealed class ApiTests
     [InlineData("Пример 1")]
     [InlineData("Пример 2")]
     [InlineData("Пример 4")]
+    [InlineData("Пример 6")]
     public async Task Sample_runs_to_completion(string sample)
     {
         await using var f = await HostFixture.StartAsync();
@@ -207,7 +208,7 @@ public sealed class ApiTests
     public async Task Change_events_are_streamed()
     {
         await using var f = await HostFixture.StartAsync();
-        using var request = new HttpRequestMessage(HttpMethod.Get, "/api/events");
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/api/stream");
         using var response = await f.Client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
         Assert.Equal("text/event-stream", response.Content.Headers.ContentType!.MediaType);
         await using var stream = await response.Content.ReadAsStreamAsync();

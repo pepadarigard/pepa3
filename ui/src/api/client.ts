@@ -1,6 +1,10 @@
 import type {
   Info,
   NodeTypes,
+  PepaEvent,
+  Resource,
+  SaveTrigger,
+  Trigger,
   Overview,
   ProcessDetails,
   ProcessSummary,
@@ -120,6 +124,25 @@ export const api = {
   cancel: (id: string) => request<{ message: string }>("POST", `/processes/${id}/cancel`),
   resume: (id: string, action: ResumeAction) =>
     request<{ message: string }>("POST", `/processes/${id}/resume`, { action }),
+
+  events: (view: "open" | "conflict" | "unmatched" | "all" = "all", limit = 200) =>
+    request<PepaEvent[]>("GET", `/events?view=${view}&limit=${limit}`),
+  publishEvent: (event: { source: string; type: string; correlationKey: string | null; externalId: string | null; payload: Json | null }) =>
+    request<{ eventId: number; duplicate: boolean }>("POST", "/events", event),
+  resolveEvent: (id: number, subscriptionId: number | null) =>
+    request<{ message: string }>("POST", `/events/${id}/resolve`, { subscriptionId }),
+  rerouteEvent: (id: number) => request<{ message: string }>("POST", `/events/${id}/reroute`),
+
+  resources: () => request<Resource[]>("GET", "/resources"),
+  releaseResource: (key: string) => request<{ message: string }>("POST", "/resources/release", { key }),
+
+  triggers: (scenarioId?: string) =>
+    request<Trigger[]>("GET", `/triggers${scenarioId ? `?scenarioId=${encodeURIComponent(scenarioId)}` : ""}`),
+  createTrigger: (trigger: SaveTrigger) => request<Trigger>("POST", "/triggers", trigger),
+  updateTrigger: (id: string, trigger: SaveTrigger) => request<Trigger>("PUT", `/triggers/${id}`, trigger),
+  deleteTrigger: (id: string) => request<{ message: string }>("DELETE", `/triggers/${id}`),
+  runTrigger: (id: string) => request<{ processId: string }>("POST", `/triggers/${id}/run`),
+  dismissTrigger: (id: string) => request<{ message: string }>("POST", `/triggers/${id}/dismiss`),
 
   settings: () => request<Settings>("GET", "/settings"),
   saveSettings: (settings: Settings) => request<Settings>("PUT", "/settings", settings),

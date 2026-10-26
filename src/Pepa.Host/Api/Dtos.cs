@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using Pepa.Core;
 using Pepa.Core.Model;
 using Pepa.Core.Nodes;
 using Pepa.Core.Validation;
@@ -61,7 +62,10 @@ public sealed record ProcessSummaryDto(
     string? CurrentNodeId,
     string? CurrentNodeLabel,
     DateTimeOffset? WakeAt,
-    IReadOnlyList<ProcessAction> AllowedActions);
+    IReadOnlyList<ProcessAction> AllowedActions,
+    WaitKind WaitKind,
+    string? WaitingFor,
+    string? ParentProcessId);
 
 public sealed record StepDto(
     long Id,
@@ -88,7 +92,100 @@ public sealed record ProcessDetailsDto(
     JsonObject? LastError,
     IReadOnlyList<StepDto> Steps,
     IReadOnlyList<JournalDto> Journal,
-    ScenarioDefinition Definition);
+    ScenarioDefinition Definition,
+    ProcessRefDto? Parent,
+    IReadOnlyList<ProcessSummaryDto> Children,
+    IReadOnlyList<WaitDto> Waits,
+    IReadOnlyList<string> HeldResources);
+
+/// <summary>Краткая ссылка на процесс.</summary>
+public sealed record ProcessRefDto(string Id, string ShortId, string ScenarioName, ProcessStatus Status);
+
+/// <summary>Чего ждал или ждёт шаг процесса.</summary>
+public sealed record WaitDto(
+    long Id,
+    string NodeId,
+    string Source,
+    string? EventType,
+    string? CorrelationKey,
+    string? MatchExpression,
+    int Priority,
+    SubscriptionPurpose Purpose,
+    SubscriptionState State,
+    long? EventId,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset? ExpiresAt);
+
+// ───────────── События ─────────────
+
+public sealed record EventCandidateDto(long SubscriptionId, ProcessRefDto Process, bool StillWaiting);
+
+public sealed record EventDto(
+    long Id,
+    string Source,
+    string Type,
+    string? ExternalId,
+    string? CorrelationKey,
+    JsonNode? Payload,
+    DateTimeOffset ReceivedAt,
+    EventState State,
+    ProcessRefDto? Process,
+    IReadOnlyList<EventCandidateDto> Candidates,
+    IReadOnlyList<string> StartedProcesses,
+    string? Note,
+    DateTimeOffset? HandledAt);
+
+public sealed record PublishEventRequest(string Source, string? Type, string? CorrelationKey, string? ExternalId, JsonNode? Payload);
+
+public sealed record PublishEventResponse(long EventId, bool Duplicate);
+
+public sealed record ResolveEventRequest(long? SubscriptionId);
+
+// ───────────── Ресурсы ─────────────
+
+public sealed record ResourceWaiterDto(ProcessRefDto Process, DateTimeOffset RequestedAt);
+
+public sealed record ResourceDto(
+    string Key,
+    string Title,
+    ProcessRefDto? Holder,
+    DateTimeOffset? AcquiredAt,
+    DateTimeOffset UpdatedAt,
+    IReadOnlyList<ResourceWaiterDto> Queue);
+
+public sealed record ReleaseResourceRequest(string Key);
+
+// ───────────── Триггеры ─────────────
+
+public sealed record TriggerDto(
+    string Id,
+    string ScenarioId,
+    string ScenarioName,
+    TriggerKind Kind,
+    bool Enabled,
+    string Name,
+    JsonObject Config,
+    JsonObject? Inputs,
+    string Overlap,
+    string Description,
+    DateTimeOffset? NextRunAt,
+    DateTimeOffset? LastRunAt,
+    string? LastProcessId,
+    int MissedRuns,
+    DateTimeOffset? LastMissedAt,
+    int SkippedRuns,
+    string? LastError,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+
+public sealed record SaveTriggerRequest(
+    string ScenarioId,
+    TriggerKind Kind,
+    bool Enabled,
+    string? Name,
+    JsonObject Config,
+    JsonObject? Inputs,
+    string? Overlap);
 
 public sealed record OverviewCountsDto(int Running, int Waiting, int Paused, int NeedsAttention, int CompletedToday, int FailedToday);
 
@@ -96,7 +193,10 @@ public sealed record OverviewDto(
     OverviewCountsDto Counts,
     IReadOnlyList<ProcessSummaryDto> Attention,
     IReadOnlyList<ProcessSummaryDto> Active,
-    IReadOnlyList<ProcessSummaryDto> Recent);
+    IReadOnlyList<ProcessSummaryDto> Recent,
+    int EventConflicts,
+    IReadOnlyList<TriggerDto> MissedTriggers,
+    IReadOnlyList<TriggerDto> UpcomingTriggers);
 
 public sealed record NodeTypesDto(IReadOnlyList<NodeCategory> Categories, IReadOnlyList<NodeTypeDescriptor> NodeTypes);
 

@@ -32,9 +32,19 @@ export function toFlowNodes(definition: ScenarioDefinition): PepaNode[] {
   }));
 }
 
+const edgeClasses: Record<string, string> = {
+  error: "edge-error",
+  false: "edge-false",
+  true: "edge-true",
+  event: "edge-true",
+  done: "edge-true",
+  timeout: "edge-timeout",
+  item: "edge-item",
+};
+
 export function edgeStyle(port: string): Pick<PepaEdge, "className" | "label" | "animated"> {
   return {
-    className: port === "error" ? "edge-error" : port === "false" ? "edge-false" : port === "true" ? "edge-true" : "",
+    className: edgeClasses[port] ?? "",
     label: undefined,
     animated: false,
   };
@@ -106,8 +116,18 @@ export function isFieldVisible(field: FieldDescriptor, config: Record<string, Js
 }
 
 /** Короткое описание блока для карточки на схеме. */
-export function nodeSummary(node: NodeDefinition, descriptor: NodeTypeDescriptor | undefined): string {
+export function nodeSummary(
+  node: NodeDefinition,
+  descriptor: NodeTypeDescriptor | undefined,
+  scenarioNames?: Map<string, string>,
+): string {
   if (!descriptor?.summaryField) return "";
+  if (descriptor.type === "event.wait" || descriptor.type === "event.send") {
+    const source = String(node.config.source ?? descriptor.fields.find((f) => f.name === "source")?.default ?? "");
+    const type = node.config.eventType ? ` / ${String(node.config.eventType)}` : "";
+    const key = node.config.correlationKey ? ` · ${String(node.config.correlationKey)}` : "";
+    return `${source}${type}${key}`;
+  }
   const field = descriptor.fields.find((f) => f.name === descriptor.summaryField);
   const value = node.config[descriptor.summaryField] ?? field?.default;
   if (value === null || value === undefined || value === "") return "";
@@ -120,6 +140,9 @@ export function nodeSummary(node: NodeDefinition, descriptor: NodeTypeDescriptor
   }
   if (field?.kind === "select") {
     return field.options?.find((o) => o.value === value)?.label ?? String(value);
+  }
+  if (field?.kind === "scenario") {
+    return scenarioNames?.get(String(value)) ?? "сценарий не найден";
   }
   return typeof value === "string" ? value : JSON.stringify(value);
 }

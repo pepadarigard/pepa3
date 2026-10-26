@@ -22,3 +22,4 @@ src/Pepa.Host/wwwroot/
 *.db
 *.db-shm
 *.db-wal
+*.tsbuildinfo

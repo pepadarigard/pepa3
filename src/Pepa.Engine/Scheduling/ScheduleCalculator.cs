@@ -51,9 +51,10 @@ public static class ScheduleCalculator
                     return null;
                 }
 
-                // Привязка к началу суток (UTC), чтобы «каждые 30 минут» было в :00 и :30, а не «от момента сохранения».
+                // Привязка к началу местных суток, чтобы «каждые 30 минут» было в :00 и :30, а не «от момента сохранения».
                 var period = TimeSpan.FromMinutes(minutes);
-                var anchor = new DateTimeOffset(after.UtcDateTime.Date, TimeSpan.Zero);
+                var localDate = TimeZoneInfo.ConvertTime(after, zone).Date;
+                var anchor = new DateTimeOffset(localDate, zone.GetUtcOffset(localDate));
                 var passed = (after - anchor).Ticks / period.Ticks;
                 var next = anchor + TimeSpan.FromTicks((passed + 1) * period.Ticks);
                 return next > after ? next : next + period;

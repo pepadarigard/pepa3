@@ -48,7 +48,7 @@ async function main() {
   const errors = [];
   try {
     await waitForServer();
-    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, locale: "ru-RU" });
     page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
     page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
     page.on("dialog", (d) => d.accept());
@@ -107,7 +107,7 @@ async function main() {
     }
 
     step("Запуск нового сценария из конструктора");
-    await page.getByRole("button", { name: "Запустить" }).click();
+    await page.getByRole("button", { name: "Запустить", exact: true }).click();
     await page.locator(".badge", { hasText: "Завершён" }).first().waitFor({ timeout: 15000 });
     const written = fs.readdirSync(path.join(workspace, "e2e"));
     if (written.length !== 1) throw new Error(`Ожидался один файл, найдено: ${written}`);
@@ -126,6 +126,54 @@ async function main() {
     await page.getByRole("dialog").getByRole("button", { name: "Остановить" }).click();
     await page.locator(".badge", { hasText: "Остановлен" }).first().waitFor();
 
+    step("Пример 5: занять ресурс и дождаться события");
+    await page.goto(`${base}/#/scenarios`);
+    await page.locator(".scenario-card", { hasText: "Пример 5" }).getByRole("button", { name: "Запустить" }).click();
+    await page.getByRole("dialog").getByRole("textbox").first().fill("Z-1");
+    await page.getByRole("dialog").getByRole("button", { name: "Запустить" }).click();
+    await page.getByText("Ждёт событие «manual / reply» с ключом «Z-1»").first().waitFor({ timeout: 15000 });
+    const replyProcess = page.url().split("/process/")[1];
+    await page.getByText("Связи и ожидания").waitFor();
+    await page.screenshot({ path: path.join(shots, "08-waiting-event.png") });
+
+    await page.goto(`${base}/#/runs`);
+    await page.getByText("Профиль браузера (пример)").waitFor();
+    await page.getByRole("button", { name: "Отправить событие" }).click();
+    const sendDialog = page.getByRole("dialog");
+    await sendDialog.locator(".field", { hasText: "Ключ сопоставления" }).locator("input").fill("Z-1");
+    await sendDialog.locator(".field", { hasText: "Данные" }).locator("textarea").fill("согласовано");
+    await page.screenshot({ path: path.join(shots, "09-send-event.png") });
+    await sendDialog.getByRole("button", { name: "Отправить" }).click();
+    await page.getByText(/Событие #\d+ отправлено/).waitFor();
+    await page.goto(`${base}/#/process/${replyProcess}`);
+    await page.locator(".badge", { hasText: "Завершён" }).first().waitFor({ timeout: 15000 });
+    const reply = fs.readFileSync(path.join(workspace, "примеры", "ответы", "Z-1.txt"), "utf8");
+    if (reply !== "Ответ по заказу Z-1: согласовано") throw new Error(`Неожиданный ответ: ${reply}`);
+    await page.goto(`${base}/#/runs`);
+    await page.locator(".badge", { hasText: "Обработано" }).first().waitFor();
+    await page.getByText("Все ресурсы свободны").waitFor();
+    await page.screenshot({ path: path.join(shots, "10-runs-events.png") });
+
+    step("Автозапуск по расписанию");
+    await page.goto(`${base}/#/scenarios`);
+    const helloCard = page.locator(".scenario-card", { hasText: "Пример 1. Привет, файл" });
+    await helloCard.getByTitle("Ещё").click();
+    await page.getByRole("button", { name: "Автозапуск…" }).click();
+    await page.getByRole("dialog").getByRole("button", { name: "По расписанию" }).click();
+    const triggerDialog = page.getByRole("dialog");
+    await triggerDialog.locator(".field", { hasText: "Название" }).locator("input").fill("Каждое утро");
+    await triggerDialog.getByRole("button", { name: "пн" }).click();
+    await triggerDialog.getByRole("button", { name: "ср" }).click();
+    await page.screenshot({ path: path.join(shots, "11-trigger-editor.png") });
+    await triggerDialog.getByRole("button", { name: "Сохранить" }).click();
+    await page.getByRole("dialog").getByText("пн, ср в 09:00").waitFor();
+    await page.waitForTimeout(400);
+    await page.screenshot({ path: path.join(shots, "12-triggers.png") });
+    await page.getByRole("dialog").getByRole("button", { name: "Закрыть" }).click();
+    await helloCard.getByText("1 из 1 автозапуск").waitFor();
+    await page.goto(`${base}/#/`);
+    await page.getByText("Ближайшие запуски по расписанию").waitFor();
+
     step("История и выполнение");
     await page.goto(`${base}/#/history`);
     await page.locator("table.table tbody tr").nth(2).waitFor();
@@ -137,7 +185,7 @@ async function main() {
     await page.goto(`${base}/#/settings`);
     await page.getByRole("button", { name: "Тёмная" }).click();
     await page.goto(`${base}/#/process/${await lastProcessId()}`);
-    await page.locator(".badge", { hasText: "Остановлен" }).first().waitFor();
+    await page.locator(".badge", { hasText: "Завершён" }).first().waitFor();
     await page.screenshot({ path: path.join(shots, "07-process-dark.png") });
 
     if (errors.length > 0) throw new Error(`Ошибки в консоли браузера:\n${errors.join("\n")}`);

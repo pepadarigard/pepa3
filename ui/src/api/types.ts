@@ -77,7 +77,10 @@ export type FieldKind =
   | "boolean"
   | "select"
   | "variable"
-  | "time";
+  | "time"
+  | "matchCondition"
+  | "scenario"
+  | "seconds";
 
 export interface PortDescriptor {
   id: string;
@@ -191,6 +194,96 @@ export interface ProcessSummary {
   currentNodeLabel: string | null;
   wakeAt: string | null;
   allowedActions: ProcessAction[];
+  waitKind: WaitKind;
+  waitingFor: string | null;
+  parentProcessId: string | null;
+}
+
+export type WaitKind = "none" | "timer" | "retry" | "event" | "resource";
+
+export interface ProcessRef {
+  id: string;
+  shortId: string;
+  scenarioName: string;
+  status: ProcessStatus;
+}
+
+export type SubscriptionState = "active" | "fulfilled" | "expired" | "cancelled";
+
+export interface Wait {
+  id: number;
+  nodeId: string;
+  source: string;
+  eventType: string | null;
+  correlationKey: string | null;
+  matchExpression: string | null;
+  priority: number;
+  purpose: "event" | "childProcess";
+  state: SubscriptionState;
+  eventId: number | null;
+  createdAt: string;
+  expiresAt: string | null;
+}
+
+export type EventState = "received" | "matched" | "delivered" | "unmatched" | "conflict" | "ignored";
+
+export interface PepaEvent {
+  id: number;
+  source: string;
+  type: string;
+  externalId: string | null;
+  correlationKey: string | null;
+  payload: Json | null;
+  receivedAt: string;
+  state: EventState;
+  process: ProcessRef | null;
+  candidates: { subscriptionId: number; process: ProcessRef; stillWaiting: boolean }[];
+  startedProcesses: string[];
+  note: string | null;
+  handledAt: string | null;
+}
+
+export interface Resource {
+  key: string;
+  title: string;
+  holder: ProcessRef | null;
+  acquiredAt: string | null;
+  updatedAt: string;
+  queue: { process: ProcessRef; requestedAt: string }[];
+}
+
+export type TriggerKind = "schedule" | "event";
+
+export interface Trigger {
+  id: string;
+  scenarioId: string;
+  scenarioName: string;
+  kind: TriggerKind;
+  enabled: boolean;
+  name: string;
+  config: Record<string, Json>;
+  inputs: Record<string, Json> | null;
+  overlap: "skip" | "allow";
+  description: string;
+  nextRunAt: string | null;
+  lastRunAt: string | null;
+  lastProcessId: string | null;
+  missedRuns: number;
+  lastMissedAt: string | null;
+  skippedRuns: number;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SaveTrigger {
+  scenarioId: string;
+  kind: TriggerKind;
+  enabled: boolean;
+  name: string;
+  config: Record<string, Json>;
+  inputs: Record<string, Json> | null;
+  overlap: "skip" | "allow";
 }
 
 export type StepState =
@@ -239,6 +332,10 @@ export interface ProcessDetails {
   steps: Step[];
   journal: JournalEntry[];
   definition: ScenarioDefinition;
+  parent: ProcessRef | null;
+  children: ProcessSummary[];
+  waits: Wait[];
+  heldResources: string[];
 }
 
 export interface Overview {
@@ -253,6 +350,9 @@ export interface Overview {
   attention: ProcessSummary[];
   active: ProcessSummary[];
   recent: ProcessSummary[];
+  eventConflicts: number;
+  missedTriggers: Trigger[];
+  upcomingTriggers: Trigger[];
 }
 
 export interface Info {
@@ -261,7 +361,13 @@ export interface Info {
   workspaceRoot: string;
   isDesktop: boolean;
   startedAt: string;
-  recovery: { paused: number; unknownSteps: number; cancelledPlannedSteps: number };
+  recovery: {
+    paused: number;
+    unknownSteps: number;
+    cancelledPlannedSteps: number;
+    releasedResources: number;
+    missedRuns: number;
+  };
 }
 
 export interface Settings {

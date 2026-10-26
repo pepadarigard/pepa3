@@ -1,12 +1,13 @@
 import { useMemo, useRef, useState } from "react";
-import { AlertTriangle, CopyPlus, Download, Ellipsis, History, Pencil, Play, Plus, Search, Trash2, Upload, Workflow } from "lucide-react";
+import { AlertTriangle, CalendarClock, CopyPlus, Download, Ellipsis, History, Pencil, Play, Plus, Search, Trash2, Upload, Workflow } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
-import { useScenarios } from "../api/hooks";
-import type { ScenarioDefinition, ScenarioSummary } from "../api/types";
+import { useScenarios, useTriggers } from "../api/hooks";
+import type { ScenarioDefinition, ScenarioSummary, Trigger } from "../api/types";
 import { useFeedback } from "../components/feedback";
 import { ProcessStatusBadge } from "../components/process";
 import { useRunScenario } from "../components/RunDialog";
+import { useTriggersDialog } from "../components/triggers";
 import { Badge, Button, Empty, ErrorState, Loading } from "../components/ui";
 import { formatMoment, plural } from "../lib/format";
 import { navigate } from "../router";
@@ -30,6 +31,8 @@ export function ScenariosPage() {
   const feedback = useFeedback();
   const queryClient = useQueryClient();
   const runner = useRunScenario();
+  const triggersDialog = useTriggersDialog();
+  const triggers = useTriggers();
   const [query, setQuery] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
 
@@ -98,16 +101,19 @@ export function ScenariosPage() {
       ) : (
         <div className="scenario-grid">
           {filtered.map((s) => (
-            <ScenarioCard key={s.id} scenario={s} onRun={() => runner.run(s.id)} />
+            <ScenarioCard key={s.id} scenario={s} onRun={() => runner.run(s.id)}
+              triggers={(triggers.data ?? []).filter((t) => t.scenarioId === s.id)}
+              onTriggers={() => triggersDialog.open(s.id, s.name)} />
           ))}
         </div>
       )}
       {runner.element}
+      {triggersDialog.element}
     </div>
   );
 }
 
-function ScenarioCard({ scenario: s, onRun }: { scenario: ScenarioSummary; onRun: () => void }) {
+function ScenarioCard({ scenario: s, onRun, triggers, onTriggers }: { scenario: ScenarioSummary; onRun: () => void; triggers: Trigger[]; onTriggers: () => void }) {
   const feedback = useFeedback();
   const queryClient = useQueryClient();
   const [menu, setMenu] = useState(false);
@@ -161,6 +167,7 @@ function ScenarioCard({ scenario: s, onRun }: { scenario: ScenarioSummary; onRun
             <>
               <div style={{ position: "fixed", inset: 0, zIndex: 10 }} onClick={() => setMenu(false)} />
               <div className="menu">
+                <button onClick={() => { setMenu(false); onTriggers(); }}><CalendarClock size={15} /> Автозапуск…</button>
                 <button onClick={duplicate}><CopyPlus size={15} /> Дублировать</button>
                 <button onClick={exportFile}><Download size={15} /> Экспорт в файл</button>
                 <button onClick={() => navigate({ page: "history", scenarioId: s.id })}><History size={15} /> История запусков</button>
@@ -176,6 +183,13 @@ function ScenarioCard({ scenario: s, onRun }: { scenario: ScenarioSummary; onRun
         {s.errorCount > 0 && <Badge tone="danger" dot={false}><AlertTriangle size={12} /> {s.errorCount} {plural(s.errorCount, "ошибка", "ошибки", "ошибок")}</Badge>}
         {s.errorCount === 0 && s.warningCount > 0 && <Badge tone="warn" dot={false}>{s.warningCount} {plural(s.warningCount, "замечание", "замечания", "замечаний")}</Badge>}
         <span className="faint">версия {s.version}</span>
+        {triggers.length > 0 && (
+          <button type="button" className="link-button" onClick={onTriggers} title="Запуск по расписанию и событиям">
+            <Badge tone={triggers.some((t) => t.missedRuns > 0) ? "attention" : "info"} dot={false}>
+              <CalendarClock size={12} /> {triggers.filter((t) => t.enabled).length} из {triggers.length} {plural(triggers.length, "автозапуск", "автозапуска", "автозапусков")}
+            </Badge>
+          </button>
+        )}
       </div>
       <div className="row small muted" style={{ minHeight: 22 }}>
         {s.lastRun ? (

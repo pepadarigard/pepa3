@@ -1,5 +1,5 @@
 // Тексты интерфейса. Все строки — здесь, чтобы позже можно было добавить другие языки.
-import type { ProcessAction, ProcessStatus, StepState, VariableType, JournalLevel } from "../api/types";
+import type { EventState, JournalLevel, ProcessAction, ProcessStatus, StepState, SubscriptionState, VariableType } from "../api/types";
 
 export const ru = {
   app: {
@@ -89,6 +89,28 @@ export const ru = {
       "Отметить шаг выполненным? Делайте это, только если вы сами убедились, что действие выполнено.",
     skip: "Пропустить шаг и продолжить дальше?",
   },
+  eventState: {
+    received: "Принято",
+    matched: "Назначено",
+    delivered: "Обработано",
+    unmatched: "Никому не подошло",
+    conflict: "Нужно решение",
+    ignored: "Пропущено",
+  } satisfies Record<EventState, string>,
+  eventStateHint: {
+    received: "Событие принято и сейчас сопоставляется с ожидающими процессами.",
+    matched: "Событие назначено процессу. Он применит его, когда продолжит работу (например, после возобновления).",
+    delivered: "Процесс получил событие, или по нему запущен сценарий.",
+    unmatched: "Ни один процесс не ждал такое событие, ничего не запускалось. Событие сохранено.",
+    conflict: "Событие одинаково подходит нескольким процессам. Pepa никому его не отдала — выберите сами.",
+    ignored: "Вы решили не обрабатывать это событие.",
+  } satisfies Record<EventState, string>,
+  subscriptionState: {
+    active: "Ждёт",
+    fulfilled: "Получено",
+    expired: "Тайм-аут",
+    cancelled: "Отменено",
+  } satisfies Record<SubscriptionState, string>,
   variableTypes: {
     any: "Любой",
     text: "Текст",

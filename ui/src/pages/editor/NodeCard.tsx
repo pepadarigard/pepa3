@@ -1,6 +1,7 @@
-import { createContext, memo, useContext } from "react";
+import { createContext, memo, useContext, useMemo } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import type { NodeTypeDescriptor, StepState } from "../../api/types";
+import { useScenarios } from "../../api/hooks";
 import { categoryColor, NodeIcon } from "../../components/Icon";
 import { nodeSummary, type PepaNode } from "../../lib/graph";
 
@@ -23,6 +24,14 @@ function portClass(id: string, kind: string) {
   return kind === "error" ? "error" : id;
 }
 
+function useScenarioNames(enabled: boolean) {
+  const scenarios = useScenarios();
+  return useMemo(
+    () => (enabled ? new Map((scenarios.data ?? []).map((s) => [s.id, s.name])) : undefined),
+    [enabled, scenarios.data],
+  );
+}
+
 export const NodeCard = memo(function NodeCard({ id, data, selected }: NodeProps<PepaNode>) {
   const context = useContext(FlowContext);
   const definition = data.definition;
@@ -30,7 +39,8 @@ export const NodeCard = memo(function NodeCard({ id, data, selected }: NodeProps
   const outputs = descriptor?.outputs ?? [];
   const errors = context.issues?.get(id) ?? 0;
   const run = context.states ? context.states.get(id) ?? { state: "none" as const, count: 0 } : undefined;
-  const summary = nodeSummary(definition, descriptor);
+  const scenarioNames = useScenarioNames(descriptor?.fields.some((f) => f.kind === "scenario") ?? false);
+  const summary = nodeSummary(definition, descriptor, scenarioNames);
   const title = definition.label || descriptor?.title || definition.type;
   const singleOutput = outputs.length === 1 ? outputs[0] : null;
 
@@ -67,7 +77,8 @@ export const NodeCard = memo(function NodeCard({ id, data, selected }: NodeProps
         outputs.length > 0 && (
           <div className="pnode-ports">
             {outputs.map((port) => (
-              <div key={port.id} className={`pnode-port ${portClass(port.id, port.kind)}`}>
+              <div key={port.id} className={`pnode-port ${portClass(port.id, port.kind)}`}
+                title={port.kind === "optional" ? "Необязательный выход. Если он не подключён и процесс пойдёт сюда — процесс остановится с понятной причиной." : undefined}>
                 {port.label}
                 <Handle type="source" position={Position.Right} id={port.id} className={`source port-${portClass(port.id, port.kind)}`} />
               </div>
