@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 
 namespace Pepa.Core.Nodes;
 
@@ -109,6 +110,7 @@ public sealed record NodeTypeDescriptor
     public PortDescriptor? FindOutput(string id) => Outputs.FirstOrDefault(p => p.Id == id);
 
     /// <summary>Порты успешного завершения (не порты ошибки).</summary>
+    [JsonIgnore]
     public IEnumerable<PortDescriptor> SuccessOutputs => Outputs.Where(p => p.Kind == PortKind.Normal);
 }
 
