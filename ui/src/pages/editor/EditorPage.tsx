@@ -15,7 +15,7 @@ import {
   type NodeChange,
   type ReactFlowInstance,
 } from "@xyflow/react";
-import { ArrowLeft, Bug, CalendarClock, ClipboardPaste, Copy, LayoutGrid, Play, Plus, Redo2, Save, Search, Shapes, Undo2, Workflow } from "lucide-react";
+import { ArrowLeft, Bug, CalendarClock, CircleDot, ClipboardPaste, Copy, LayoutGrid, Play, Plus, Redo2, Save, Search, Shapes, Undo2, Workflow } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
 import { useNodeTypes, useScenario, useScenarios } from "../../api/hooks";
@@ -32,6 +32,7 @@ import { navigate, setLeaveGuard } from "../../router";
 import { blankScenario } from "../ScenariosPage";
 import { EdgeInspector, NodeInspector, ScenarioInspector } from "./Inspector";
 import { IssuesPanel } from "./IssuesPanel";
+import { RecorderDialog } from "./RecorderDialog";
 import { FlowContext, nodeTypes } from "./NodeCard";
 import { DRAG_TYPE, Palette } from "./Palette";
 import { definitionOf, fromDefinition, snapshotOf, useEditor, type Meta } from "./useEditor";
@@ -281,6 +282,15 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
     y: Math.min(...data.nodes.map((n) => n.position?.y ?? 0)),
   });
 
+  /** Вставить группу блоков в свободное место у центра видимой части холста. */
+  const insertAtView = useCallback((data: BlockClipboard) => {
+    const origin = groupOrigin(data);
+    const rect = canvas.current?.getBoundingClientRect();
+    const center = rect ? flow.screenToFlowPosition({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }) : { x: 0, y: 0 };
+    const width = Math.max(...data.nodes.map((n) => n.position?.x ?? 0)) - origin.x + NODE_WIDTH;
+    insertBlocks(data, freeSpot(editor.state.nodes, { x: Math.round(center.x - Math.min(width, 900) / 2), y: Math.round(center.y - 60) }));
+  }, [editor, flow, insertBlocks]);
+
   const copySelected = useCallback(() => {
     const data = copyBlocks(editor.state.nodes, editor.state.edges, editor.state.meta.variables, descriptors, isStart);
     if (!data) {
@@ -306,13 +316,11 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
       // Тот же сценарий, оригиналы на месте — рядом с ними.
       insertBlocks(data, { x: origin.x + 40, y: origin.y + 40 });
     } else {
-      // Другой сценарий — в центр видимой части холста.
-      const rect = canvas.current?.getBoundingClientRect();
-      const center = rect ? flow.screenToFlowPosition({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }) : { x: 0, y: 0 };
-      const width = Math.max(...data.nodes.map((n) => n.position?.x ?? 0)) - origin.x + NODE_WIDTH;
-      insertBlocks(data, freeSpot(editor.state.nodes, { x: Math.round(center.x - width / 2), y: Math.round(center.y - 60) }));
+      insertAtView(data);
     }
-  }, [editor, feedback, flow, insertBlocks]);
+  }, [editor, feedback, insertAtView, insertBlocks]);
+
+  const [recorderOpen, setRecorderOpen] = useState(false);
 
   const duplicateSelected = useCallback(() => {
     const data = copyBlocks(editor.state.nodes, editor.state.edges, editor.state.meta.variables, descriptors, isStart);
@@ -411,6 +419,7 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
         <Button size="small" variant="ghost" iconOnly icon={Search} title="Найти блок (Ctrl+F)" onClick={() => setSearchOpen(true)} />
         <Button size="small" variant="ghost" iconOnly icon={Copy} title="Копировать выбранные блоки (Ctrl+C)" onClick={copySelected} />
         <Button size="small" variant="ghost" iconOnly icon={ClipboardPaste} title="Вставить блоки (Ctrl+V) — можно и в другой сценарий" onClick={pasteFromClipboard} />
+        <Button size="small" icon={CircleDot} title="Записать действия в браузере и превратить их в блоки" onClick={() => setRecorderOpen(true)}>Записать</Button>
         <Button size="small" icon={LayoutGrid} title="Расставить блоки автоматически" onClick={layout}>Упорядочить</Button>
         <Button size="small" icon={CalendarClock} title="Запуск по расписанию и по событиям"
           onClick={() => triggersDialog.open(scenario.id, state.meta.name || scenario.name)}>
@@ -498,6 +507,15 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
       </div>
       {runner.element}
       {triggersDialog.element}
+      {recorderOpen && (
+        <RecorderDialog
+          onClose={() => setRecorderOpen(false)}
+          onInsert={(blocks) => {
+            insertAtView(blocks);
+            feedback.toast(`Добавлено блоков из записи: ${blocks.nodes.length}. Соедините их со схемой.`, "info");
+          }}
+        />
+      )}
     </div>
   );
 }

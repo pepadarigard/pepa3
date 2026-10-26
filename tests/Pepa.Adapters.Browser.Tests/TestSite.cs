@@ -70,6 +70,8 @@ internal sealed class TestSite : IDisposable
                            <div id="fake-select">Не список</div>
                            <label><input type="checkbox" id="agree"> Согласен</label>
                            <input type="file" id="file" style="display:none">
+                           <input type="password" name="pass" placeholder="Пароль">
+                           <div><span class="opaque"><b>Без опознавательных знаков</b></span><span class="opaque"><b>Без опознавательных знаков</b></span></div>
                            <a id="popup" href="/second?from=popup" target="_blank">Открыть во вкладке</a>
                            <button id="later" onclick="setTimeout(() => location.href = '/second?step=done', 700)">Перейти позже</button>
                            </body></html>

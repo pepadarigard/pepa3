@@ -232,6 +232,12 @@ public sealed record TelegramCodeRequest(string? Value);
 
 public sealed record DesktopWindowDto(string Title, string Process);
 
+/// <param name="Browser">«pepa» — браузер Pepa с сохранённым входом, «adspower» — профиль AdsPower.</param>
+public sealed record RecorderStartRequest(string? Browser, string? ProfileId, string? Url);
+
+public sealed record RecorderStateDto(bool Recording, string? Browser, string? ProfileId, string? StartUrl,
+    IReadOnlyList<Adapters.Browser.RecordedAction> Actions);
+
 /// <summary>Шаблон сценария (из набора примеров): из него можно создать свой сценарий.</summary>
 public sealed record TemplateDto(string Name, string Description, IReadOnlyList<string> Blocks, ScenarioDefinition Definition);
 

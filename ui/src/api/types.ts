@@ -406,6 +406,14 @@ export interface TelegramStatus {
   phone: string | null;
 }
 
+export interface RecorderState {
+  recording: boolean;
+  browser: "pepa" | "adspower" | null;
+  profileId: string | null;
+  startUrl: string | null;
+  actions: import("../lib/recording").RecordedAction[];
+}
+
 export interface ScenarioTemplate {
   name: string;
   description: string;

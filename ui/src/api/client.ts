@@ -2,6 +2,7 @@ import type {
   AdsPowerProfile,
   DesktopWindow,
   ScenarioTemplate,
+  RecorderState,
   TelegramStatus,
   Info,
   NodeTypes,
@@ -153,6 +154,10 @@ export const api = {
 
   desktopWindows: () => request<DesktopWindow[]>("GET", "/integrations/desktop/windows"),
   templates: () => request<ScenarioTemplate[]>("GET", "/templates"),
+  recorder: () => request<RecorderState>("GET", "/recorder"),
+  recorderStart: (start: { browser: "pepa" | "adspower"; profileId: string | null; url: string | null }) =>
+    request<RecorderState>("POST", "/recorder/start", start),
+  recorderStop: () => request<RecorderState>("POST", "/recorder/stop"),
 
   telegram: () => request<TelegramStatus>("GET", "/integrations/telegram"),
   telegramLogin: (login: { apiId: number; apiHash: string | null; phone: string }) =>

@@ -143,6 +143,16 @@ async function main() {
     await page.locator(".react-flow__node").nth(3).waitFor();
     if (!(await page.locator(".editor-title").innerText()).startsWith("Цикл")) throw new Error("Шаблон не открылся в конструкторе");
 
+    step("Окно записи действий");
+    await page.goto(`${base}/#/editor/${saved.id}`);
+    await page.getByRole("button", { name: "Записать", exact: true }).click();
+    await page.getByRole("dialog").getByText("Записать действия в браузере").waitFor();
+    await page.getByRole("dialog").getByText("Профиль AdsPower").click();
+    await page.getByRole("dialog").getByPlaceholder("k1bitq6l").waitFor();
+    await page.waitForTimeout(300);
+    await page.screenshot({ path: path.join(shots, "17-recorder.png") });
+    await page.getByRole("dialog").getByRole("button", { name: "Закрыть" }).click();
+
     step("Отладка: пошаговый запуск");
     await page.goto(`${base}/#/editor/${saved.id}`);
     await page.getByRole("button", { name: "Пошагово" }).click();

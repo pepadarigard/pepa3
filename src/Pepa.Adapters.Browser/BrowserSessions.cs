@@ -399,7 +399,7 @@ public sealed class BrowserSessions : IAsyncDisposable
             : $"Не удалось запустить {name}: {FirstLine(ex.Message)}";
     }
 
-    internal static string FirstLine(string message)
+    public static string FirstLine(string message)
     {
         var line = message.Split('\n', 2)[0].Trim();
         return line.Length > 300 ? line[..300] + "…" : line;

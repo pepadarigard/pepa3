@@ -261,7 +261,7 @@ function WindowPicker({ onPick }: { onPick: (title: string) => void }) {
   );
 }
 
-function AdsPowerPicker({ onPick }: { onPick: (id: string) => void }) {
+export function AdsPowerPicker({ onPick }: { onPick: (id: string) => void }) {
   const [state, setState] = useState<{ loading: boolean; profiles: AdsPowerProfile[] | null; error: string | null }>({
     loading: false,
     profiles: null,

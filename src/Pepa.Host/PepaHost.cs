@@ -150,6 +150,8 @@ public sealed class PepaHost : IAsyncDisposable
         builder.Services.AddSingleton<EventHub>();
         builder.Services.AddSingleton(adsPower);
         builder.Services.AddSingleton(browsers);
+        var recorder = new BrowserRecorder(browsers);
+        builder.Services.AddSingleton(recorder);
         builder.Services.AddSingleton(telegram);
         builder.Services.AddSingleton(desktop);
         builder.Services.AddSingleton(sp => new ProcessEngine(
@@ -169,6 +171,7 @@ public sealed class PepaHost : IAsyncDisposable
         var events = app.Services.GetRequiredService<EventHub>();
         telegram.Logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger<TelegramService>();
         telegram.StatusChanged += () => events.Publish("integrations");
+        recorder.Changed += () => events.Publish("recorder");
         engine.Changed += change => events.Publish("process", change.ProcessId);
         engine.EventsChanged += () => events.Publish("events");
         engine.TriggersChanged += () => events.Publish("triggers");
@@ -316,6 +319,7 @@ public sealed class PepaHost : IAsyncDisposable
         {
             await telegram.DisposeAsync();
             await engine.StopAsync();
+            await Services.GetRequiredService<BrowserRecorder>().DisposeAsync();
             await Services.GetRequiredService<BrowserSessions>().DisposeAsync();
             Services.GetRequiredService<AdsPowerClient>().Dispose();
             await events.DisposeAsync();

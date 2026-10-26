@@ -188,6 +188,46 @@ internal static class ApiEndpoints
         api.MapGet("/scenarios/{id}", async (string id, ScenarioService scenarios, CancellationToken ct) =>
             await scenarios.GetAsync(id, ct) is { } stored ? Results.Ok(ToDto(stored, scenarios)) : NotFound("Сценарий не найден."));
 
+        // ───────────── Запись действий в браузере ─────────────
+        api.MapGet("/recorder", (Adapters.Browser.BrowserRecorder recorder) => RecorderDto(recorder.State));
+
+        api.MapPost("/recorder/start", async (RecorderStartRequest request, Adapters.Browser.BrowserRecorder recorder, IPepaStore store,
+            CancellationToken ct) =>
+        {
+            var adsPower = string.Equals(request.Browser, "adspower", StringComparison.OrdinalIgnoreCase);
+            var profileId = request.ProfileId?.Trim();
+            // Профиль, который сейчас занят процессом, записи не отдаётся: два «пользователя» в одном браузере мешали бы друг другу.
+            var resourceKey = adsPower ? Adapters.Browser.BrowserSessions.AdsPowerResourceKey(profileId ?? "") : "pepa-browser:main";
+            if ((await store.ListResourcesAsync(ct)).FirstOrDefault(r => r.Key == resourceKey && r.HolderProcessId is not null) is { } held)
+            {
+                return Results.Json(new ErrorDto($"{held.Title} сейчас занят процессом #{held.HolderProcessId![^6..]} — дождитесь его окончания или остановите."),
+                    Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status409Conflict);
+            }
+
+            try
+            {
+                await recorder.StartAsync(new Adapters.Browser.RecorderStart(
+                    adsPower ? Adapters.Browser.RecorderBrowser.AdsPower : Adapters.Browser.RecorderBrowser.Pepa,
+                    profileId, string.IsNullOrWhiteSpace(request.Url) ? null : request.Url.Trim()), ct);
+                return Results.Ok(RecorderDto(recorder.State));
+            }
+            catch (Adapters.Browser.RecorderException ex)
+            {
+                return Results.Json(new ErrorDto(ex.Message), Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status409Conflict);
+            }
+            catch (Microsoft.Playwright.PlaywrightException ex)
+            {
+                return Results.Json(new ErrorDto($"Не удалось открыть страницу: {Adapters.Browser.BrowserSessions.FirstLine(ex.Message)}"),
+                    Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status502BadGateway);
+            }
+        });
+
+        api.MapPost("/recorder/stop", async (Adapters.Browser.BrowserRecorder recorder, CancellationToken ct) =>
+        {
+            await recorder.StopAsync(ct);
+            return RecorderDto(recorder.State);
+        });
+
         api.MapGet("/templates", (Core.Nodes.NodeRegistry registry) => Samples.SampleScenarios.All().Select(s =>
         {
             var name = System.Text.RegularExpressions.Regex.Replace(s.Name, @"^Пример \d+\.\s*", "");
@@ -430,6 +470,9 @@ internal static class ApiEndpoints
         }, ct);
         return (await mapper.TriggersAsync([saved], ct))[0];
     }
+
+    private static RecorderStateDto RecorderDto(Adapters.Browser.RecorderState state) =>
+        new(state.Recording, state.Browser?.ToString().ToLowerInvariant(), state.ProfileId, state.StartUrl, state.Actions);
 
     private static TelegramStatusDto TelegramDto(Adapters.Telegram.TelegramService telegram)
     {
