@@ -152,6 +152,12 @@ public abstract record NodeResult
     /// <summary>Освободить ресурс, если он занят этим процессом. Затем порт «out».</summary>
     public sealed record ReleaseResource(string Key) : NodeResult;
 
+    /// <summary>Разделить процесс на параллельные ветви: по ветви на каждый из выходов (подключённых).</summary>
+    public sealed record Split(IReadOnlyList<string> Ports) : NodeResult;
+
+    /// <summary>Слияние: дождаться остальных ветвей своего разделения, затем идти дальше одной ветвью по «out».</summary>
+    public sealed record Join : NodeResult;
+
     /// <summary>Опубликовать событие (с ключом дедупликации). Затем порт «out».</summary>
     public sealed record PublishEvent(EventInput Event) : NodeResult;
 

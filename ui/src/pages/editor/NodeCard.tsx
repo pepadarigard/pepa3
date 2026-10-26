@@ -17,7 +17,8 @@ export interface FlowContextValue {
   /** Итог исполнения по блоку (страница процесса). */
   states?: Map<string, NodeRunState>;
   /** Блок, на котором процесс сейчас стоит (ожидание, пауза, ошибка). */
-  current?: string | null;
+  /** Блоки, где сейчас процесс (ветви параллельного участка — каждая в своём). */
+  current?: string[] | null;
 }
 
 export const FlowContext = createContext<FlowContextValue>({ descriptors: new Map() });
@@ -51,7 +52,7 @@ export const NodeCard = memo(function NodeCard({ id, data, selected }: NodeProps
     selected ? "selected" : "",
     errors > 0 ? "has-error" : "",
     run ? `state-${run.state}` : "",
-    context.current === id ? "current" : "",
+    context.current?.includes(id) ? "current" : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -90,7 +91,7 @@ export const NodeCard = memo(function NodeCard({ id, data, selected }: NodeProps
         )
       )}
       {definition.settings.breakpoint && <span className="pnode-breakpoint" title="Пауза перед этим блоком (отладка)" />}
-      {context.current === id && <span className="pnode-here">процесс здесь</span>}
+      {context.current?.includes(id) && <span className="pnode-here">процесс здесь</span>}
       {errors > 0 && (
         <span className="pnode-flag" title="В блоке есть ошибки">
           {errors}

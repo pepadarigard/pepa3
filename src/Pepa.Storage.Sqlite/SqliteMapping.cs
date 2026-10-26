@@ -76,6 +76,7 @@ internal static class SqliteMapping
         PauseReason = EnumOf<PauseReason>(r, "pause_reason"),
         StatusMessage = Str(r, "status_message"),
         AttentionStepId = Long(r, "attention_step_id"),
+        AttentionTokenId = Str(r, "attention_token_id"),
         Variables = ObjectOf(r, "variables") ?? new JsonObject(),
         LastError = ObjectOf(r, "last_error"),
         Memory = ObjectOf(r, "memory"),
@@ -102,6 +103,7 @@ internal static class SqliteMapping
         WaitingStepId = Long(r, "waiting_step_id"),
         WaitRef = Str(r, "wait_ref"),
         FromNodeId = Str(r, "from_node_id"),
+        Fork = Str(r, "fork"),
         CreatedAt = DateOf(r, "created_at")!.Value,
     };
 

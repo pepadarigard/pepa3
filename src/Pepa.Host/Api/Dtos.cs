@@ -97,7 +97,8 @@ public sealed record ProcessDetailsDto(
     ProcessRefDto? Parent,
     IReadOnlyList<ProcessSummaryDto> Children,
     IReadOnlyList<WaitDto> Waits,
-    IReadOnlyList<string> HeldResources);
+    IReadOnlyList<string> HeldResources,
+    IReadOnlyList<string> ActiveNodeIds);
 
 /// <summary>Краткая ссылка на процесс.</summary>
 public sealed record ProcessRefDto(string Id, string ShortId, string ScenarioName, ProcessStatus Status);

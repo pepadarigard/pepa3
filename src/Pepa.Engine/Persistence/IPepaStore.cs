@@ -71,7 +71,12 @@ public interface IStoreWrite : IAsyncDisposable
     Task UpdateProcessAsync(ProcessRecord process);
     Task<ProcessRecord?> GetProcessByOriginAsync(string originKey);
     Task<ProcessRecord?> GetProcessAsync(string id);
+    Task<IReadOnlyList<TokenRecord>> GetTokensAsync(string processId);
     Task UpsertTokenAsync(TokenRecord token);
+
+    /// <summary>Отменить незавершённые («запланирован», «ожидает») шаги процесса, кроме указанного.</summary>
+    Task CancelOpenStepsAsync(string processId, long exceptStepId, string resolution, DateTimeOffset at);
+
     Task<long> InsertStepAsync(StepRecord step);
     Task UpdateStepAsync(StepRecord step);
     Task AddJournalAsync(JournalEntry entry);

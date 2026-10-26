@@ -18,7 +18,9 @@ public static class FlowNodes
         .Register(new AcquireResourceNode())
         .Register(new ReleaseResourceNode())
         .Register(new CallScenarioNode())
-        .Register(new RunScenarioNode());
+        .Register(new RunScenarioNode())
+        .Register(new ParallelNode())
+        .Register(new JoinNode());
 
     internal static readonly PortDescriptor TimeoutPort = new(Ports.Timeout, "Тайм-аут", PortKind.Optional);
 

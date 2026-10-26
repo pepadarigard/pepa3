@@ -86,6 +86,9 @@ public sealed record ProcessRecord
     /// <summary>Шаг, по которому нужно решение пользователя.</summary>
     public long? AttentionStepId { get; init; }
 
+    /// <summary>Ветвь (маркер), которая остановилась и ждёт решения, — важно, если ветвей несколько.</summary>
+    public string? AttentionTokenId { get; init; }
+
     public required JsonObject Variables { get; init; }
     public JsonObject? LastError { get; init; }
 
@@ -124,6 +127,9 @@ public enum WaitKind
 {
     None,
 
+    /// <summary>Ветвь пришла к слиянию и ждёт остальные ветви (WaitRef — id разделения).</summary>
+    Join,
+
     /// <summary>Блок «Ожидание»: по пробуждению шаг завершается и маркер идёт дальше.</summary>
     Timer,
 
@@ -158,6 +164,12 @@ public sealed record TokenRecord
 
     /// <summary>Из какого блока маркер пришёл в текущий (для циклов: вход «снаружи» или «по кругу»).</summary>
     public string? FromNodeId { get; init; }
+
+    /// <summary>
+    /// Параллельные участки, в которых маркер сейчас (вложенные — через «/»): «id-разделения:число-ветвей». Слияние ждёт
+    /// маркеры с тем же последним участком. null — маркер вне параллельных участков.
+    /// </summary>
+    public string? Fork { get; init; }
 
     public required DateTimeOffset CreatedAt { get; init; }
 }

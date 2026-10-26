@@ -9,7 +9,7 @@ public static class SampleScenarios
     public static IReadOnlyList<ScenarioDefinition> All() => [.. Versioned().Select(s => s.Scenario)];
 
     /// <summary>Текущая версия набора примеров: при обновлении Pepa добавляются только новые.</summary>
-    public const int CurrentVersion = 4;
+    public const int CurrentVersion = 5;
 
     /// <summary>Примеры с номером версии набора, в которой они появились.</summary>
     public static IReadOnlyList<(int Version, ScenarioDefinition Scenario)> Versioned() =>
@@ -18,6 +18,7 @@ public static class SampleScenarios
         (2, WaitForReply()), (2, GreetEveryone()),
         (3, BrowserPage()), (3, AdsPowerFlow()),
         (4, TelegramReply()), (4, AdsPowerTelegram()),
+        (5, Parallel()),
     ];
 
     private static NodeDefinition N(string id, string type, double x, double y, JsonObject? config = null,
@@ -389,6 +390,46 @@ public static class SampleScenarios
         [
             E("start", "open"), E("open", "read"), E("read", "shot"), E("shot", "send"), E("send", "wait"),
             E("wait", "close", Ports.Event), E("wait", "late", Ports.Timeout), E("close", "done"),
+        ],
+    };
+
+    public static ScenarioDefinition Parallel() => new()
+    {
+        Name = "Пример 11. Параллельно: ждать ответ и работать",
+        Description = "Делит процесс на две ветви: одна ждёт ответ-событие с ключом заказа (до 10 минут), другая тем временем " +
+                      "записывает файл и пишет в журнал. «Дождаться всех ветвей» продолжает процесс, когда обе закончили. " +
+                      "Отправьте ответ на странице «Выполнение» → «Отправить событие» с ключом заказа.",
+        Variables =
+        [
+            new VariableDefinition { Name = "order", Type = VariableType.Text, Default = "A-200", IsInput = true, Description = "Номер заказа (ключ ответа)" },
+            new VariableDefinition { Name = "reply", Type = VariableType.Any, Description = "Полученный ответ" },
+        ],
+        Nodes =
+        [
+            N("start", "start", 0, 140),
+            N("split", "parallel", 260, 140, label: "Две ветви"),
+            N("wait", "event.wait", 540, 40, new JsonObject
+            {
+                ["source"] = "manual",
+                ["correlationKey"] = "{{ vars.order }}",
+                ["timeoutSeconds"] = 600,
+                ["saveTo"] = "reply",
+            }, "Ждать ответ"),
+            N("write", "file.write", 540, 260, new JsonObject
+            {
+                ["path"] = "примеры/параллельно/{{ vars.order }}.txt",
+                ["content"] = "Заказ {{ vars.order }}: работа шла, пока ждали ответ.",
+                ["mode"] = "overwrite",
+            }, "Записать файл"),
+            N("log", "log", 820, 260, new JsonObject { ["message"] = "Файл записан, ждём вторую ветвь." }),
+            N("join", "join", 1100, 140, label: "Обе ветви готовы"),
+            N("done", "end", 1380, 140, new JsonObject { ["outcome"] = "success", ["message"] = "Ответ: {{ vars.reply.payload }}" }),
+            N("late", "end", 820, 40, new JsonObject { ["outcome"] = "failure", ["message"] = "Ответ не пришёл за 10 минут." }, "Ответа нет"),
+        ],
+        Edges =
+        [
+            E("start", "split"), E("split", "wait", "b1"), E("split", "write", "b2"), E("write", "log"), E("log", "join"),
+            E("wait", "join", Ports.Event), E("wait", "late", Ports.Timeout), E("join", "done"),
         ],
     };
 }

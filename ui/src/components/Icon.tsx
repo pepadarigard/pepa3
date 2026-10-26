@@ -1,4 +1,6 @@
 import {
+  Merge,
+  Split,
   AppWindow,
   BellRing,
   Code,
@@ -46,6 +48,8 @@ const nodeIcons: Record<string, LucideIcon> = {
   play: Play,
   flag: Flag,
   "git-branch": GitBranch,
+  split: Split,
+  merge: Merge,
   variable: Variable,
   "scroll-text": ScrollText,
   timer: Timer,

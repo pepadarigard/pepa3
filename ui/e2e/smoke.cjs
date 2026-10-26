@@ -280,6 +280,22 @@ async function main() {
     errors.splice(before, errors.length - before, ...errors.slice(before).filter((e) => !e.includes("status of 400")));
     await page.screenshot({ path: path.join(shots, "13-integrations-telegram.png") });
 
+    step("Параллельные ветви: пример 11");
+    await page.goto(`${base}/#/scenarios`);
+    const parallelCard = page.locator(".scenario-card", { hasText: "Пример 11. Параллельно" });
+    await parallelCard.getByRole("button", { name: "Запустить" }).click();
+    await page.getByRole("dialog").getByRole("button", { name: "Запустить" }).click();
+    await page.waitForURL(/#\/process\//);
+    await page.locator(".pnode-here").nth(1).waitFor({ timeout: 15000 });
+    if ((await page.locator(".pnode-here").count()) !== 2) throw new Error("Ожидались две отметки «процесс здесь»");
+    await page.screenshot({ path: path.join(shots, "14-parallel.png") });
+    await fetch(`${base}/api/events`, {
+      method: "POST",
+      headers: { "X-Pepa-Token": token, "Content-Type": "application/json" },
+      body: JSON.stringify({ source: "manual", type: "reply", correlationKey: "A-200", payload: "готово" }),
+    });
+    await page.locator(".badge", { hasText: "Завершён" }).first().waitFor({ timeout: 15000 });
+
     step("ИИ-помощник: ключ и черновик блоков");
     await page.goto(`${base}/#/settings`);
     await page.getByPlaceholder("sk-ant-…").fill("sk-ant-e2e-0123456789abcdef");

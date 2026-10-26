@@ -37,7 +37,12 @@ internal sealed class ProcessMapper(ProcessEngine engine, IPepaStore store)
     public ProcessSummaryDto Summary(ProcessRecord process, IReadOnlyList<TokenRecord> tokens,
         IReadOnlyDictionary<long, SubscriptionRecord>? subscriptions = null)
     {
-        var token = tokens.FirstOrDefault(t => t.State != TokenState.Completed);
+        // С параллельными ветвями — та, что ждёт решения, иначе та, что работает, иначе любая незавершённая.
+        var active = tokens.Where(t => t.State != TokenState.Completed).ToList();
+        var token = active.FirstOrDefault(t => t.Id == process.AttentionTokenId)
+                    ?? active.FirstOrDefault(t => t.State == TokenState.Ready)
+                    ?? active.FirstOrDefault(t => t.WaitKind != WaitKind.Join)
+                    ?? active.FirstOrDefault();
         string? label = null;
         if (token is not null)
         {

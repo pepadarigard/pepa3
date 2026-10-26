@@ -50,10 +50,10 @@ internal sealed class SqliteWrite(SqliteConnection connection, SqliteTransaction
     public Task InsertProcessAsync(ProcessRecord process) =>
         RunAsync("""
                  INSERT INTO processes (id, scenario_id, scenario_name, scenario_version, definition, status, attention,
-                     pause_reason, status_message, attention_step_id, variables, last_error, memory, debug, parent_process_id,
+                     pause_reason, status_message, attention_step_id, attention_token_id, variables, last_error, memory, debug, parent_process_id,
                      origin_key, depth, step_count, step_budget, created_at, updated_at, finished_at)
                  VALUES ($id, $scenario_id, $scenario_name, $scenario_version, $definition, $status, $attention,
-                     $pause_reason, $status_message, $attention_step_id, $variables, $last_error, $memory, $debug, $parent_process_id,
+                     $pause_reason, $status_message, $attention_step_id, $attention_token_id, $variables, $last_error, $memory, $debug, $parent_process_id,
                      $origin_key, $depth, $step_count, $step_budget, $created_at, $updated_at, $finished_at);
                  """, c => BindProcess(c, process));
 
@@ -62,6 +62,7 @@ internal sealed class SqliteWrite(SqliteConnection connection, SqliteTransaction
         var changed = await RunAsync("""
                                      UPDATE processes SET status = $status, attention = $attention, pause_reason = $pause_reason,
                                          status_message = $status_message, attention_step_id = $attention_step_id,
+                                         attention_token_id = $attention_token_id,
                                          variables = $variables, last_error = $last_error, memory = $memory, debug = $debug,
                                          step_count = $step_count, step_budget = $step_budget, updated_at = $updated_at,
                                          finished_at = $finished_at
@@ -81,16 +82,31 @@ internal sealed class SqliteWrite(SqliteConnection connection, SqliteTransaction
         (await Query("SELECT * FROM processes WHERE id = $id;", c => c.Parameters.AddWithValue("$id", id), ReadProcess))
         .FirstOrDefault();
 
+    public Task<IReadOnlyList<TokenRecord>> GetTokensAsync(string processId) =>
+        Query("SELECT * FROM tokens WHERE process_id = $p ORDER BY created_at;", c => c.Parameters.AddWithValue("$p", processId), ReadToken);
+
+    public Task CancelOpenStepsAsync(string processId, long exceptStepId, string resolution, DateTimeOffset at) =>
+        RunAsync("""
+                 UPDATE steps SET state = 'Cancelled', finished_at = $at, resolution = $resolution
+                 WHERE process_id = $p AND state IN ('Planned', 'Waiting') AND id <> $except;
+                 """, c =>
+        {
+            c.Parameters.AddWithValue("$p", processId);
+            c.Parameters.AddWithValue("$except", exceptStepId);
+            c.Parameters.AddWithValue("$resolution", resolution);
+            c.Parameters.AddWithValue("$at", Date(at));
+        });
+
     public Task UpsertTokenAsync(TokenRecord token) =>
         RunAsync("""
                  INSERT INTO tokens (id, process_id, node_id, state, wait_kind, wake_at, attempt, waiting_step_id, wait_ref,
-                     from_node_id, created_at)
+                     from_node_id, fork, created_at)
                  VALUES ($id, $process_id, $node_id, $state, $wait_kind, $wake_at, $attempt, $waiting_step_id, $wait_ref,
-                     $from_node_id, $created_at)
+                     $from_node_id, $fork, $created_at)
                  ON CONFLICT (id) DO UPDATE SET node_id = excluded.node_id, state = excluded.state,
                      wait_kind = excluded.wait_kind, wake_at = excluded.wake_at, attempt = excluded.attempt,
                      waiting_step_id = excluded.waiting_step_id, wait_ref = excluded.wait_ref,
-                     from_node_id = excluded.from_node_id;
+                     from_node_id = excluded.from_node_id, fork = excluded.fork;
                  """, c =>
         {
             c.Parameters.AddWithValue("$id", token.Id);
@@ -103,6 +119,7 @@ internal sealed class SqliteWrite(SqliteConnection connection, SqliteTransaction
             c.Parameters.AddWithValue("$waiting_step_id", OrNull(token.WaitingStepId));
             c.Parameters.AddWithValue("$wait_ref", OrNull(token.WaitRef));
             c.Parameters.AddWithValue("$from_node_id", OrNull(token.FromNodeId));
+            c.Parameters.AddWithValue("$fork", OrNull(token.Fork));
             c.Parameters.AddWithValue("$created_at", Date(token.CreatedAt));
         });
 
@@ -438,6 +455,7 @@ internal sealed class SqliteWrite(SqliteConnection connection, SqliteTransaction
         c.Parameters.AddWithValue("$pause_reason", p.PauseReason.ToString());
         c.Parameters.AddWithValue("$status_message", OrNull(p.StatusMessage));
         c.Parameters.AddWithValue("$attention_step_id", OrNull(p.AttentionStepId));
+        c.Parameters.AddWithValue("$attention_token_id", OrNull(p.AttentionTokenId));
         c.Parameters.AddWithValue("$variables", p.Variables.ToJsonString());
         c.Parameters.AddWithValue("$last_error", JsonOrNull(p.LastError));
         c.Parameters.AddWithValue("$memory", JsonOrNull(p.Memory));

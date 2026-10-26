@@ -203,6 +203,7 @@ public sealed partial class ScenarioValidator(NodeRegistry registry, IExpression
             }
         }
 
+        new ParallelCheck(descriptors, validEdges, Name, (code, message, node) => Error(code, message, node)).Run();
         return new ValidationReport(issues);
     }
 

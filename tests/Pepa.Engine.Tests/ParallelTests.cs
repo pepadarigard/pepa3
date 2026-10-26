@@ -1,0 +1,187 @@
+using System.Text.Json.Nodes;
+using Pepa.Core;
+using Pepa.Core.Model;
+using Pepa.Engine.Persistence;
+using Pepa.Engine.Tests.Infrastructure;
+
+namespace Pepa.Engine.Tests;
+
+/// <summary>Параллельные ветви: разделение, одновременные ожидания, слияние, ошибки и проверка структуры.</summary>
+public sealed class ParallelTests
+{
+    private static EventInput Reply(string key, string text) => new()
+    {
+        Source = "manual", Type = "reply", CorrelationKey = key, Payload = new JsonObject { ["text"] = text },
+    };
+
+    /// <summary>
+    /// Ветвь 1 ждёт ответ, ветвь 2 ждёт 10 минут и делает действие; после слияния — итог с данными обеих.
+    /// С <paramref name="stopInBranch"/> ветвь 2 после действия заканчивает процесс с ошибкой.
+    /// </summary>
+    private static ScenarioDefinition ReplyAndTimer(bool stopInBranch = false) => new ScenarioBuilder("Параллельно")
+        .Variable("reply", VariableType.Any).Variable("done", VariableType.Any)
+        .Node("start", "start")
+        .Node("split", "parallel")
+        .Node("ask", "event.wait", new { source = "manual", correlationKey = "A-1", saveTo = "reply" })
+        .Node("pause", "wait", new { amount = 10, unit = "minutes" })
+        .Node("act", "test.action", new { key = "act", saveTo = "done" })
+        .Node("check", "condition", new { expression = stopInBranch ? "true" : "false" })
+        .Node("join", "join")
+        .Node("end", "end", new { message = "Ответ: {{ vars.reply.payload.text }}; действие: {{ vars.done }}" })
+        .Node("stop", "end", new { outcome = "failure", message = "Остановлено во второй ветви" })
+        .Edge("start", "split").Edge("split", "ask", "b1").Edge("split", "pause", "b2")
+        .Edge("ask", "join", Ports.Event).Edge("pause", "act").Edge("act", "check")
+        .Edge("check", "stop", Ports.True).Edge("check", "join", Ports.False).Edge("join", "end")
+        .Build();
+
+    private static string Describe(EngineHarness h, string id) =>
+        string.Join(", ", h.Store.GetTokensAsync(id).Result.Select(t => $"{t.NodeId}:{t.State}/{t.WaitKind}"));
+
+    [Fact]
+    public async Task Branches_wait_at_the_same_time_and_join_continues_once_with_data_of_both()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var id = await h.RunAsync(ReplyAndTimer());
+        await h.WaitForAsync(id, _ => h.World.Executions("act") == 0 && h.Store.GetTokensAsync(id).Result.Count(t => t.State == TokenState.Waiting) == 2);
+
+        // Ответ пришёл, пока вторая ветвь ещё ждёт своё время: процесс не идёт дальше слияния.
+        await h.Engine.PublishEventAsync(Reply("A-1", "да"));
+        await h.WaitForAsync(id, _ => h.Store.GetTokensAsync(id).Result.Any(t => t.WaitKind == WaitKind.Join));
+        Assert.Equal(0, h.World.Executions("act"));
+        Assert.Equal(ProcessStatus.Waiting, (await h.ProcessAsync(id)).Status);
+
+        var done = await h.WaitForStatusAsync(id, ProcessStatus.Completed, advance: TimeSpan.FromMinutes(1));
+        Assert.Equal("Ответ: да; действие: act", done.StatusMessage);
+        Assert.Equal(1, h.World.Executions("act"));
+        // Слияние пройдено один раз: дальше — одна ветвь; все маркеры завершены.
+        Assert.Single(await h.StepsAsync(id), s => s.NodeId == "end");
+        Assert.All(await h.Store.GetTokensAsync(id), t => Assert.Equal(TokenState.Completed, t.State));
+        var journal = await h.Store.GetJournalAsync(id);
+        Assert.Contains(journal, j => j.Message.Contains("разделился на параллельные ветви: 2", StringComparison.Ordinal));
+        Assert.Contains(journal, j => j.Message.Contains("Все ветви (2) пришли", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Branch_waits_survive_restart_and_continue_only_after_resume()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var id = await h.RunAsync(ReplyAndTimer());
+        await h.WaitForAsync(id, _ => h.Store.GetTokensAsync(id).Result.Count(t => t.State == TokenState.Waiting) == 2);
+        await h.Engine.PublishEventAsync(Reply("A-1", "да"));
+        await h.WaitForAsync(id, _ => h.Store.GetTokensAsync(id).Result.Any(t => t.WaitKind == WaitKind.Join));
+
+        await h.RestartAsync(whileClosed: () => h.Time.Advance(TimeSpan.FromMinutes(30)));
+        Assert.Equal(ProcessStatus.Paused, (await h.ProcessAsync(id)).Status);
+        await h.IdleAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(0, h.World.Executions("act"));
+
+        await h.Engine.ResumeAsync(id, ResumeAction.Continue);
+        var done = await h.WaitForStatusAsync(id, ProcessStatus.Completed, advance: TimeSpan.FromSeconds(5));
+        Assert.Equal("Ответ: да; действие: act", done.StatusMessage);
+    }
+
+    [Fact]
+    public async Task Failure_in_one_branch_stops_the_process_and_retry_continues_both()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        h.World.Plan("act", ActionMode.Fail);
+        var id = await h.RunAsync(ReplyAndTimer());
+        await h.WaitForAsync(id, _ => Describe(h, id).Contains("ask:Waiting", StringComparison.Ordinal) && Describe(h, id).Contains("pause:Waiting", StringComparison.Ordinal));
+        var failed = await h.WaitForStatusAsync(id, ProcessStatus.NeedsAttention, advance: TimeSpan.FromMinutes(1));
+        Assert.Equal(AttentionKind.StepFailed, failed.Attention);
+
+        // Ответ, пришедший, пока процесс ждёт решения, не теряется: ветвь получит его, когда процесс продолжится.
+        await h.Engine.PublishEventAsync(Reply("A-1", "позже"));
+        await h.IdleAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(ProcessStatus.NeedsAttention, (await h.ProcessAsync(id)).Status);
+
+        await h.Engine.ResumeAsync(id, ResumeAction.Retry);
+        var done = await h.WaitForStatusAsync(id, ProcessStatus.Completed, advance: TimeSpan.FromSeconds(1));
+        Assert.Equal("Ответ: позже; действие: act", done.StatusMessage);
+        // Повторён шаг упавшей ветви, а не ожидание другой.
+        Assert.Contains(await h.Store.GetJournalAsync(id), j => j.Message.Contains("«Тестовое действие» будет выполнен ещё раз", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Ending_in_one_branch_finishes_the_process_and_drops_the_other_wait()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var id = await h.RunAsync(ReplyAndTimer(stopInBranch: true));
+        var done = await h.WaitForStatusAsync(id, ProcessStatus.Failed, advance: TimeSpan.FromMinutes(1));
+        Assert.Equal("Остановлено во второй ветви", done.StatusMessage);
+        Assert.All(await h.Store.GetTokensAsync(id), t => Assert.Equal(TokenState.Completed, t.State));
+        Assert.All(await h.Store.GetSubscriptionsAsync(id), s => Assert.Equal(SubscriptionState.Cancelled, s.State));
+        var ask = (await h.StepsAsync(id)).Single(s => s.NodeId == "ask");
+        Assert.Equal(StepState.Cancelled, ask.State);
+
+        // Ответ после завершения процесса никому не достаётся.
+        var late = await h.Engine.PublishEventAsync(Reply("A-1", "поздно"));
+        await h.IdleAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(EventState.Unmatched, (await h.Store.GetEventAsync(late.EventId))!.State);
+    }
+
+    [Fact]
+    public async Task Nested_parallel_sections_join_in_order()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var id = await h.RunAsync(new ScenarioBuilder("Вложенные")
+            .Node("start", "start")
+            .Node("outer", "parallel")
+            .Node("inner", "parallel")
+            .Node("a", "test.action", new { key = "a" })
+            .Node("b", "test.action", new { key = "b" })
+            .Node("innerJoin", "join")
+            .Node("c", "test.action", new { key = "c" })
+            .Node("outerJoin", "join")
+            .Node("end", "end", new { message = "готово" })
+            .Edge("start", "outer").Edge("outer", "inner", "b1").Edge("outer", "c", "b2")
+            .Edge("inner", "a", "b1").Edge("inner", "b", "b2").Edge("a", "innerJoin").Edge("b", "innerJoin")
+            .Edge("innerJoin", "outerJoin").Edge("c", "outerJoin").Edge("outerJoin", "end")
+            .Build());
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Equal((1, 1, 1), (h.World.Executions("a"), h.World.Executions("b"), h.World.Executions("c")));
+        Assert.Single(await h.StepsAsync(id), s => s.NodeId == "end");
+    }
+
+    [Fact]
+    public async Task Parallel_structure_is_checked_before_running()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        string[] Codes(ScenarioDefinition scenario) => h.Engine.Validator.Validate(scenario).Issues
+            .Where(i => i.Severity == Core.Validation.IssueSeverity.Error).Select(i => i.Code).ToArray();
+
+        Assert.Empty(Codes(ReplyAndTimer()));
+
+        // Ветвь не приходит к слиянию.
+        Assert.Contains("parallel.branch.open", Codes(new ScenarioBuilder("Открытая ветвь")
+            .Node("start", "start").Node("split", "parallel").Node("a", "log", new { message = "a" }).Node("b", "log", new { message = "b" })
+            .Node("join", "join").Node("end", "end").Node("loop", "log", new { message = "loop" })
+            .Edge("start", "split").Edge("split", "a", "b1").Edge("split", "b", "b2").Edge("a", "join").Edge("b", "loop").Edge("loop", "b")
+            .Edge("join", "end").Build()));
+
+        // Ветви сливаются раньше слияния.
+        Assert.Contains("parallel.merge.early", Codes(new ScenarioBuilder("Раннее слияние")
+            .Node("start", "start").Node("split", "parallel").Node("a", "log", new { message = "a" }).Node("b", "log", new { message = "b" })
+            .Node("common", "log", new { message = "c" }).Node("join", "join").Node("end", "end")
+            .Edge("start", "split").Edge("split", "a", "b1").Edge("split", "b", "b2").Edge("a", "common").Edge("b", "common")
+            .Edge("common", "join").Edge("join", "end").Build()));
+
+        // Вход в середину ветви снаружи и слияние без разделения.
+        Assert.Contains("parallel.enter", Codes(new ScenarioBuilder("Вход снаружи")
+            .Node("start", "start").Node("check", "condition", new { expression = "true" }).Node("split", "parallel")
+            .Node("a", "log", new { message = "a" }).Node("b", "log", new { message = "b" }).Node("join", "join").Node("end", "end")
+            .Edge("start", "check").Edge("check", "split", Ports.True).Edge("check", "b", Ports.False)
+            .Edge("split", "a", "b1").Edge("split", "b", "b2").Edge("a", "join").Edge("b", "join").Edge("join", "end").Build()));
+        Assert.Contains("parallel.join.orphan", Codes(new ScenarioBuilder("Слияние без разделения")
+            .Node("start", "start").Node("join", "join").Node("end", "end").Edge("start", "join").Edge("join", "end").Build()));
+
+        // Общий блок «Завершение» для ошибок ветви и основной схемы — допустим.
+        Assert.Empty(Codes(new ScenarioBuilder("Общий конец")
+            .Node("start", "start").Node("check", "condition", new { expression = "true" }).Node("split", "parallel")
+            .Node("a", "test.action", new { key = "a" }).Node("b", "log", new { message = "b" }).Node("join", "join")
+            .Node("end", "end").Node("fail", "end", new { outcome = "failure" })
+            .Edge("start", "check").Edge("check", "split", Ports.True).Edge("check", "fail", Ports.False)
+            .Edge("split", "a", "b1").Edge("split", "b", "b2").Edge("a", "join").Edge("a", "fail", Ports.Error).Edge("b", "join")
+            .Edge("join", "end").Build()));
+    }
+}

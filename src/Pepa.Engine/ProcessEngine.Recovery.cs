@@ -71,7 +71,7 @@ public sealed partial class ProcessEngine
                 var last = interrupted[^1];
                 updated = Attention(updated, AttentionKind.UnknownStep,
                     $"Приложение было закрыто во время шага «{last.NodeLabel}». Неизвестно, выполнилось ли действие. " +
-                    "Проверьте результат и решите, что делать дальше.", last.Id);
+                    "Проверьте результат и решите, что делать дальше.", last.Id, last.TokenId);
                 await write.AddJournalAsync(Journal(process.Id, JournalLevel.Error, updated.StatusMessage!, last.Id, last.NodeId));
             }
             else if (wasActive)
@@ -207,9 +207,12 @@ public sealed partial class ProcessEngine
 
     private async Task<ControlResult> RetryCoreAsync(ProcessRecord process, IReadOnlyList<TokenRecord> tokens)
     {
-        var token = tokens.FirstOrDefault(t => t.State != TokenState.Completed)
-                    ?? throw new EngineOperationException("У процесса нет точки, с которой можно продолжить.");
         var step = process.AttentionStepId is { } stepId ? await _store.GetStepAsync(stepId) : null;
+        // Повторяется шаг той ветви, что остановилась (у процесса с параллельными ветвями их несколько).
+        var token = AttentionToken(process, tokens, step?.TokenId)
+                    ?? throw new EngineOperationException(tokens.Count(t => t.State != TokenState.Completed) > 1
+                        ? "Непонятно, шаг какой ветви повторить. Остановите процесс и запустите заново."
+                        : "У процесса нет точки, с которой можно продолжить.");
         var node = Graph(process).FindNode(token.NodeId);
         var label = node is null ? $"«{token.NodeId}»" : Label(node, _registry.FindDescriptor(node.Type));
         var now = _time.GetUtcNow();
@@ -267,7 +270,7 @@ public sealed partial class ProcessEngine
             throw new EngineOperationException("Не найден шаг, по которому нужно решение.");
         }
 
-        var token = tokens.FirstOrDefault(t => t.Id == step.TokenId && t.State != TokenState.Completed)
+        var token = AttentionToken(process, tokens, step.TokenId)
                     ?? throw new EngineOperationException("У процесса нет точки, с которой можно продолжить.");
         var node = Graph(process).FindNode(step.NodeId)
                    ?? throw new EngineOperationException($"Блок «{step.NodeId}» не найден в сценарии.");

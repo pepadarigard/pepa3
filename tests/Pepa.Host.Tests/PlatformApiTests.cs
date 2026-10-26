@@ -52,6 +52,32 @@ public sealed class PlatformApiTests
     }
 
     [Fact]
+    public async Task Parallel_sample_works_while_waiting_and_shows_both_branches()
+    {
+        await using var f = await HostFixture.StartAsync();
+        var scenarioId = await f.ScenarioIdAsync("Пример 11");
+        var processId = await RunAsync(f, scenarioId, new { order = "P-1" });
+
+        // Вторая ветвь записала файл и пришла к слиянию, первая всё ещё ждёт ответ: на схеме — обе.
+        string[] Active(JsonNode details) => details["activeNodeIds"]!.AsArray().Select(n => n!.GetValue<string>()).Order().ToArray();
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
+        JsonNode details;
+        while (!(Active(details = await f.GetAsync($"/api/processes/{processId}")).SequenceEqual(["join", "wait"]) &&
+                 HostFixture.Status(details["process"]!) == "waiting"))
+        {
+            Assert.True(DateTime.UtcNow < deadline, $"Ветви не дошли: {string.Join(", ", Active(details))}");
+            await Task.Delay(50, TestContext.Current.CancellationToken);
+        }
+
+        Assert.True(File.Exists(Path.Combine(f.Workspace, "примеры", "параллельно", "P-1.txt")));
+
+        await f.SendAsync(HttpMethod.Post, "/api/events", new { source = "manual", type = "reply", correlationKey = "P-1", payload = "готово" });
+        var done = await f.WaitForProcessAsync(processId, p => HostFixture.Status(p) == "completed");
+        Assert.Equal("Ответ: готово", done["process"]!["statusMessage"]!.GetValue<string>());
+        Assert.Empty(done["activeNodeIds"]!.AsArray());
+    }
+
+    [Fact]
     public async Task Conflicting_event_is_listed_and_resolved_by_user()
     {
         await using var f = await HostFixture.StartAsync();

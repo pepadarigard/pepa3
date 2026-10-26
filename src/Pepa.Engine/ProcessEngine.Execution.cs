@@ -98,6 +98,12 @@ public sealed partial class ProcessEngine
                 {
                     await SetAttentionAsync(process, AttentionKind.EngineError, "У процесса нет точки, с которой можно продолжить.", null);
                 }
+                else if (tokens.Where(t => t.State != TokenState.Completed).All(t => t.WaitKind == WaitKind.Join))
+                {
+                    // Все ветви ждут слияния, а прийти больше некому — иначе процесс ждал бы вечно.
+                    await SetAttentionAsync(process, AttentionKind.EngineError,
+                        "Ветви ждут слияния, но остальные ветви уже не придут. Остановите процесс и проверьте схему.", null);
+                }
                 else if (process.Status == ProcessStatus.Running)
                 {
                     await UpdateProcessAsync(process with { Status = ProcessStatus.Waiting, UpdatedAt = now });
@@ -125,14 +131,14 @@ public sealed partial class ProcessEngine
         var node = graph.FindNode(token.NodeId);
         if (node is null)
         {
-            await SetAttentionAsync(process, AttentionKind.EngineError, $"Блок «{token.NodeId}» не найден в сценарии.", null);
+            await SetAttentionAsync(process, AttentionKind.EngineError, $"Блок «{token.NodeId}» не найден в сценарии.", null, token.Id);
             return;
         }
 
         if (!_registry.TryGet(node.Type, out var executor))
         {
             await SetAttentionAsync(process, AttentionKind.EngineError,
-                $"Тип блока «{node.Type}» недоступен в этой версии Pepa.", null);
+                $"Тип блока «{node.Type}» недоступен в этой версии Pepa.", null, token.Id);
             return;
         }
 
@@ -489,6 +495,17 @@ public sealed partial class ProcessEngine
             case NodeResult.Finish:
                 finalStep = finalStep with { State = StepState.Succeeded, Port = null };
                 break;
+            case NodeResult.Split split:
+                finalStep = finalStep with
+                {
+                    State = successState,
+                    Port = null,
+                    Output = new JsonObject { ["branches"] = new JsonArray(split.Ports.Select(port => (JsonNode)port).ToArray()) },
+                };
+                break;
+            case NodeResult.Join:
+                finalStep = finalStep with { State = successState, Port = Ports.Out };
+                break;
             case NodeResult.Failure failure:
                 finalStep = finalStep with { State = StepState.Failed, Error = failure.Error };
                 break;
@@ -567,7 +584,7 @@ public sealed partial class ProcessEngine
                 var edge = graph.Next(node.Id, ok.Port);
                 if (edge is null)
                 {
-                    p = Attention(p, AttentionKind.EngineError, $"У блока {label} не подключён выход «{ok.Port}».", null);
+                    p = Attention(p, AttentionKind.EngineError, $"У блока {label} не подключён выход «{ok.Port}».", null, t.Id);
                     journal.Add((JournalLevel.Error, p.StatusMessage!));
                     break;
                 }
@@ -665,6 +682,74 @@ public sealed partial class ProcessEngine
                 break;
             }
 
+            case NodeResult.Split split:
+            {
+                var branches = split.Ports.Select(port => graph.Next(node.Id, port)).ToList();
+                if (branches.Count == 0 || branches.Any(e => e is null))
+                {
+                    p = Attention(p, AttentionKind.EngineError, $"У блока {label} не подключена ветвь.", null, t.Id);
+                    journal.Add((JournalLevel.Error, p.StatusMessage!));
+                    break;
+                }
+
+                // Участок: «id:число ветвей»; вложенные участки — через «/». Слияние ждёт ветви своего участка.
+                var frame = $"{NewId()}:{branches.Count}";
+                var fork = t.Fork is null ? frame : $"{t.Fork}/{frame}";
+                p = Cleared(p) with { Status = ProcessStatus.Running };
+                t = Moved(t, branches[0]!.Target) with { Fork = fork };
+                foreach (var branch in branches.Skip(1))
+                {
+                    await write.UpsertTokenAsync(new TokenRecord
+                    {
+                        Id = NewId(),
+                        ProcessId = p.Id,
+                        NodeId = branch!.Target,
+                        State = TokenState.Ready,
+                        FromNodeId = node.Id,
+                        Fork = fork,
+                        CreatedAt = now,
+                    });
+                }
+
+                journal.Add((JournalLevel.Info, $"Процесс разделился на параллельные ветви: {branches.Count}."));
+                break;
+            }
+
+            case NodeResult.Join:
+            {
+                var edge = graph.Next(node.Id, Ports.Out);
+                var (frame, outer) = TopFork(t.Fork);
+                if (frame is not { } top || edge is null)
+                {
+                    p = Attention(p, AttentionKind.EngineError,
+                        edge is null ? $"У блока {label} не подключён выход «Далее»." : $"К слиянию {label} пришла ветвь не из параллельного участка.", null, t.Id);
+                    journal.Add((JournalLevel.Error, p.StatusMessage!));
+                    break;
+                }
+
+                var arrived = (await write.GetTokensAsync(p.Id))
+                    .Where(o => o.Id != t.Id && o is { State: TokenState.Waiting, WaitKind: WaitKind.Join } && o.WaitRef == top.Id)
+                    .ToList();
+                p = Cleared(p) with { Status = ProcessStatus.Running };
+                if (arrived.Count + 1 < top.Count)
+                {
+                    t = t with { State = TokenState.Waiting, WaitKind = WaitKind.Join, WakeAt = null, WaitingStepId = null, WaitRef = top.Id };
+                    journal.Add((JournalLevel.Info, $"Ветвь пришла к слиянию {label} ({arrived.Count + 1} из {top.Count}) — ждём остальные."));
+                }
+                else
+                {
+                    foreach (var other in arrived)
+                    {
+                        await write.UpsertTokenAsync(other with { State = TokenState.Completed, WaitKind = WaitKind.None, WaitRef = null });
+                    }
+
+                    t = Moved(t, edge.Target) with { Fork = outer };
+                    journal.Add((JournalLevel.Info, $"Все ветви ({top.Count}) пришли к слиянию {label} — процесс продолжается одной ветвью."));
+                }
+
+                break;
+            }
+
             case NodeResult.Finish finish:
                 var finishMessage = finish.Message ?? (finish.Succeeded ? "Процесс завершён успешно." : "Процесс завершён с ошибкой.");
                 p = Cleared(p) with
@@ -710,7 +795,7 @@ public sealed partial class ProcessEngine
                 }
                 else
                 {
-                    p = Attention(p, AttentionKind.StepFailed, $"Шаг {label} не выполнен: {failure.Error}", stepId);
+                    p = Attention(p, AttentionKind.StepFailed, $"Шаг {label} не выполнен: {failure.Error}", stepId, t.Id);
                     journal.Add((JournalLevel.Error, p.StatusMessage!));
                 }
 
@@ -718,7 +803,7 @@ public sealed partial class ProcessEngine
             }
 
             case NodeResult.Unknown unknown:
-                p = Attention(p, AttentionKind.UnknownStep, $"Неизвестно, выполнился ли шаг {label}. {unknown.Reason}", stepId);
+                p = Attention(p, AttentionKind.UnknownStep, $"Неизвестно, выполнился ли шаг {label}. {unknown.Reason}", stepId, t.Id);
                 journal.Add((JournalLevel.Error, p.StatusMessage!));
                 break;
         }
@@ -730,6 +815,13 @@ public sealed partial class ProcessEngine
 
         if (p.IsTerminal)
         {
+            // Параллельные ветви: процесс закончился в одной — остальные ветви и их ожидания снимаются.
+            foreach (var other in (await write.GetTokensAsync(p.Id)).Where(o => o.Id != t.Id && o.State != TokenState.Completed))
+            {
+                await write.UpsertTokenAsync(other with { State = TokenState.Completed, WaitKind = WaitKind.None, WakeAt = null, WaitRef = null });
+            }
+
+            await write.CancelOpenStepsAsync(p.Id, stepId, "Отменён: процесс завершился в другой ветви.", now);
             journal.AddRange(await OnTerminalAsync(write, p, effects, now));
         }
 
@@ -742,6 +834,26 @@ public sealed partial class ProcessEngine
 
         await write.CommitAsync();
         return p;
+    }
+
+    /// <summary>Последний (внутренний) параллельный участок маркера и то, что снаружи него.</summary>
+    private static ((string Id, int Count)? Top, string? Outer) TopFork(string? fork)
+    {
+        if (string.IsNullOrEmpty(fork))
+        {
+            return (null, null);
+        }
+
+        var slash = fork.LastIndexOf('/');
+        var last = slash < 0 ? fork : fork[(slash + 1)..];
+        var colon = last.LastIndexOf(':');
+        if (colon <= 0 || !int.TryParse(last[(colon + 1)..], System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var count))
+        {
+            return (null, null);
+        }
+
+        return ((last[..colon], count), slash < 0 ? null : fork[..slash]);
     }
 
     private static TokenRecord Moved(TokenRecord token, string target) => token with
@@ -862,23 +974,27 @@ public sealed partial class ProcessEngine
     {
         Attention = AttentionKind.None,
         AttentionStepId = null,
+        AttentionTokenId = null,
         PauseReason = PauseReason.None,
         StatusMessage = null,
     };
 
-    private static ProcessRecord Attention(ProcessRecord process, AttentionKind kind, string message, long? stepId) =>
+    private static ProcessRecord Attention(ProcessRecord process, AttentionKind kind, string message, long? stepId,
+        string? tokenId = null) =>
         process with
         {
             Status = ProcessStatus.NeedsAttention,
             Attention = kind,
             AttentionStepId = stepId,
+            AttentionTokenId = tokenId,
             PauseReason = PauseReason.None,
             StatusMessage = message,
         };
 
-    private async Task SetAttentionAsync(ProcessRecord process, AttentionKind kind, string message, long? stepId)
+    private async Task SetAttentionAsync(ProcessRecord process, AttentionKind kind, string message, long? stepId,
+        string? tokenId = null)
     {
-        var updated = Attention(process, kind, message, stepId) with { UpdatedAt = _time.GetUtcNow() };
+        var updated = Attention(process, kind, message, stepId, tokenId) with { UpdatedAt = _time.GetUtcNow() };
         await using var write = await _store.BeginWriteAsync();
         await write.UpdateProcessAsync(updated);
         await write.AddJournalAsync(Journal(process.Id, JournalLevel.Error, message, stepId));
@@ -1081,7 +1197,7 @@ public sealed partial class ProcessEngine
                 : $"Внутренняя ошибка платформы: {error.Message}";
             var updated = Attention(process,
                 running.Count > 0 ? AttentionKind.UnknownStep : AttentionKind.EngineError,
-                message, running.Count > 0 ? running[^1].Id : null) with { UpdatedAt = now };
+                message, running.Count > 0 ? running[^1].Id : null, running.Count > 0 ? running[^1].TokenId : null) with { UpdatedAt = now };
 
             await using var write = await _store.BeginWriteAsync();
             foreach (var step in running)

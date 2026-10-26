@@ -57,6 +57,10 @@ public sealed class FaultInjectingStore(IPepaStore inner) : IPepaStore
         public Task InsertProcessAsync(ProcessRecord process) => inner.InsertProcessAsync(process);
         public Task UpdateProcessAsync(ProcessRecord process) => inner.UpdateProcessAsync(process);
         public Task UpsertTokenAsync(TokenRecord token) => inner.UpsertTokenAsync(token);
+        public Task<IReadOnlyList<TokenRecord>> GetTokensAsync(string processId) => inner.GetTokensAsync(processId);
+
+        public Task CancelOpenStepsAsync(string processId, long exceptStepId, string resolution, DateTimeOffset at) =>
+            inner.CancelOpenStepsAsync(processId, exceptStepId, resolution, at);
 
         public Task<long> InsertStepAsync(StepRecord step)
         {

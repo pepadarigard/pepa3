@@ -341,6 +341,8 @@ export interface ProcessDetails {
   children: ProcessSummary[];
   waits: Wait[];
   heldResources: string[];
+  /** Блоки, где сейчас ветви процесса (у параллельного участка их несколько). */
+  activeNodeIds: string[];
 }
 
 export interface Overview {

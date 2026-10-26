@@ -377,7 +377,9 @@ internal static class ApiEndpoints
                 parent is null ? null : ProcessMapper.Ref(parent),
                 await mapper.SummariesAsync(children, ct),
                 subscriptions.Select(ProcessMapper.Wait).ToList(),
-                held));
+                held,
+                // Где сейчас ветви процесса (у параллельного участка их несколько).
+                tokens.Where(t => t.State != TokenState.Completed).Select(t => t.NodeId).Distinct().ToList()));
         });
 
         api.MapPost("/processes/{id}/pause", async (string id, ProcessEngine engine, CancellationToken ct) =>

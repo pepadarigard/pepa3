@@ -107,6 +107,18 @@ public sealed record FieldDescriptor
     public string? Lookup { get; init; }
 }
 
+/// <summary>Роль блока в структуре схемы (для проверки параллельных участков).</summary>
+public enum NodeFlow
+{
+    Normal,
+
+    /// <summary>Разделяет процесс на параллельные ветви (каждый подключённый выход — ветвь).</summary>
+    Split,
+
+    /// <summary>Ждёт, пока придут все ветви своего разделения, и продолжает одной.</summary>
+    Join,
+}
+
 /// <summary>Описание типа блока: всё, что нужно конструктору, проверке и движку, кроме самого поведения.</summary>
 public sealed record NodeTypeDescriptor
 {
@@ -125,6 +137,9 @@ public sealed record NodeTypeDescriptor
 
     public bool IsStart { get; init; }
     public bool IsEnd { get; init; }
+
+    /// <summary>Разделение или слияние параллельных ветвей; у обычных блоков — <see cref="NodeFlow.Normal"/>.</summary>
+    public NodeFlow Flow { get; init; }
     public IReadOnlyList<PortDescriptor> Outputs { get; init; } = [];
     public IReadOnlyList<FieldDescriptor> Fields { get; init; } = [];
 

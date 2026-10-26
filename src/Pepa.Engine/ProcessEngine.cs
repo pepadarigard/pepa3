@@ -408,10 +408,22 @@ public sealed partial class ProcessEngine : IAsyncDisposable
         return actions;
     }
 
-    /// <summary>Описание блока, на котором стоит процесс.</summary>
+    /// <summary>
+    /// Ветвь, которая ждёт решения пользователя: записанная при остановке, иначе — ветвь шага, по которому нужно решение,
+    /// иначе — единственная незавершённая. null — не определить (у процесса несколько ветвей).
+    /// </summary>
+    internal static TokenRecord? AttentionToken(ProcessRecord process, IReadOnlyList<TokenRecord> tokens, string? stepTokenId = null)
+    {
+        var active = tokens.Where(t => t.State != TokenState.Completed).ToList();
+        return active.FirstOrDefault(t => t.Id == process.AttentionTokenId)
+               ?? active.FirstOrDefault(t => t.Id == stepTokenId)
+               ?? (active.Count == 1 ? active[0] : null);
+    }
+
+    /// <summary>Описание блока, на котором стоит процесс (ветвь, которая ждёт решения).</summary>
     public NodeTypeDescriptor? AttentionDescriptor(ProcessRecord process, IReadOnlyList<TokenRecord> tokens)
     {
-        var token = tokens.FirstOrDefault(t => t.State != TokenState.Completed);
+        var token = AttentionToken(process, tokens) ?? tokens.FirstOrDefault(t => t.State != TokenState.Completed);
         var node = token is null ? null : Graph(process).FindNode(token.NodeId);
         return node is null ? null : _registry.FindDescriptor(node.Type);
     }

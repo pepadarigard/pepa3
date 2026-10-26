@@ -193,5 +193,10 @@ public sealed partial class SqliteStore
         """
         ALTER TABLE processes ADD COLUMN debug TEXT NULL;
         """,
+        // 4: параллельные ветви процесса.
+        """
+        ALTER TABLE tokens ADD COLUMN fork TEXT NULL;
+        ALTER TABLE processes ADD COLUMN attention_token_id TEXT NULL;
+        """,
     ];
 }
