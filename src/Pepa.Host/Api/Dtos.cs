@@ -287,3 +287,11 @@ public sealed record PluginsDto(string Directory, IReadOnlyList<PluginDto> Plugi
 
 /// <param name="Error">Не загружено: причина (блоков этого расширения нет).</param>
 public sealed record PluginDto(string Id, string Name, string? Version, IReadOnlyList<string> NodeTypes, string? Error);
+
+/// <summary>Элементы окна для выбора в конструкторе.</summary>
+/// <param name="Truncated">Элементов больше, чем показано (сложное окно) — уточните поиск в самой программе.</param>
+public sealed record DesktopElementsDto(string Window, string Process, bool Truncated, IReadOnlyList<DesktopElementDto> Elements);
+
+/// <param name="UniqueName">Подпись в окне встречается один раз — по ней элемент найдётся однозначно.</param>
+/// <param name="UniqueId">Код (AutomationId) встречается один раз.</param>
+public sealed record DesktopElementDto(int Depth, string Name, string ControlType, string AutomationId, bool Enabled, bool UniqueName, bool UniqueId);

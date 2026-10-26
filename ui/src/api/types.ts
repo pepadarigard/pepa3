@@ -456,6 +456,26 @@ export interface DesktopWindow {
   process: string;
 }
 
+/** Элемент окна для выбора в конструкторе (в порядке обхода дерева, depth — вложенность). */
+export interface DesktopElement {
+  depth: number;
+  name: string;
+  controlType: string;
+  automationId: string;
+  enabled: boolean;
+  /** Подпись в окне одна такая — по ней элемент найдётся однозначно. */
+  uniqueName: boolean;
+  uniqueId: boolean;
+}
+
+export interface DesktopElements {
+  window: string;
+  process: string;
+  /** Показаны не все элементы (сложное окно). */
+  truncated: boolean;
+  elements: DesktopElement[];
+}
+
 export interface AdsPowerProfile {
   id: string;
   number: string | null;

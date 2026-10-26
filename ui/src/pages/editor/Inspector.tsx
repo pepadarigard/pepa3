@@ -1,12 +1,14 @@
-import { useState } from "react";
-import { AlertTriangle, Lock, Plus, Trash2, Unlink } from "lucide-react";
+import { Fragment, useMemo, useState } from "react";
+import { AlertTriangle, Lock, Plus, ScanSearch, Trash2, Unlink } from "lucide-react";
 import type { Json, NodeDefinition, NodeTypeDescriptor, ValidationIssue, VariableDefinition, VariableType } from "../../api/types";
 import { useTelegram } from "../../api/hooks";
 import { categoryColor, NodeIcon } from "../../components/Icon";
 import { Badge, Button } from "../../components/ui";
 import { ru } from "../../i18n/ru";
+import { elementConfig } from "../../lib/desktop";
 import { isFieldVisible, type PepaEdge } from "../../lib/graph";
 import { navigate } from "../../router";
+import { ElementPicker } from "./ElementPicker";
 import { FieldEditor } from "./FieldEditor";
 import type { Meta } from "./useEditor";
 
@@ -103,15 +105,18 @@ export function NodeInspector({ node, descriptor, variables, issues, onChange, o
           {descriptor.fields
             .filter((f) => isFieldVisible(f, node.config, descriptor.fields))
             .map((field) => (
-              <FieldEditor
-                key={field.name}
-                field={field}
-                value={node.config[field.name]}
-                variables={variables}
-                error={fieldIssue(field.name)}
-                onCreateVariable={onCreateVariable}
-                onChange={(value) => setConfig(field.name, value)}
-              />
+              <Fragment key={field.name}>
+                {/* Выбор элемента — перед полями элемента, после полей окна. */}
+                {field.lookup === "desktop-elements" && <ElementPickerButton node={node} descriptor={descriptor} onChange={onChange} />}
+                <FieldEditor
+                  field={field}
+                  value={node.config[field.name]}
+                  variables={variables}
+                  error={fieldIssue(field.name)}
+                  onCreateVariable={onCreateVariable}
+                  onChange={(value) => setConfig(field.name, value)}
+                />
+              </Fragment>
             ))}
         </div>
       )}
@@ -337,4 +342,35 @@ function clampInt(raw: string, min: number, max: number): number {
   const n = Math.round(Number(raw));
   if (!Number.isFinite(n)) return min;
   return Math.min(max, Math.max(min, n));
+}
+
+/** «Выбрать элемент в окне»: окно — из параметров блока (текстом), выбранный элемент заполняет подпись, код и тип. */
+function ElementPickerButton({ node, descriptor, onChange }: {
+  node: NodeDefinition;
+  descriptor: NodeTypeDescriptor;
+  onChange: (updater: (n: NodeDefinition) => NodeDefinition, key: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const title = typeof node.config.window === "string" ? node.config.window.trim() : "";
+  const process = typeof node.config.process === "string" ? node.config.process.trim() : "";
+  const dynamic = title.includes("{{") || process.includes("{{");
+  const typeField = descriptor.fields.find((f) => f.name === "controlType");
+  const typeLabels = useMemo(() => new Map((typeField?.options ?? []).filter((o) => o.value).map((o) => [o.value, o.label])), [typeField]);
+  return (
+    <div className="stack" style={{ gap: 4 }}>
+      <Button size="small" icon={ScanSearch} disabled={dynamic || (!title && !process)} onClick={() => setOpen(true)}
+        title="Посмотреть элементы открытого окна и выбрать нужный">
+        Выбрать элемент в окне
+      </Button>
+      {(dynamic || (!title && !process)) && (
+        <span className="field-help">
+          {dynamic ? "Окно задано выражением — чтобы выбрать элемент, укажите его текстом (потом можно вернуть выражение)." : "Сначала укажите окно выше."}
+        </span>
+      )}
+      {open && (
+        <ElementPicker window={title} process={process} typeLabels={typeLabels} onClose={() => setOpen(false)}
+          onPick={(element) => onChange((n) => ({ ...n, config: { ...n.config, ...elementConfig(element, typeField?.options ?? [], descriptor.type === "desktop.read") } }), "element.pick")} />
+      )}
+    </div>
+  );
 }

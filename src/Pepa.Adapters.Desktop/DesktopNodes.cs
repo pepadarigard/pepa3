@@ -48,8 +48,8 @@ public static class DesktopNodes
     [
         new FieldDescriptor
         {
-            Name = "name", Label = $"{label}: подпись", Kind = FieldKind.Template, Placeholder = "Сохранить",
-            Help = "Подпись элемента, как её видит Windows (обычно текст на кнопке или название поля).",
+            Name = "name", Label = $"{label}: подпись", Kind = FieldKind.Template, Placeholder = "Сохранить", Lookup = "desktop-elements",
+            Help = "Подпись элемента, как её видит Windows (обычно текст на кнопке или название поля). Можно выбрать из элементов окна.",
         },
         new FieldDescriptor
         {

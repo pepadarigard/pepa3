@@ -2028,3 +2028,22 @@ pre.json {
   border: 1px solid var(--border);
   border-radius: 10px;
 }
+
+.element-list { list-style: none; margin: 0; padding: 0; max-height: 52vh; overflow: auto; border: 1px solid var(--border); border-radius: 10px; }
+.element-list li + li { border-top: 1px solid var(--border); }
+.element-list button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  min-width: 0;
+}
+.element-list button:hover { background: var(--accent-soft); }
+.element-list .disabled-element { opacity: 0.55; }

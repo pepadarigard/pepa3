@@ -12,6 +12,9 @@ public sealed record WindowInfo(long Handle, string Title, string ProcessName, i
 /// <summary>Элемент окна (кнопка, поле, пункт списка…).</summary>
 public sealed record ElementInfo(string Name, string ControlType, string AutomationId, DesktopRect Bounds, bool Enabled);
 
+/// <summary>Элемент окна в дереве элементов (1 — прямо в окне).</summary>
+public sealed record ElementNode(int Depth, ElementInfo Info);
+
 /// <summary>Найденное окно. Реализация хранит свою ссылку на окно; ссылка живёт только в пределах шага.</summary>
 public abstract class DesktopWindow
 {
@@ -96,6 +99,12 @@ public interface IDesktop
 
     Task<IReadOnlyList<DesktopElement>> FindElementsAsync(DesktopWindow window, ElementQuery query, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Элементы окна деревом (для выбора в конструкторе): по порядку обхода, с глубиной вложенности. Не больше
+    /// <paramref name="maxDepth"/> уровней и <paramref name="maxCount"/> элементов. Только чтение.
+    /// </summary>
+    Task<IReadOnlyList<ElementNode>> DescribeAsync(DesktopWindow window, int maxDepth, int maxCount, CancellationToken cancellationToken);
+
     /// <summary>Окно ещё открыто.</summary>
     Task<bool> IsOpenAsync(DesktopWindow window, CancellationToken cancellationToken);
 
@@ -165,6 +174,7 @@ public sealed class UnavailableDesktop(string reason) : IDesktop
     public Task<IReadOnlyList<WindowInfo>> ListWindowsAsync(CancellationToken cancellationToken) => Task.FromException<IReadOnlyList<WindowInfo>>(Fail());
     public Task<IReadOnlyList<DesktopWindow>> FindWindowsAsync(WindowQuery query, CancellationToken cancellationToken) => Task.FromException<IReadOnlyList<DesktopWindow>>(Fail());
     public Task<IReadOnlyList<DesktopElement>> FindElementsAsync(DesktopWindow window, ElementQuery query, CancellationToken cancellationToken) => Task.FromException<IReadOnlyList<DesktopElement>>(Fail());
+    public Task<IReadOnlyList<ElementNode>> DescribeAsync(DesktopWindow window, int maxDepth, int maxCount, CancellationToken cancellationToken) => Task.FromException<IReadOnlyList<ElementNode>>(Fail());
     public Task<bool> IsOpenAsync(DesktopWindow window, CancellationToken cancellationToken) => Task.FromException<bool>(Fail());
     public Task<WindowInfo> ActivateAsync(DesktopWindow window, CancellationToken cancellationToken) => Task.FromException<WindowInfo>(Fail());
     public Task<InvokeOutcome> InvokeAsync(DesktopElement element, CancellationToken cancellationToken) => Task.FromException<InvokeOutcome>(Fail());

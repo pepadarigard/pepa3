@@ -4,6 +4,7 @@ import type {
   AssistantExplanation,
   AssistantStatus,
   VariableDefinition,
+  DesktopElements,
   DesktopWindow,
   ScenarioTemplate,
   RecorderState,
@@ -159,6 +160,8 @@ export const api = {
   adsPowerProfiles: () => request<AdsPowerProfile[]>("GET", "/integrations/adspower/profiles"),
 
   desktopWindows: () => request<DesktopWindow[]>("GET", "/integrations/desktop/windows"),
+  desktopElements: (window: string, process: string) =>
+    request<DesktopElements>("GET", `/integrations/desktop/elements?window=${encodeURIComponent(window)}&process=${encodeURIComponent(process)}`),
   templates: () => request<ScenarioTemplate[]>("GET", "/templates"),
   plugins: () => request<Plugins>("GET", "/plugins"),
   assistant: () => request<AssistantStatus>("GET", "/assistant"),

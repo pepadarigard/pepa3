@@ -245,6 +245,25 @@ async function main() {
     await page.screenshot({ path: path.join(shots, "17-recorder.png") });
     await page.getByRole("dialog").getByRole("button", { name: "Закрыть" }).click();
 
+    step("Выбор элемента окна: без Windows — понятная причина");
+    await page.locator(".palette-item", { hasText: "Нажать в окне" }).click();
+    const pickButton = inspector.getByRole("button", { name: "Выбрать элемент в окне" });
+    if (!(await pickButton.isDisabled())) throw new Error("Выбор элемента доступен без окна");
+    await inspector.locator(".field", { hasText: "Окно (часть заголовка)" }).locator("input").fill("{{ vars.окно }}");
+    await inspector.getByText("Окно задано выражением").waitFor();
+    await inspector.locator(".field", { hasText: "Окно (часть заголовка)" }).locator("input").fill("Блокнот");
+    const errorsBeforePick = errors.length;
+    await pickButton.click();
+    await page.getByRole("dialog").getByText("только в приложении Pepa для Windows").waitFor();
+    // Ответ 409 здесь ожидаем — браузер всё равно пишет о нём в консоль.
+    errors.splice(errorsBeforePick, errors.length - errorsBeforePick, ...errors.slice(errorsBeforePick).filter((e) => !e.includes("status of 409")));
+    await page.waitForTimeout(200);
+    await page.screenshot({ path: path.join(shots, "17b-element-picker.png") });
+    await page.getByRole("dialog").getByRole("button", { name: "Закрыть" }).click();
+    // Блок не сохраняем: уход без сохранения подтверждается (диалоги в проверке принимаются).
+    await page.goto(`${base}/#/scenarios`);
+    await page.getByRole("button", { name: "Новый сценарий" }).waitFor();
+
     step("Отладка: пошаговый запуск");
     await page.goto(`${base}/#/editor/${saved.id}`);
     await page.getByRole("button", { name: "Пошагово" }).click();

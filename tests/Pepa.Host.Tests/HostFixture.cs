@@ -25,7 +25,7 @@ public sealed class HostFixture : IAsyncDisposable
 
     /// <param name="plugins">Расширения: имя папки → сборки, которые в неё положить (до запуска Pepa).</param>
     public static async Task<HostFixture> StartAsync(bool seedSamples = true, string? assistantUrl = null,
-        IReadOnlyDictionary<string, string[]>? plugins = null)
+        IReadOnlyDictionary<string, string[]>? plugins = null, Adapters.Desktop.IDesktop? desktop = null)
     {
         var root = Path.Combine(Path.GetTempPath(), "pepa-host-tests", Guid.NewGuid().ToString("N"));
         foreach (var (folder, files) in plugins ?? new Dictionary<string, string[]>())
@@ -38,7 +38,7 @@ public sealed class HostFixture : IAsyncDisposable
             }
         }
 
-        var host = await PepaHost.StartAsync(Options(root, seedSamples) with { AssistantBaseUrl = assistantUrl ?? "http://127.0.0.1:1" });
+        var host = await PepaHost.StartAsync(Options(root, seedSamples) with { AssistantBaseUrl = assistantUrl ?? "http://127.0.0.1:1", Desktop = desktop });
         return new HostFixture(root, host);
     }
 

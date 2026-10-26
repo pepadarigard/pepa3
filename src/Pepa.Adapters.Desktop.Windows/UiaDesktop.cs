@@ -82,6 +82,51 @@ public sealed class UiaDesktop : IDesktop, IDisposable
                 .ToList();
         }, cancellationToken);
 
+    public Task<IReadOnlyList<ElementNode>> DescribeAsync(DesktopWindow window, int maxDepth, int maxCount, CancellationToken cancellationToken) =>
+        RunAsync<IReadOnlyList<ElementNode>>(() =>
+        {
+            // Тот же вид дерева, в котором ищут блоки (элементы управления, без служебных узлов).
+            var walker = _automation.TreeWalkerFactory.GetControlViewWalker();
+            var result = new List<ElementNode>();
+            void Visit(AutomationElement parent, int depth)
+            {
+                if (depth > maxDepth)
+                {
+                    return;
+                }
+
+                var child = Safe(() => walker.GetFirstChild(parent));
+                while (child is not null && result.Count < maxCount)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    // Элемент мог исчезнуть посреди обхода — его просто не будет в списке.
+                    if (Safe(() => Describe(child)) is { } info)
+                    {
+                        result.Add(new ElementNode(depth, info));
+                        Visit(child, depth + 1);
+                    }
+
+                    child = Safe(() => walker.GetNextSibling(child));
+                }
+            }
+
+            Visit(Native(window), 1);
+            return result;
+        }, cancellationToken);
+
+    private static T? Safe<T>(Func<T> read) where T : class
+    {
+        try
+        {
+            return read();
+        }
+        catch (Exception ex) when (ex is COMException or InvalidOperationException or FlaUI.Core.Exceptions.ElementNotAvailableException
+                                       or FlaUI.Core.Exceptions.PropertyNotSupportedException)
+        {
+            return null;
+        }
+    }
+
     public Task<bool> IsOpenAsync(DesktopWindow window, CancellationToken cancellationToken) =>
         RunAsync(() => window is UiaWindow { Info.Handle: var handle } && handle != 0 && NativeMethods.IsWindow(new IntPtr(handle)), cancellationToken);
 

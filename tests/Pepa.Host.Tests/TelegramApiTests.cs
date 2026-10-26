@@ -134,5 +134,36 @@ public sealed class DesktopApiTests
         var (status, error) = await f.SendAsync(HttpMethod.Get, "/api/integrations/desktop/windows");
         Assert.Equal(409, status);
         Assert.Contains("Pepa.exe", error!["error"]!.GetValue<string>());
+        Assert.Equal(409, (await f.SendAsync(HttpMethod.Get, "/api/integrations/desktop/elements?window=Блокнот")).Status);
+    }
+
+    [Fact]
+    public async Task Window_elements_are_listed_with_uniqueness_and_ambiguous_window_is_not_guessed()
+    {
+        var desktop = new Adapters.Desktop.Tests.FakeDesktop();
+        var notepad = desktop.AddWindow("Документ — Блокнот", "notepad");
+        notepad.Add("Сохранить", id: "save");
+        notepad.Add("Открыть");
+        notepad.Add("Открыть", type: "MenuItem");
+        notepad.Add("Текст", type: "Edit", id: "editor", hasValue: true);
+        desktop.AddWindow("Отчёт — Excel", "excel");
+        desktop.AddWindow("Отчёт — Word", "winword");
+        await using var f = await HostFixture.StartAsync(seedSamples: false, desktop: desktop);
+
+        var list = await f.GetAsync("/api/integrations/desktop/elements?window=" + Uri.EscapeDataString("Блокнот"));
+        Assert.Equal("notepad", list["process"]!.GetValue<string>());
+        var elements = list["elements"]!.AsArray();
+        Assert.Equal(4, elements.Count);
+        var save = elements.Single(e => e!["name"]!.GetValue<string>() == "Сохранить")!;
+        Assert.True(save["uniqueName"]!.GetValue<bool>());
+        Assert.True(save["uniqueId"]!.GetValue<bool>());
+        Assert.All(elements.Where(e => e!["name"]!.GetValue<string>() == "Открыть"), e => Assert.False(e!["uniqueName"]!.GetValue<bool>()));
+
+        var (ambiguous, why) = await f.SendAsync(HttpMethod.Get, "/api/integrations/desktop/elements?window=" + Uri.EscapeDataString("Отчёт"));
+        Assert.Equal(409, ambiguous);
+        Assert.Contains("несколько окон", why!["error"]!.GetValue<string>());
+        Assert.Equal(200, (await f.SendAsync(HttpMethod.Get, "/api/integrations/desktop/elements?window=" + Uri.EscapeDataString("Отчёт") + "&process=excel")).Status);
+        Assert.Equal(404, (await f.SendAsync(HttpMethod.Get, "/api/integrations/desktop/elements?window=" + Uri.EscapeDataString("Калькулятор"))).Status);
+        Assert.Equal(400, (await f.SendAsync(HttpMethod.Get, "/api/integrations/desktop/elements")).Status);
     }
 }

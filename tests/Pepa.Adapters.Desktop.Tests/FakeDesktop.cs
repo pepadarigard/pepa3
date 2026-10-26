@@ -101,6 +101,15 @@ internal sealed class FakeDesktop : IDesktop
         }
     }
 
+    public Task<IReadOnlyList<ElementNode>> DescribeAsync(DesktopWindow window, int maxDepth, int maxCount, CancellationToken cancellationToken)
+    {
+        var fake = (FakeWindow)window;
+        lock (fake.Elements)
+        {
+            return Task.FromResult<IReadOnlyList<ElementNode>>(fake.Elements.Take(maxCount).Select(e => new ElementNode(1, e.Info)).ToList());
+        }
+    }
+
     public Task<bool> IsOpenAsync(DesktopWindow window, CancellationToken cancellationToken) => Task.FromResult(((FakeWindow)window).Open);
 
     public Task<WindowInfo> ActivateAsync(DesktopWindow window, CancellationToken cancellationToken)

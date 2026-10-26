@@ -172,6 +172,57 @@ internal static class ApiEndpoints
             }
         });
 
+        // Элементы окна — для выбора в конструкторе. Окно ищется так же, как в блоках; несколько подходящих — не угадываем.
+        api.MapGet("/integrations/desktop/elements", async (string? window, string? process, Adapters.Desktop.IDesktop desktop, CancellationToken ct) =>
+        {
+            if (desktop.UnavailableReason is { } reason)
+            {
+                return Results.Json(new ErrorDto(reason), Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status409Conflict);
+            }
+
+            var query = new Adapters.Desktop.WindowQuery(string.IsNullOrWhiteSpace(window) ? null : window.Trim(),
+                string.IsNullOrWhiteSpace(process) ? null : process.Trim());
+            if (query.TitleContains is null && query.ProcessName is null)
+            {
+                return Results.Json(new ErrorDto("Сначала укажите окно (часть заголовка) или программу."), Core.Serialization.PepaJson.Options,
+                    statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            try
+            {
+                var found = await desktop.FindWindowsAsync(query, ct);
+                if (found.Count == 0)
+                {
+                    return Results.Json(new ErrorDto($"Окна ({query}) сейчас нет — откройте программу и попробуйте снова."),
+                        Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status404NotFound);
+                }
+
+                if (found.Count > 1)
+                {
+                    return Results.Json(new ErrorDto(
+                            $"Подходит несколько окон ({string.Join(", ", found.Take(5).Select(w => $"«{w.Info.Title}» · {w.Info.ProcessName}"))}). " +
+                            "Уточните заголовок или укажите программу — так же это нужно и блоку."),
+                        Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status409Conflict);
+                }
+
+                const int limit = 600;
+                var nodes = await desktop.DescribeAsync(found[0], maxDepth: 12, maxCount: limit, ct);
+                // Насколько надёжно по элементу искать: подпись и код, которые в окне встречаются один раз.
+                var names = nodes.Where(n => n.Info.Name.Length > 0).GroupBy(n => n.Info.Name, StringComparer.CurrentCultureIgnoreCase)
+                    .ToDictionary(g => g.Key, g => g.Count(), StringComparer.CurrentCultureIgnoreCase);
+                var ids = nodes.Where(n => n.Info.AutomationId.Length > 0).GroupBy(n => n.Info.AutomationId, StringComparer.Ordinal)
+                    .ToDictionary(g => g.Key, g => g.Count(), StringComparer.Ordinal);
+                return Results.Ok(new DesktopElementsDto(found[0].Info.Title, found[0].Info.ProcessName, nodes.Count >= limit,
+                    nodes.Select(n => new DesktopElementDto(n.Depth, n.Info.Name, n.Info.ControlType, n.Info.AutomationId, n.Info.Enabled,
+                        n.Info.Name.Length > 0 && names[n.Info.Name] == 1, n.Info.AutomationId.Length > 0 && ids[n.Info.AutomationId] == 1)).ToList()));
+            }
+            catch (Adapters.Desktop.DesktopException ex)
+            {
+                return Results.Json(new ErrorDto($"Windows не дал элементы окна: {ex.Message}"), Core.Serialization.PepaJson.Options,
+                    statusCode: StatusCodes.Status502BadGateway);
+            }
+        });
+
         api.MapGet("/overview", async (IPepaStore store, ProcessMapper mapper, CancellationToken ct) =>
         {
             var active = await store.ListProcessesAsync(new ProcessQuery { Statuses = ActiveStatuses, Limit = 500 }, ct);
