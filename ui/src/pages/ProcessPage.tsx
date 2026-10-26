@@ -254,7 +254,7 @@ function ProcessGraph({ definition, details, descriptors, selected, onSelect }: 
 
   return (
     <div className="process-graph flow-readonly">
-      <FlowContext.Provider value={{ descriptors, states }}>
+      <FlowContext.Provider value={{ descriptors, states, current: isActive(details.process.status) ? details.process.currentNodeId : null }}>
         <ReactFlow<PepaNode, PepaEdge>
           nodes={nodes}
           edges={edges}
