@@ -59,7 +59,8 @@ internal sealed class FakeDesktop : IDesktop
     public Task<IReadOnlyList<DesktopElement>> FindElementsAsync(DesktopWindow window, ElementQuery query, CancellationToken cancellationToken)
     {
         var fake = (FakeWindow)window;
-        lock (_gate)
+        // Тест может добавить элемент в окно, пока движок его ищет.
+        lock (fake.Elements)
         {
             return Task.FromResult<IReadOnlyList<DesktopElement>>(fake.Elements
                 .Where(e => (query.Name is null || (query.NameContains
@@ -199,7 +200,11 @@ internal sealed class FakeWindow(WindowInfo info) : DesktopWindow
             CanInvoke = canInvoke,
             HasValue = hasValue,
         };
-        Elements.Add(element);
+        lock (Elements)
+        {
+            Elements.Add(element);
+        }
+
         return element;
     }
 }
