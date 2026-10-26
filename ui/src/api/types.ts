@@ -144,7 +144,7 @@ export type ProcessStatus =
   | "failed"
   | "cancelled";
 
-export type AttentionKind = "none" | "unknownStep" | "stepFailed" | "stepLimit" | "engineError";
+export type AttentionKind = "none" | "unknownStep" | "stepFailed" | "stepLimit" | "engineError" | "restoredFromBackup";
 export type PauseReason = "none" | "user" | "restart" | "breakpoint";
 export type ProcessAction = "pause" | "cancel" | "continue" | "verify" | "retry" | "markSucceeded" | "skip" | "runWithoutPauses";
 export type ResumeAction = "continue" | "verify" | "retry" | "markSucceeded" | "skip" | "runWithoutPauses";
@@ -374,6 +374,8 @@ export interface Info {
     cancelledPlannedSteps: number;
     releasedResources: number;
     missedRuns: number;
+    /** База восстановлена из копии: столько процессов ждут решения. */
+    restored: number;
   };
 }
 
@@ -441,6 +443,21 @@ export interface RecorderState {
   profileId: string | null;
   startUrl: string | null;
   actions: import("../lib/recording").RecordedAction[];
+}
+
+export interface BackupInfo {
+  name: string;
+  /** daily — ежедневная, manual — по кнопке, migration — перед обновлением базы. */
+  kind: "daily" | "manual" | "migration";
+  createdAt: string;
+  size: number;
+}
+
+export interface Backups {
+  directory: string;
+  /** Почему не удалась последняя автоматическая копия. */
+  lastError: string | null;
+  items: BackupInfo[];
 }
 
 /** Записанный шаг в окнах Windows — готовый блок. */

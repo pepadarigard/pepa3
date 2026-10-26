@@ -436,6 +436,18 @@ async function main() {
     await page.keyboard.press("Control+z");
     await page.locator(".pnode-summary", { hasText: "Привет" }).waitFor();
 
+    step("Резервные копии базы");
+    await page.goto(`${base}/#/settings`);
+    const backupsCard = page.getByTestId("backups-card");
+    // Ежедневная копия делается при запуске.
+    await backupsCard.getByText("ежедневная").waitFor({ timeout: 10000 });
+    await backupsCard.getByRole("button", { name: "Сделать копию сейчас" }).click();
+    await backupsCard.getByText("вручную").waitFor();
+    await backupsCard.getByText("Как восстановить из копии").click();
+    await backupsCard.getByText("назовите её").waitFor();
+    await page.waitForTimeout(200);
+    await backupsCard.screenshot({ path: path.join(shots, "25-backups.png") });
+
     step("Тёмная тема");
     await page.goto(`${base}/#/settings`);
     await page.getByRole("button", { name: "Тёмная" }).click();

@@ -6,13 +6,15 @@ using Pepa.Engine.Persistence;
 
 namespace Pepa.Engine;
 
+/// <param name="Restored">База восстановлена из копии: столько процессов ждут решения пользователя.</param>
 public sealed record RecoveryReport(int Paused, int UnknownSteps, int CancelledPlannedSteps, int ReleasedResources = 0,
-    int MissedRuns = 0)
+    int MissedRuns = 0, int Restored = 0)
 {
     public override string ToString() =>
         $"Восстановление: приостановлено процессов — {Paused}, шагов с неизвестным итогом — {UnknownSteps}, " +
         $"отменено неначатых шагов — {CancelledPlannedSteps}, освобождено ресурсов — {ReleasedResources}, " +
-        $"пропущено запусков по расписанию — {MissedRuns}.";
+        $"пропущено запусков по расписанию — {MissedRuns}" +
+        (Restored > 0 ? $", база восстановлена из копии — процессов ждут решения: {Restored}." : ".");
 }
 
 public sealed partial class ProcessEngine
@@ -29,14 +31,21 @@ public sealed partial class ProcessEngine
             Limit = int.MaxValue,
         }, cancellationToken);
 
-        int paused = 0, unknown = 0, cancelled = 0;
+        int paused = 0, unknown = 0, cancelled = 0, restored = 0;
+        // База — восстановленная копия: всё, что процессы делали после копии, в ней не записано. Продолжать их «как ни
+        // в чём не бывало» значило бы повторить уже сделанное — каждый ждёт решения пользователя.
+        var restoredNote = RestoredFromBackupAt is { } copyTime
+            ? $"База Pepa восстановлена из резервной копии от {copyTime.ToLocalTime():dd.MM.yyyy HH:mm}: что процесс сделал после этого, " +
+              "в базе не записано, и Pepa этого не знает."
+            : null;
         foreach (var process in unfinished)
         {
             var open = await _store.GetOpenStepsAsync(process.Id, cancellationToken);
             var interrupted = open.Where(s => s.State == StepState.Running).ToList();
             var planned = open.Where(s => s.State == StepState.Planned).ToList();
             var wasActive = process.Status is ProcessStatus.Running or ProcessStatus.Waiting;
-            if (interrupted.Count == 0 && planned.Count == 0 && !wasActive)
+            var restore = restoredNote is not null && process.StatusMessage?.StartsWith(restoredNote, StringComparison.Ordinal) != true;
+            if (interrupted.Count == 0 && planned.Count == 0 && !wasActive && !restore)
             {
                 continue;
             }
@@ -70,9 +79,25 @@ public sealed partial class ProcessEngine
             {
                 var last = interrupted[^1];
                 updated = Attention(updated, AttentionKind.UnknownStep,
+                    (restore ? restoredNote + " " : "") +
                     $"Приложение было закрыто во время шага «{last.NodeLabel}». Неизвестно, выполнилось ли действие. " +
                     "Проверьте результат и решите, что делать дальше.", last.Id, last.TokenId);
                 await write.AddJournalAsync(Journal(process.Id, JournalLevel.Error, updated.StatusMessage!, last.Id, last.NodeId));
+                restored += restore ? 1 : 0;
+            }
+            else if (restore && process.Status == ProcessStatus.NeedsAttention)
+            {
+                // Решение и так за пользователем — добавить, что база восстановлена.
+                updated = updated with { StatusMessage = $"{restoredNote} {process.StatusMessage}" };
+                await write.AddJournalAsync(Journal(process.Id, JournalLevel.Warning, restoredNote!));
+                restored++;
+            }
+            else if (restore)
+            {
+                updated = Attention(updated, AttentionKind.RestoredFromBackup,
+                    $"{restoredNote} Проверьте во внешних программах, что уже сделано, и продолжите процесс или остановите его.", null);
+                await write.AddJournalAsync(Journal(process.Id, JournalLevel.Warning, updated.StatusMessage!));
+                restored++;
             }
             else if (wasActive)
             {
@@ -92,8 +117,8 @@ public sealed partial class ProcessEngine
 
         var released = await ReconcileResourcesAsync(cancellationToken);
         var missed = await RecordMissedSchedulesAsync(cancellationToken);
-        var report = new RecoveryReport(paused, unknown, cancelled, released, missed);
-        if (unknown > 0 || paused > 0 || released > 0 || missed > 0)
+        var report = new RecoveryReport(paused, unknown, cancelled, released, missed, restored);
+        if (unknown > 0 || paused > 0 || released > 0 || missed > 0 || restored > 0)
         {
             _logger.LogWarning("{Report}", report);
         }

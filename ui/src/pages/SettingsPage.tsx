@@ -5,6 +5,7 @@ import { api } from "../api/client";
 import { useInfo, useSettings } from "../api/hooks";
 import type { Settings } from "../api/types";
 import { AssistantCard } from "../components/AssistantCard";
+import { BackupsCard } from "../components/BackupsCard";
 import { PluginsCard } from "../components/PluginsCard";
 import { useFeedback } from "../components/feedback";
 import { Badge, Button, Callout, Card, ErrorState, Loading } from "../components/ui";
@@ -174,6 +175,8 @@ export function SettingsPage() {
       </Card>
 
       <AssistantCard />
+
+      <BackupsCard />
 
       <PluginsCard />
 

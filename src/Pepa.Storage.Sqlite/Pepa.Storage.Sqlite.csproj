@@ -5,4 +5,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Pepa.Engine.Tests" />
+  </ItemGroup>
 </Project>

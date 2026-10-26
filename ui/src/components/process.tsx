@@ -92,6 +92,8 @@ function confirmationFor(process: ProcessSummary, action: ProcessAction): string
       return ru.confirmations.cancel;
     case "retry":
       return process.attention === "unknownStep" ? ru.confirmations.retryUnknown : null;
+    case "continue":
+      return process.attention === "restoredFromBackup" ? ru.confirmations.continueRestored : null;
     case "markSucceeded":
       return ru.confirmations.markSucceeded;
     case "skip":

@@ -57,10 +57,12 @@ public sealed class HostFixture : IAsyncDisposable
         TelegramConnectTimeout = TimeSpan.FromSeconds(10),
     };
 
-    public async Task RestartAsync()
+    /// <param name="whileStopped">Что сделать, пока Pepa закрыта (например, заменить базу копией).</param>
+    public async Task RestartAsync(Action? whileStopped = null)
     {
         Client.Dispose();
         await Host.StopAsync();
+        whileStopped?.Invoke();
         Host = await PepaHost.StartAsync(Options(Root));
         Client = CreateClient(Host);
     }

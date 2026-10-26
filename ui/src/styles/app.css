@@ -2047,3 +2047,26 @@ pre.json {
 }
 .element-list button:hover { background: var(--accent-soft); }
 .element-list .disabled-element { opacity: 0.55; }
+
+/* Резервные копии в «Настройках». */
+.backup-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.backup-list li {
+  display: grid;
+  grid-template-columns: auto auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+@media (max-width: 640px) {
+  .backup-list li {
+    grid-template-columns: auto auto;
+  }
+}

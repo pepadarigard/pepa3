@@ -30,7 +30,88 @@ public sealed partial class SqliteStore : IPepaStore
 
     public string DatabasePath { get; }
 
-    public async Task InitializeAsync(CancellationToken cancellationToken = default)
+    /// <summary>
+    /// База — восстановленная резервная копия (её положили на место базы): время копии. Узнаётся при
+    /// <see cref="InitializeAsync(CancellationToken)"/>; после того как процессы приведены в порядок, отметку снимает
+    /// <see cref="ClearRestoreMarkerAsync"/>.
+    /// </summary>
+    public DateTimeOffset? RestoredFromBackupAt { get; private set; }
+
+    public async Task ClearRestoreMarkerAsync(CancellationToken cancellationToken = default)
+    {
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            await using var connection = await OpenAsync(cancellationToken);
+            await ExecuteAsync(connection, null, "DROP TABLE IF EXISTS pepa_backup;", cancellationToken);
+            RestoredFromBackupAt = null;
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    /// <summary>Папка резервных копий базы — рядом с базой.</summary>
+    public string BackupDirectory => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(DatabasePath))!, "backups");
+
+    /// <summary>Имя файла копии: вид (daily, manual, migration) и время.</summary>
+    public static string BackupFileName(string kind, DateTime localTime) =>
+        $"pepa-{kind}-{localTime.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture)}.db";
+
+    /// <summary>
+    /// Согласованная копия базы одним файлом (онлайн-копирование SQLite: запись в базу во время копирования не мешает).
+    /// Копия проверяется (quick_check) и появляется под своим именем только целиком.
+    /// </summary>
+    public async Task BackupAsync(string targetPath, CancellationToken cancellationToken = default)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(targetPath))!);
+        if (File.Exists(targetPath))
+        {
+            throw new IOException($"Копия «{Path.GetFileName(targetPath)}» уже есть.");
+        }
+
+        var temp = targetPath + ".tmp";
+        try
+        {
+            File.Delete(temp);
+            await using (var source = await OpenAsync(cancellationToken))
+            await using (var target = new SqliteConnection(new SqliteConnectionStringBuilder
+                         {
+                             DataSource = temp, Mode = SqliteOpenMode.ReadWriteCreate, Pooling = false,
+                         }.ToString()))
+            {
+                await target.OpenAsync(cancellationToken);
+                source.BackupDatabase(target);
+                // Отметка «это копия»: если базу заменят ею, Pepa узнает об этом при запуске (см. RestoredFromBackupAt).
+                await ExecuteAsync(target, null,
+                    "CREATE TABLE pepa_backup (created_at TEXT NOT NULL); " +
+                    $"INSERT INTO pepa_backup (created_at) VALUES ('{DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture)}');",
+                    cancellationToken);
+                // Копия — одним файлом, без журнала WAL рядом.
+                await ExecuteAsync(target, null, "PRAGMA journal_mode = DELETE;", cancellationToken);
+                var check = Convert.ToString(await ScalarAsync(target, null, "PRAGMA quick_check;", cancellationToken), CultureInfo.InvariantCulture);
+                if (check != "ok")
+                {
+                    throw new InvalidDataException($"Копия базы не прошла проверку: {check}");
+                }
+            }
+
+            File.Move(temp, targetPath);
+        }
+        finally
+        {
+            if (File.Exists(temp))
+            {
+                File.Delete(temp);
+            }
+        }
+    }
+
+    public Task InitializeAsync(CancellationToken cancellationToken = default) => InitializeAsync(Migrations.Length, cancellationToken);
+
+    /// <param name="targetVersion">До какой версии схемы обновить (меньше последней — только для проверок обновления).</param>
+    internal async Task InitializeAsync(int targetVersion, CancellationToken cancellationToken)
     {
         await _writeLock.WaitAsync(cancellationToken);
         try
@@ -45,7 +126,25 @@ public sealed partial class SqliteStore : IPepaStore
                     $"База данных создана более новой версией Pepa (схема {version}). Обновите приложение.");
             }
 
-            for (var i = version; i < Migrations.Length; i++)
+            if (version > 0 && version < targetVersion)
+            {
+                // Перед обновлением схемы — копия: если обновление пойдёт не так, данные не потеряются.
+                await BackupAsync(Path.Combine(BackupDirectory, BackupFileName($"migration{version}", DateTime.Now)), cancellationToken);
+            }
+
+            RestoredFromBackupAt = null;
+            if (Convert.ToInt64(await ScalarAsync(connection, null, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'pepa_backup';",
+                    cancellationToken), CultureInfo.InvariantCulture) > 0)
+            {
+                var at = Convert.ToString(await ScalarAsync(connection, null, "SELECT created_at FROM pepa_backup LIMIT 1;", cancellationToken),
+                    CultureInfo.InvariantCulture);
+                // Время копии не прочиталось — всё равно восстановленная база: отметка важнее точного времени.
+                RestoredFromBackupAt = DateTimeOffset.TryParse(at, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed)
+                    ? parsed
+                    : DateTimeOffset.MinValue;
+            }
+
+            for (var i = version; i < targetVersion; i++)
             {
                 await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
                 await ExecuteAsync(connection, transaction, Migrations[i], cancellationToken);

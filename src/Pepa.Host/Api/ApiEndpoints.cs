@@ -310,6 +310,22 @@ internal static class ApiEndpoints
             return RecorderDto(recorder.State);
         });
 
+        // ───────────── Резервные копии базы ─────────────
+        api.MapGet("/backups", (Backups.DatabaseBackups backups) => new BackupsDto(backups.Directory, backups.LastError, backups.List()));
+
+        api.MapPost("/backups", async (Backups.DatabaseBackups backups, CancellationToken ct) =>
+        {
+            try
+            {
+                return Results.Ok(await backups.CreateAsync("manual", ct));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or Microsoft.Data.Sqlite.SqliteException)
+            {
+                return Results.Json(new ErrorDto($"Копию сделать не удалось: {ex.Message}"), Core.Serialization.PepaJson.Options,
+                    statusCode: StatusCodes.Status500InternalServerError);
+            }
+        });
+
         // ───────────── Запись действий в окнах Windows ─────────────
         api.MapGet("/recorder/desktop", (Adapters.Desktop.DesktopRecorder recorder) => DesktopRecorderDto(recorder));
 

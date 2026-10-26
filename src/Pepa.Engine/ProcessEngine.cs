@@ -66,6 +66,12 @@ public sealed partial class ProcessEngine : IAsyncDisposable
     public int ExecutingStepCount => Volatile.Read(ref _executingSteps);
 
     /// <summary>
+    /// База — восстановленная резервная копия (время копии): при запуске все незавершённые процессы ждут решения
+    /// пользователя. Задаётся до <see cref="StartAsync"/>.
+    /// </summary>
+    public DateTimeOffset? RestoredFromBackupAt { get; set; }
+
+    /// <summary>
     /// Восстановление после прошлого запуска и старт исполнителей. Ничего не продолжается автоматически:
     /// незавершённые процессы приостанавливаются до ручного возобновления.
     /// </summary>
@@ -390,6 +396,7 @@ public sealed partial class ProcessEngine : IAsyncDisposable
 
                 break;
             case AttentionKind.StepLimit:
+            case AttentionKind.RestoredFromBackup:
                 actions.Add(ProcessAction.Continue);
                 break;
             default:

@@ -248,6 +248,9 @@ public sealed record RecorderStartRequest(string? Browser, string? ProfileId, st
 public sealed record RecorderStateDto(bool Recording, string? Browser, string? ProfileId, string? StartUrl,
     IReadOnlyList<Adapters.Browser.RecordedAction> Actions);
 
+/// <param name="LastError">Почему не удалась последняя автоматическая копия (null — всё в порядке).</param>
+public sealed record BackupsDto(string Directory, string? LastError, IReadOnlyList<Backups.BackupInfo> Items);
+
 /// <param name="UnavailableReason">Почему запись в окнах Windows недоступна (null — доступна).</param>
 public sealed record DesktopRecorderDto(string? UnavailableReason, bool Recording, IReadOnlyList<Adapters.Desktop.RecordedDesktopStep> Steps);
 

@@ -162,6 +162,7 @@ public sealed class PepaHost : IAsyncDisposable
         var desktopRecorder = new DesktopRecorder(options.DesktopInput ?? new UnavailableInputMonitor(
             "Запись действий в окнах Windows доступна только в приложении Pepa для Windows (Pepa.exe), а сейчас Pepa запущена без окна."));
         builder.Services.AddSingleton(desktopRecorder);
+        builder.Services.AddSingleton(sp => new Backups.DatabaseBackups(store, TimeProvider.System, sp.GetRequiredService<ILogger<Backups.DatabaseBackups>>()));
         builder.Services.AddSingleton(sp => new ProcessEngine(
             sp.GetRequiredService<IPepaStore>(),
             sp.GetRequiredService<NodeRegistry>(),
@@ -212,7 +213,15 @@ public sealed class PepaHost : IAsyncDisposable
             telegram.CaughtUp += () => engine.SourceCaughtUp(TelegramEvents.Source);
         }
 
+        engine.RestoredFromBackupAt = store.RestoredFromBackupAt;
         hostContext.Recovery = await engine.StartAsync(cancellationToken);
+        if (store.RestoredFromBackupAt is { } restoredAt)
+        {
+            // Процессы уже ждут решения пользователя — отметка «база из копии» больше не нужна.
+            await store.ClearRestoreMarkerAsync(cancellationToken);
+            logger.LogWarning("База восстановлена из резервной копии от {At}. {Recovery}", restoredAt, hostContext.Recovery);
+        }
+
         var unfinished = await store.ListProcessesAsync(new ProcessQuery
         {
             Statuses = [ProcessStatus.Running, ProcessStatus.Waiting, ProcessStatus.Paused, ProcessStatus.NeedsAttention],
@@ -245,6 +254,8 @@ public sealed class PepaHost : IAsyncDisposable
         MapInterface(app, uiDirectory);
 
         await app.StartAsync(cancellationToken);
+        // Ежедневная резервная копия базы — в фоне, запуск окна она не задерживает.
+        app.Services.GetRequiredService<Backups.DatabaseBackups>().Start();
         var address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.First();
         var baseUrl = new Uri(address.Replace("[::1]", "127.0.0.1"));
         hostContext.Port = baseUrl.Port;
@@ -355,6 +366,7 @@ public sealed class PepaHost : IAsyncDisposable
             await engine.StopAsync();
             await telegram.DisposeAsync();
             await Services.GetRequiredService<BrowserRecorder>().DisposeAsync();
+            await Services.GetRequiredService<Backups.DatabaseBackups>().DisposeAsync();
             if (Services.GetRequiredService<DesktopRecorder>().State.Recording)
             {
                 // Перехват мыши и клавиатуры не должен пережить Pepa.

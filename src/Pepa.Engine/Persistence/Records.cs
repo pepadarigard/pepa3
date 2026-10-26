@@ -39,6 +39,12 @@ public enum AttentionKind
 
     /// <summary>Внутренняя ошибка платформы (например, блок недоступен в этой версии).</summary>
     EngineError,
+
+    /// <summary>
+    /// База восстановлена из резервной копии: что процесс сделал после копии, в базе нет — продолжать можно только после
+    /// проверки пользователем.
+    /// </summary>
+    RestoredFromBackup,
 }
 
 public enum PauseReason

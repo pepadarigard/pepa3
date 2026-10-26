@@ -19,7 +19,7 @@ export function HomePage() {
   if (overview.error) return <div className="page"><ErrorState error={overview.error} onRetry={() => overview.refetch()} /></div>;
   const data = overview.data!;
   const recovery = info.data?.recovery;
-  const recovered = (recovery?.paused ?? 0) + (recovery?.unknownSteps ?? 0);
+  const recovered = (recovery?.paused ?? 0) + (recovery?.unknownSteps ?? 0) + (recovery?.restored ?? 0);
 
   return (
     <div className="page">
@@ -42,6 +42,8 @@ export function HomePage() {
           Приложение закрывалось, пока работали процессы. Ничего не продолжилось само: приостановлено — {recovery?.paused ?? 0},
           шагов с неизвестным итогом — {recovery?.unknownSteps ?? 0}. Проверьте каждый процесс и возобновите вручную.
           {(recovery?.releasedResources ?? 0) > 0 && <> Освобождено ресурсов завершённых процессов — {recovery?.releasedResources}.</>}
+          {(recovery?.restored ?? 0) > 0 && <> База восстановлена из резервной копии: процессов, ждущих решения, — {recovery?.restored}.
+            Что они сделали после копии, Pepa не знает — проверьте во внешних программах.</>}
         </Callout>
       )}
 
