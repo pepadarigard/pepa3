@@ -24,6 +24,25 @@ internal sealed class FakeTelegram : ITelegramGateway
     /// <summary>Отправка падает до того, как сообщение ушло.</summary>
     public bool FailBeforeSend { get; set; }
 
+    /// <summary>Telegram отказывается принять сообщение (например, нет прав писать в чат).</summary>
+    public TelegramSendRejectedException? Reject { get; set; }
+
+    /// <summary>Входящие и чужие сообщения в истории чатов (для проверки отправки).</summary>
+    public ConcurrentQueue<(TelegramPeer Chat, TelegramHistoryMessage Message)> History { get; } = new();
+
+    /// <summary>Ключи от повторов, с которыми отправлялись сообщения.</summary>
+    public ConcurrentQueue<long> RandomIds { get; } = new();
+
+    public int NextId => Volatile.Read(ref _nextId);
+
+    /// <summary>Чужое сообщение в истории чата (например, ответ собеседника или то же сообщение, отправленное с телефона).</summary>
+    public TelegramHistoryMessage AddToHistory(TelegramPeer chat, string text, bool outgoing)
+    {
+        var message = new TelegramHistoryMessage(Interlocked.Increment(ref _nextId), outgoing, text, DateTimeOffset.UtcNow);
+        History.Enqueue((chat, message));
+        return message;
+    }
+
     public void Add(string name, TelegramPeer peer)
     {
         _chats[name] = peer;
@@ -42,15 +61,28 @@ internal sealed class FakeTelegram : ITelegramGateway
             : throw new TelegramChatNotFoundException($"Чат «{chat}» не найден.");
     }
 
-    public Task<TelegramSentMessage> SendAsync(TelegramPeer chat, string text, bool silent, CancellationToken cancellationToken)
+    public Task<int> LastMessageIdAsync(TelegramPeer chat, CancellationToken cancellationToken) =>
+        Status.State != TelegramState.Connected
+            ? throw new TelegramUnavailableException("Telegram не подключён.")
+            : Task.FromResult(All(chat).Select(m => m.MessageId).DefaultIfEmpty(0).Max());
+
+    public Task<TelegramSentMessage> SendAsync(TelegramPeer chat, string text, long randomId, CancellationToken cancellationToken)
     {
+        if (Reject is { } reject)
+        {
+            throw reject;
+        }
+
         if (FailBeforeSend)
         {
             throw new IOException("Нет связи — сообщение не ушло.");
         }
 
-        var message = new TelegramHistoryMessage(Interlocked.Increment(ref _nextId), true, text, DateTimeOffset.UtcNow);
+        RandomIds.Enqueue(randomId);
+        // Как Telegram: края текста обрезаются.
+        var message = new TelegramHistoryMessage(Interlocked.Increment(ref _nextId), true, TelegramEvents.NormalizeText(text), DateTimeOffset.UtcNow);
         Sent.Enqueue((chat, message));
+        History.Enqueue((chat, message));
         if (LoseConfirmation)
         {
             throw new IOException("Связь оборвалась после отправки.");
@@ -59,8 +91,11 @@ internal sealed class FakeTelegram : ITelegramGateway
         return Task.FromResult(new TelegramSentMessage(chat, message.MessageId, message.Date));
     }
 
-    public Task<IReadOnlyList<TelegramHistoryMessage>> RecentAsync(TelegramPeer chat, int limit, CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<TelegramHistoryMessage>>(Sent.Where(s => s.Chat.Key == chat.Key).Select(s => s.Message).Reverse().Take(limit).ToList());
+    public Task<IReadOnlyList<TelegramHistoryMessage>> MessagesAfterAsync(TelegramPeer chat, int afterId, int max, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<TelegramHistoryMessage>>(All(chat).Where(m => m.MessageId > afterId)
+            .OrderByDescending(m => m.MessageId).Take(max).ToList());
+
+    private IEnumerable<TelegramHistoryMessage> All(TelegramPeer chat) => History.Where(h => h.Chat.Key == chat.Key).Select(h => h.Message);
 
     public static TelegramIncomingMessage Incoming(TelegramPeer chat, string text, int id, DateTimeOffset? date = null) => new()
     {

@@ -6,6 +6,7 @@
   <ItemGroup>
     <PackageReference Include="WTelegramClient" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Pepa.Adapters.Telegram.Tests" />

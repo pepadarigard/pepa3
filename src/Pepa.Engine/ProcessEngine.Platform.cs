@@ -363,7 +363,7 @@ public sealed partial class ProcessEngine
                 });
         }
 
-        if (subscription.State == SubscriptionState.Active && token.WakeAt is { } wakeAt && wakeAt <= now)
+        if (subscription.State == SubscriptionState.Active && token.WakeAt is { } wakeAt && wakeAt <= now && TimeoutDue(wakeAt, now))
         {
             var isChild = subscription.Purpose == SubscriptionPurpose.ChildProcess;
             var timeoutResult = isChild
@@ -385,6 +385,13 @@ public sealed partial class ProcessEngine
 
         return false;
     }
+
+    /// <summary>
+    /// Срок ожидания, истёкший, пока Pepa была закрыта, наступает не сразу после запуска, а через
+    /// <see cref="EngineOptions.CatchUpGrace"/>: источники (например, Telegram) успевают догрузить события, произошедшие вовремя.
+    /// </summary>
+    private bool TimeoutDue(DateTimeOffset wakeAt, DateTimeOffset now) =>
+        wakeAt >= _startedAt || now >= _startedAt + _options.CatchUpGrace;
 
     private async Task<bool> TryResolveResourceWaitAsync(ProcessRecord process, ScenarioGraph graph, TokenRecord token,
         NodeDefinition node, NodeTypeDescriptor descriptor, StepRecord step, DateTimeOffset now)

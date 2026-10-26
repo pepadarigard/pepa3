@@ -77,9 +77,11 @@ public sealed class EngineHarness : IAsyncDisposable
     public RecoveryReport? LastRecovery { get; private set; }
 
     /// <summary>Закрыть приложение (мягко) и открыть снова над тем же файлом базы.</summary>
-    public async Task RestartAsync(bool withFaults = false)
+    /// <param name="whileClosed">Что происходит, пока приложение закрыто (например, проходит время).</param>
+    public async Task RestartAsync(bool withFaults = false, Action? whileClosed = null)
     {
         await Engine.StopAsync();
+        whileClosed?.Invoke();
         await StartEngineAsync(withFaults);
     }
 

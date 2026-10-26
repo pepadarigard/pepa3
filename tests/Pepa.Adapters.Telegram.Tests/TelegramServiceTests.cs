@@ -1,7 +1,12 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
+using System.Text.Json.Nodes;
 using Pepa.Core;
+using TL;
+using JsonObject = System.Text.Json.Nodes.JsonObject;
 
 namespace Pepa.Adapters.Telegram.Tests;
 
@@ -117,6 +122,139 @@ public sealed class TelegramServiceTests : IAsyncLifetime
         await telegram.LogoutAsync();
         Assert.Equal(TelegramState.NotConfigured, telegram.Status.State);
         Assert.Null(telegram.SavedLogin);
+    }
+
+    // ───────────── Входящие сообщения через настоящий менеджер обновлений библиотеки ─────────────
+
+    private string StatePath => Path.Combine(_data, "telegram", "updates.json");
+
+    private static readonly TelegramCredentials Account = new(12345, ApiHash, "+79001234567");
+
+    /// <summary>Подать обновление так, как его подаёт клиент библиотеки (обработчик менеджера — закрытый метод).</summary>
+    private static Task InjectAsync(WTelegram.UpdateManager manager, int pts, int messageId, string text)
+    {
+        var updates = new Updates
+        {
+            updates =
+            [
+                new UpdateNewMessage
+                {
+                    pts = pts, pts_count = 1,
+                    message = new Message { id = messageId, peer_id = new PeerUser { user_id = 42 }, message = text, date = DateTime.UtcNow },
+                },
+            ],
+            users = [], chats = [], date = DateTime.UtcNow,
+        };
+        var handler = typeof(WTelegram.UpdateManager).GetMethod("OnUpdates", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        return Task.Run(() => (Task)handler.Invoke(manager, [updates, false])!);
+    }
+
+    private int SavedPts() => JsonNode.Parse(File.ReadAllText(StatePath))!["0"]!["pts"]!.GetValue<int>();
+
+    private void WriteState(int pts) =>
+        File.WriteAllText(StatePath, new JsonObject
+        {
+            ["-2"] = new JsonObject { ["pts"] = 0, ["access_hash"] = 0 },
+            ["-1"] = new JsonObject { ["pts"] = 0, ["access_hash"] = 0 },
+            ["0"] = new JsonObject { ["pts"] = pts, ["access_hash"] = 0 },
+        }.ToJsonString());
+
+    [Fact]
+    public async Task Incoming_messages_are_accepted_in_order_and_state_is_saved_outside_the_handler()
+    {
+        var events = new ConcurrentQueue<EventInput>();
+        var service = new TelegramService(_data, e => { events.Enqueue(e); return Task.Delay(20); }) { ServerAddress = "127.0.0.1:1" };
+        var manager = await service.ConnectForTestsAsync(Account);
+
+        // Раньше обработчик сохранял состояние сам и навсегда блокировал библиотеку на первом же сообщении.
+        await InjectAsync(manager, 1, 100, "первое").WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await InjectAsync(manager, 2, 101, "второе").WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Assert.Equal(["первое", "второе"], events.Select(e => e.Payload!["text"]!.GetValue<string>()));
+        Assert.Equal("0:user:42:100", events.First().ExternalId);
+
+        await service.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        Assert.Equal(2, SavedPts());
+    }
+
+    [Fact]
+    public async Task Message_that_could_not_be_accepted_keeps_the_old_state_so_it_comes_again()
+    {
+        Directory.CreateDirectory(Path.Combine(_data, "telegram"));
+        WriteState(5);
+        var service = new TelegramService(_data, _ => throw new InvalidOperationException("база занята")) { ServerAddress = "127.0.0.1:1", PublishAttempts = 2 };
+        var manager = await service.ConnectForTestsAsync(Account);
+
+        await InjectAsync(manager, 6, 200, "важное").WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        Assert.Contains("придут снова", service.Status.Message);
+
+        await service.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        // Состояние не продвинулось: после перезапуска Telegram пришлёт сообщение снова (повтор отсеется по ключу).
+        Assert.Equal(5, SavedPts());
+    }
+
+    [Fact]
+    public async Task Temporary_failure_is_retried_and_then_state_is_saved()
+    {
+        var calls = 0;
+        var events = new ConcurrentQueue<EventInput>();
+        var service = new TelegramService(_data, e =>
+        {
+            if (Interlocked.Increment(ref calls) == 1)
+            {
+                throw new IOException("диск занят");
+            }
+
+            events.Enqueue(e);
+            return Task.CompletedTask;
+        }) { ServerAddress = "127.0.0.1:1" };
+        var manager = await service.ConnectForTestsAsync(Account);
+        await InjectAsync(manager, 1, 300, "с повтором").WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        Assert.Single(events);
+        Assert.Null(service.Status.Message);
+
+        await service.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        Assert.Equal(1, SavedPts());
+    }
+
+    [Fact]
+    public async Task Closing_while_a_message_is_being_retried_does_not_wait_and_does_not_save_state()
+    {
+        Directory.CreateDirectory(Path.Combine(_data, "telegram"));
+        WriteState(5);
+        var attempts = 0;
+        var service = new TelegramService(_data, _ =>
+        {
+            Interlocked.Increment(ref attempts);
+            throw new InvalidOperationException("движок остановлен");
+        }) { ServerAddress = "127.0.0.1:1", PublishAttempts = 100 };
+        var manager = await service.ConnectForTestsAsync(Account);
+        var handler = InjectAsync(manager, 6, 400, "в процессе закрытия");
+        await WaitUntilAsync(() => Volatile.Read(ref attempts) > 0);
+
+        var watch = Stopwatch.StartNew();
+        await service.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(15), TestContext.Current.CancellationToken);
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(10), $"закрытие заняло {watch.Elapsed}");
+        await handler.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Assert.Equal(5, SavedPts());
+    }
+
+    [Fact]
+    public async Task Damaged_state_file_is_reported_and_does_not_block_the_session()
+    {
+        Directory.CreateDirectory(Path.Combine(_data, "telegram"));
+        await File.WriteAllTextAsync(StatePath, "{\"0\":{\"pts", TestContext.Current.CancellationToken);
+        var events = new ConcurrentQueue<EventInput>();
+        var service = new TelegramService(_data, e => { events.Enqueue(e); return Task.CompletedTask; }) { ServerAddress = "127.0.0.1:1" };
+        var manager = await service.ConnectForTestsAsync(Account);
+        Assert.Contains("повреждён", service.Status.Message);
+        await InjectAsync(manager, 1, 500, "после сбоя").WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Assert.Single(events);
+        await service.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        Assert.Equal(1, SavedPts());
+
+        // Сессия не осталась занятой: следующее подключение открывается.
+        await using var again = new TelegramService(_data, _ => Task.CompletedTask) { ServerAddress = "127.0.0.1:1" };
+        await again.ConnectForTestsAsync(Account);
     }
 
     private static async Task WaitUntilAsync(Func<bool> condition)

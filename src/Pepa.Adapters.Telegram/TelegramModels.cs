@@ -22,6 +22,9 @@ public sealed record TelegramPeer(TelegramPeerKind Kind, long Id, string Title, 
 /// <summary>Входящее сообщение.</summary>
 public sealed record TelegramIncomingMessage
 {
+    /// <summary>Аккаунт, который получил сообщение: номера сообщений уникальны только в пределах аккаунта.</summary>
+    public long AccountId { get; init; }
+
     public required TelegramPeer Chat { get; init; }
     public TelegramPeer? From { get; init; }
     public required int MessageId { get; init; }
@@ -60,7 +63,12 @@ public enum TelegramState
 
 public sealed record TelegramStatus(TelegramState State, string? Account, string? Message);
 
-/// <summary>Работа с Telegram для блоков. Отдельный интерфейс — чтобы блоки можно было проверить без настоящего Telegram.</summary>
+/// <summary>
+/// Работа с Telegram для блоков. Отдельный интерфейс — чтобы блоки можно было проверить без настоящего Telegram.
+/// <see cref="TelegramUnavailableException"/>, <see cref="TelegramChatNotFoundException"/> и
+/// <see cref="TelegramSendRejectedException"/> означают, что действие точно не выполнялось; любое другое исключение
+/// при отправке — итог неизвестен.
+/// </summary>
 public interface ITelegramGateway
 {
     TelegramStatus Status { get; }
@@ -68,10 +76,14 @@ public interface ITelegramGateway
     /// <summary>Найти чат: @username, номер телефона +7…, «me» (Избранное) или ключ user:123 / chat:45 / channel:67.</summary>
     Task<TelegramPeer> ResolveAsync(string chat, CancellationToken cancellationToken);
 
-    Task<TelegramSentMessage> SendAsync(TelegramPeer chat, string text, bool silent, CancellationToken cancellationToken);
+    /// <summary>Номер последнего сообщения чата (0 — сообщений нет). Только чтение: отметка «до отправки» для проверки.</summary>
+    Task<int> LastMessageIdAsync(TelegramPeer chat, CancellationToken cancellationToken);
 
-    /// <summary>Последние сообщения чата (только чтение).</summary>
-    Task<IReadOnlyList<TelegramHistoryMessage>> RecentAsync(TelegramPeer chat, int limit, CancellationToken cancellationToken);
+    /// <summary>Отправить сообщение. <paramref name="randomId"/> — ключ от повторов: Telegram не примет его дважды.</summary>
+    Task<TelegramSentMessage> SendAsync(TelegramPeer chat, string text, long randomId, CancellationToken cancellationToken);
+
+    /// <summary>Сообщения чата с номером больше <paramref name="afterId"/>, новые первыми, не больше <paramref name="max"/>.</summary>
+    Task<IReadOnlyList<TelegramHistoryMessage>> MessagesAfterAsync(TelegramPeer chat, int afterId, int max, CancellationToken cancellationToken);
 }
 
 /// <summary>Telegram не подключён или недоступен — действие не выполнялось.</summary>
@@ -79,6 +91,13 @@ public sealed class TelegramUnavailableException(string message) : Exception(mes
 
 /// <summary>Чат не найден — действие не выполнялось.</summary>
 public sealed class TelegramChatNotFoundException(string message) : Exception(message);
+
+/// <summary>Telegram отказался принять сообщение (нет прав, слишком длинное, ограничение частоты…) — оно не отправлено.</summary>
+public sealed class TelegramSendRejectedException(string message, bool retryable) : Exception(message)
+{
+    /// <summary>Повтор позже может пройти (например, после ограничения частоты).</summary>
+    public bool Retryable { get; } = retryable;
+}
 
 /// <summary>Входящие сообщения — события Pepa с источником «telegram».</summary>
 public static class TelegramEvents
@@ -90,7 +109,7 @@ public static class TelegramEvents
     {
         Source = Source,
         Type = MessageType,
-        ExternalId = $"{message.Chat.Key}:{message.MessageId}",
+        ExternalId = $"{message.AccountId}:{message.Chat.Key}:{message.MessageId}",
         CorrelationKey = message.Chat.Key,
         OccurredAt = message.Date,
         Payload = new JsonObject
@@ -112,6 +131,9 @@ public static class TelegramEvents
         ["title"] = peer.Title,
         ["username"] = peer.Username,
     };
+
+    /// <summary>Текст так, как его хранит Telegram: без пробелов по краям, переводы строк — «\n».</summary>
+    public static string NormalizeText(string text) => text.ReplaceLineEndings("\n").Trim();
 
     /// <summary>Разобрать ключ вида «user:123».</summary>
     public static bool TryParseKey(string text, out TelegramPeerKind kind, out long id)

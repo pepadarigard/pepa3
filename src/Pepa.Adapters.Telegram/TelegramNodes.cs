@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Pepa.Core;
@@ -59,8 +60,27 @@ public sealed class SendTelegramNode(ITelegramGateway telegram) : INodeExecutor
         ],
     };
 
-    public ValueTask<JsonObject?> PrepareAsync(NodeExecutionContext context, CancellationToken cancellationToken) =>
-        ValueTask.FromResult<JsonObject?>(new JsonObject { ["before"] = context.Time.GetUtcNow().ToString("O") });
+    /// <summary>
+    /// До отправки (только чтение): номер последнего сообщения чата — после сбоя Pepa ищет своё сообщение среди более новых,
+    /// не полагаясь на часы компьютера, — и ключ от повторов для Telegram.
+    /// </summary>
+    public async ValueTask<JsonObject?> PrepareAsync(NodeExecutionContext context, CancellationToken cancellationToken)
+    {
+        // Строкой: в числе JSON (double) 64-битный ключ потерял бы точность.
+        var checkpoint = new JsonObject { ["randomId"] = Random.Shared.NextInt64(1, long.MaxValue).ToString(CultureInfo.InvariantCulture) };
+        try
+        {
+            var chat = await telegram.ResolveAsync(context.RequireString("chat"), cancellationToken);
+            checkpoint["chat"] = chat.Key;
+            checkpoint["afterId"] = await telegram.LastMessageIdAsync(chat, cancellationToken);
+        }
+        catch (Exception ex) when (ex is TelegramUnavailableException or TelegramChatNotFoundException)
+        {
+            // Отправка всё равно не состоится — блок сообщит причину сам.
+        }
+
+        return checkpoint;
+    }
 
     public async ValueTask<NodeResult> ExecuteAsync(NodeExecutionContext context, CancellationToken cancellationToken)
     {
@@ -70,10 +90,22 @@ public sealed class SendTelegramNode(ITelegramGateway telegram) : INodeExecutor
             throw new NodeInputException("Текст сообщения пустой.");
         }
 
+        if (text.Length > 4096)
+        {
+            throw new NodeInputException($"Сообщение длиннее 4096 символов ({text.Length}) — Telegram такое не примет.");
+        }
+
+        var randomId = long.TryParse(context.Checkpoint?.GetString("randomId"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var stored)
+            ? stored
+            : Random.Shared.NextInt64(1, long.MaxValue);
+
         TelegramPeer chat;
+        TelegramSentMessage sent;
         try
         {
             chat = await telegram.ResolveAsync(context.RequireString("chat"), cancellationToken);
+            // Ошибка связи во время самой отправки — итог неизвестен: движок проверит историю чата, а не отправит снова.
+            sent = await telegram.SendAsync(chat, text, randomId, cancellationToken);
         }
         catch (TelegramUnavailableException ex)
         {
@@ -83,42 +115,69 @@ public sealed class SendTelegramNode(ITelegramGateway telegram) : INodeExecutor
         {
             return NodeResult.Fail(ex.Message, retryable: false);
         }
-
-        // Ошибка при самой отправке (обрыв связи, тайм-аут) — итог неизвестен: движок проверит историю чата.
-        var sent = await telegram.SendAsync(chat, text, silent: false, cancellationToken);
-        var output = new JsonObject
+        catch (TelegramSendRejectedException ex)
         {
-            ["messageId"] = sent.MessageId,
-            ["chat"] = TelegramEvents.PeerJson(chat),
-            ["date"] = sent.Date.ToString("O"),
-        };
-        var updates = new Dictionary<string, JsonNode?>();
-        if (context.GetString("saveTo") is { Length: > 0 } saveTo)
-        {
-            updates[saveTo] = output.DeepClone();
+            return NodeResult.Fail(ex.Message, ex.Retryable);
         }
 
-        return NodeResult.Ok(Ports.Out, updates, output, $"Отправлено в Telegram «{chat.Title}»: {TelegramNodes.Preview(text)}");
+        var output = Output(chat, sent.MessageId, sent.Date);
+        return NodeResult.Ok(Ports.Out, SaveTo(context, output), output, $"Отправлено в Telegram «{chat.Title}»: {TelegramNodes.Preview(text)}");
     }
 
     public async ValueTask<VerificationResult> VerifyAsync(NodeExecutionContext context, CancellationToken cancellationToken)
     {
-        var text = context.GetString("text") ?? "";
-        var before = DateTimeOffset.TryParse(context.Checkpoint?.GetString("before"), out var parsed) ? parsed : DateTimeOffset.MinValue;
+        if (context.Checkpoint?.GetNumber("afterId") is not { } afterNumber)
+        {
+            return VerificationResult.Inconclusive("перед отправкой не удалось отметить историю чата — проверить нечем");
+        }
+
+        var text = TelegramEvents.NormalizeText(context.GetString("text") ?? "");
         try
         {
             var chat = await telegram.ResolveAsync(context.RequireString("chat"), cancellationToken);
-            var recent = await telegram.RecentAsync(chat, 30, cancellationToken);
-            var found = recent.FirstOrDefault(m => m.Outgoing && m.Text == text && m.Date >= before - TimeSpan.FromSeconds(5));
-            return found is not null
-                ? VerificationResult.Done($"сообщение есть в истории чата (№{found.MessageId})",
-                    new JsonObject { ["messageId"] = found.MessageId, ["chat"] = TelegramEvents.PeerJson(chat) })
+            if (context.Checkpoint.GetString("chat") is { } key && key != chat.Key)
+            {
+                return VerificationResult.Inconclusive($"чат изменился с момента отправки ({key} → {chat.Key}) — решите сами");
+            }
+
+            var newer = await telegram.MessagesAfterAsync(chat, (int)afterNumber, VerifyScanLimit, cancellationToken);
+            // Самое раннее своё сообщение с этим текстом после отметки — то, что отправил этот шаг.
+            var found = newer.Where(m => m.Outgoing && TelegramEvents.NormalizeText(m.Text) == text).MinBy(m => m.MessageId);
+            if (found is not null)
+            {
+                var output = Output(chat, found.MessageId, found.Date);
+                return new VerificationResult(VerificationOutcome.Done, $"сообщение есть в истории чата (№{found.MessageId})",
+                    VariableUpdates: SaveTo(context, output), Output: output);
+            }
+
+            return newer.Count >= VerifyScanLimit
+                ? VerificationResult.Inconclusive($"после отметки в чате больше {VerifyScanLimit} сообщений — найти своё не удалось, решите сами")
                 : VerificationResult.NotDone("в истории чата такого сообщения нет — его можно отправить");
         }
         catch (Exception ex) when (ex is TelegramUnavailableException or TelegramChatNotFoundException)
         {
             return VerificationResult.Inconclusive($"проверить историю чата не удалось: {ex.Message}");
         }
+    }
+
+    private const int VerifyScanLimit = 1000;
+
+    private static JsonObject Output(TelegramPeer chat, int messageId, DateTimeOffset date) => new()
+    {
+        ["messageId"] = messageId,
+        ["chat"] = TelegramEvents.PeerJson(chat),
+        ["date"] = date.ToString("O"),
+    };
+
+    private static Dictionary<string, JsonNode?> SaveTo(NodeExecutionContext context, JsonObject output)
+    {
+        var updates = new Dictionary<string, JsonNode?>();
+        if (context.GetString("saveTo") is { Length: > 0 } saveTo)
+        {
+            updates[saveTo] = output.DeepClone();
+        }
+
+        return updates;
     }
 }
 
@@ -150,6 +209,8 @@ public sealed class WaitTelegramNode(ITelegramGateway telegram) : INodeExecutor
             {
                 Required = false,
                 Placeholder = "@username — или пусто: из любого чата",
+                Help = "Имя пользователя, бота или канала (@name), номер телефона из ваших контактов или ключ чата " +
+                       "(например, {{ vars.sent.chat.key }} из «Отправить сообщение»). Пусто — из любого чата.",
             },
             new FieldDescriptor
             {
@@ -183,9 +244,15 @@ public sealed class WaitTelegramNode(ITelegramGateway telegram) : INodeExecutor
 
         if (!string.IsNullOrWhiteSpace(chatText))
         {
+            if (chatText.Trim() is "me" or "self" or "Избранное" or "избранное")
+            {
+                throw new NodeInputException("В «Избранное» входящих сообщений не бывает — укажите чат, из которого ждёте ответ.");
+            }
+
+            TelegramPeer peer;
             try
             {
-                key = (await telegram.ResolveAsync(chatText, cancellationToken)).Key;
+                peer = await telegram.ResolveAsync(chatText, cancellationToken);
             }
             catch (TelegramUnavailableException ex)
             {
@@ -195,6 +262,8 @@ public sealed class WaitTelegramNode(ITelegramGateway telegram) : INodeExecutor
             {
                 return NodeResult.Fail(ex.Message, retryable: false);
             }
+
+            key = peer.Key;
         }
 
         string? match = null;

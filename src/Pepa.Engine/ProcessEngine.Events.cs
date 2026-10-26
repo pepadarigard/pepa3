@@ -289,9 +289,7 @@ public sealed partial class ProcessEngine
                 continue;
             }
 
-            // Только события, пришедшие во время ожидания (или в разрешённое окно перед ним).
-            if (record.ReceivedAt < subscription.CreatedAt - TimeSpan.FromSeconds(subscription.LookbackSeconds) ||
-                (subscription.ExpiresAt is { } expires && record.ReceivedAt > expires))
+            if (!WithinWaitWindow(subscription, record))
             {
                 continue;
             }
@@ -331,6 +329,26 @@ public sealed partial class ProcessEngine
         }
 
         return result;
+    }
+
+    /// <summary>Допуск на расхождение часов источника (например, сервера Telegram) и этого компьютера.</summary>
+    private static readonly TimeSpan SourceClockTolerance = TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// Событие произошло во время ожидания (или в разрешённое окно перед ним). Когда событие случилось, говорит время
+    /// источника (<see cref="EventRecord.OccurredAt"/>): сообщение, догруженное после перезапуска, произошло раньше, чем
+    /// принято. Живые события дополнительно ограничены временем приёма — по часам этого компьютера.
+    /// </summary>
+    private static bool WithinWaitWindow(SubscriptionRecord subscription, EventRecord record)
+    {
+        var from = subscription.CreatedAt - TimeSpan.FromSeconds(subscription.LookbackSeconds);
+        if (record.ReceivedAt < from || (record.OccurredAt is { } occurred && occurred < from - SourceClockTolerance))
+        {
+            return false;
+        }
+
+        var happened = record.OccurredAt is { } at && at < record.ReceivedAt ? at : record.ReceivedAt;
+        return subscription.ExpiresAt is not { } expires || happened <= expires;
     }
 
     private static bool SubscriptionAccepts(string? eventType, string? correlationKey, EventRecord record) =>

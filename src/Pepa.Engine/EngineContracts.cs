@@ -25,6 +25,12 @@ public sealed record EngineOptions
     /// </summary>
     public TimeSpan ScheduleLateGrace { get; init; } = TimeSpan.FromMinutes(10);
 
+    /// <summary>
+    /// Ожидание события, срок которого истёк, пока Pepa была закрыта, завершается по тайм-ауту не сразу после запуска,
+    /// а спустя это время: источники успевают догрузить события, пришедшие вовремя.
+    /// </summary>
+    public TimeSpan CatchUpGrace { get; init; } = TimeSpan.FromMinutes(1);
+
     /// <summary>Сколько ждать завершения выполняющихся шагов при закрытии приложения.</summary>
     public TimeSpan ShutdownGracePeriod { get; init; } = TimeSpan.FromSeconds(15);
 }

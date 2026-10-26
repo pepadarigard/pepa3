@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { LogOut, Send } from "lucide-react";
 import { api } from "../api/client";
@@ -58,6 +58,19 @@ export function TelegramCard() {
   };
 
   const state = status?.state;
+  // Состояние сменилось не здесь (вход завершён или отменён в другом окне) — «Начать заново» больше не актуально.
+  useEffect(() => {
+    if (state !== "waitingCode" && state !== "waitingPassword") setRestart(false);
+  }, [state]);
+  const forget = async () => {
+    const ok = await feedback.confirm({
+      title: "Забыть данные входа Telegram?",
+      text: "Pepa удалит сохранённые api_id, api_hash и номер. Для нового подключения их нужно будет ввести снова.",
+      confirmLabel: "Забыть",
+      danger: true,
+    });
+    if (ok) await run(api.telegramLogout);
+  };
   const badge = state ? stateBadge[state] : null;
   const showForm = state === "notConfigured" || state === "loginRequired" || restart;
   const connected = state === "connected" || state === "disconnected";
@@ -95,6 +108,18 @@ export function TelegramCard() {
         {error && <Callout tone="danger">{error}</Callout>}
 
         {status && showForm && <LoginForm status={status} busy={busy} onSubmit={(login) => run(() => api.telegramLogin(login))} />}
+        {status && showForm && (
+          <div className="row">
+            {restart && (
+              <button type="button" className="link-button small" onClick={() => setRestart(false)} disabled={busy}>
+                ← Вернуться к вводу {state === "waitingPassword" ? "пароля" : "кода"}
+              </button>
+            )}
+            {!restart && state === "loginRequired" && status.apiId !== null && (
+              <button type="button" className="link-button small" onClick={forget} disabled={busy}>Забыть данные входа</button>
+            )}
+          </div>
+        )}
 
         {status && !showForm && state === "connecting" && (
           <div className="row small muted">
