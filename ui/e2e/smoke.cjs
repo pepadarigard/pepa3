@@ -288,10 +288,11 @@ async function main() {
     await page.screenshot({ path: path.join(shots, "05-waiting.png") });
     await page.getByRole("button", { name: "Приостановить" }).click();
     await page.locator(".badge", { hasText: "Приостановлен" }).first().waitFor();
-    await page.getByRole("button", { name: "Продолжить" }).click();
+    await page.getByRole("button", { name: "Продолжить", exact: true }).click();
     await page.locator(".badge", { hasText: "Ожидает" }).first().waitFor();
-    await page.getByRole("button", { name: "Остановить" }).click();
-    await page.getByRole("dialog").getByRole("button", { name: "Остановить" }).click();
+    // Точно по имени: «Приостановить» тоже содержит «остановить».
+    await page.getByRole("button", { name: "Остановить", exact: true }).click();
+    await page.getByRole("dialog").getByRole("button", { name: "Остановить", exact: true }).click();
     await page.locator(".badge", { hasText: "Остановлен" }).first().waitFor();
 
     step("Пример 5: занять ресурс и дождаться события");
