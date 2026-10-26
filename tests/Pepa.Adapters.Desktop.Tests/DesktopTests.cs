@@ -301,10 +301,21 @@ public sealed class DesktopTests
         Assert.Contains("перевод строки", (await FailedAsync(h, fill)).StatusMessage);
         Assert.DoesNotContain(d.Actions, a => a.StartsWith("type", StringComparison.Ordinal));
 
+        // Программа не ответила на нажатие, но открыла своё окно — нажатие прошло.
         d.InvokeHangs = true;
+        d.DialogOnHang = "Параметры";
         var dialog = await h.RunAsync(One("desktop.click", new { window = "Чат", name = "Настройки" }));
         await h.WaitForStatusAsync(dialog, ProcessStatus.Completed);
-        Assert.Contains(await h.Store.GetJournalAsync(dialog), j => j.Message.Contains("диалог", StringComparison.Ordinal));
+        Assert.Contains(await h.Store.GetJournalAsync(dialog), j => j.Message.Contains("открыла окно «Параметры»", StringComparison.Ordinal));
+
+        // Не ответила и окна не открыла — итог неизвестен: процесс не идёт дальше как ни в чём не бывало и не жмёт ещё раз.
+        d.DialogOnHang = null;
+        d.Close(d.FindWindow("Параметры"));
+        var clicks = d.Actions.Count(a => a == "invoke Настройки");
+        var busy = await h.RunAsync(One("desktop.click", new { window = "Чат", name = "Настройки" }));
+        var stopped = await h.WaitForStatusAsync(busy, ProcessStatus.NeedsAttention);
+        Assert.Contains("неизвестно, сработало ли", stopped.StatusMessage);
+        Assert.Equal(clicks + 1, d.Actions.Count(a => a == "invoke Настройки"));
     }
 
     [Fact]

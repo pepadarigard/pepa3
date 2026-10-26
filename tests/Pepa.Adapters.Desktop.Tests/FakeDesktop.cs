@@ -22,21 +22,32 @@ internal sealed class FakeDesktop : IDesktop
     /// <summary>После стольких напечатанных символов окно теряет передний план (пользователь переключился).</summary>
     public int? ForegroundLostAfterChars { get; set; }
 
-    /// <summary>Нажатие без мыши «зависает»: программа открыла диалог и не отвечает.</summary>
+    /// <summary>Нажатие без мыши «зависает»: программа не отвечает (занята или открыла диалог).</summary>
     public bool InvokeHangs { get; set; }
+
+    /// <summary>При «зависшем» нажатии программа открывает окно с таким заголовком (диалог того же процесса).</summary>
+    public string? DialogOnHang { get; set; }
 
     /// <summary>Сколько раз перебор окон ещё упадёт (окно закрылось посреди перебора).</summary>
     public int ListFailures { get; set; }
 
-    public FakeWindow AddWindow(string title, string process = "app", int x = 100, int y = 200, int width = 800, int height = 600)
+    public FakeWindow AddWindow(string title, string process = "app", int x = 100, int y = 200, int width = 800, int height = 600, int? processId = null)
     {
-        var window = new FakeWindow(new WindowInfo(_windows.Count + 1, title, process, 1000 + _windows.Count, new DesktopRect(x, y, width, height)));
+        var window = new FakeWindow(new WindowInfo(_windows.Count + 1, title, process, processId ?? 1000 + _windows.Count, new DesktopRect(x, y, width, height)));
         lock (_gate)
         {
             _windows.Add(window);
         }
 
         return window;
+    }
+
+    public FakeWindow FindWindow(string title)
+    {
+        lock (_gate)
+        {
+            return _windows.Single(w => w.Info.Title == title);
+        }
     }
 
     public void Close(FakeWindow window)
@@ -116,6 +127,17 @@ internal sealed class FakeDesktop : IDesktop
         Actions.Enqueue($"invoke {fake.Info.Name}");
         fake.Clicks++;
         await AfterAction(true);
+        if (InvokeHangs && DialogOnHang is { } title)
+        {
+            FakeWindow owner;
+            lock (_gate)
+            {
+                owner = _windows.First(w => w.Elements.Contains(fake));
+            }
+
+            AddWindow(title, owner.Info.ProcessName, processId: owner.Info.ProcessId);
+        }
+
         return InvokeHangs ? InvokeOutcome.Pending : InvokeOutcome.Done;
     }
 

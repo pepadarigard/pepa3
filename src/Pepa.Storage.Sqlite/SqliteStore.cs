@@ -160,9 +160,17 @@ public sealed partial class SqliteStore : IPepaStore
         (await QueryAsync("SELECT * FROM steps WHERE id = $id;", c => c.Parameters.AddWithValue("$id", stepId),
             ReadStep, cancellationToken)).FirstOrDefault();
 
-    public async Task<StepRecord?> GetLastStepAsync(string processId, string tokenId, string nodeId,
+    public async Task<StepRecord?> GetLastCheckpointStepAsync(string processId, string tokenId, string nodeId,
         CancellationToken cancellationToken = default) =>
-        (await QueryAsync("SELECT * FROM steps WHERE process_id = $p AND token_id = $t AND node_id = $n ORDER BY id DESC LIMIT 1;",
+        // Посещение блока начинается шагом с попыткой 1: снимки прежних посещений (цикл) не подходят, а шаг без снимка
+        // (подготовка не удалась) не обрывает цепочку — берётся последний снимок этого посещения.
+        (await QueryAsync("""
+                          SELECT * FROM steps
+                          WHERE process_id = $p AND token_id = $t AND node_id = $n AND checkpoint IS NOT NULL
+                            AND id >= (SELECT COALESCE(MAX(id), 0) FROM steps
+                                       WHERE process_id = $p AND token_id = $t AND node_id = $n AND attempt = 1)
+                          ORDER BY id DESC LIMIT 1;
+                          """,
             c =>
             {
                 c.Parameters.AddWithValue("$p", processId);

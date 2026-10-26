@@ -232,7 +232,7 @@ public sealed partial class ProcessEngine
         DateTimeOffset plannedAt)
     {
         var descriptor = executor.Descriptor;
-        var previousCheckpoint = token.Attempt > 1 && await _store.GetLastStepAsync(process.Id, token.Id, node.Id) is { Checkpoint: { } previous }
+        var previousCheckpoint = token.Attempt > 1 && await _store.GetLastCheckpointStepAsync(process.Id, token.Id, node.Id) is { Checkpoint: { } previous }
             ? (JsonObject)previous.DeepClone()
             : null;
 
@@ -1101,16 +1101,6 @@ public sealed partial class ProcessEngine
                     FinishedAt = now,
                     Resolution = "Отменён: процесс остановлен.",
                 });
-            }
-
-            // Сценарий, которого процесс ждёт («Вызвать сценарий»), — часть этого процесса и останавливается вместе с ним.
-            // Запущенные без ожидания («Запустить сценарий») работают дальше независимо.
-            foreach (var subscription in await write.GetSubscriptionsAsync(process.Id))
-            {
-                if (subscription is { Purpose: SubscriptionPurpose.ChildProcess, State: SubscriptionState.Active, CorrelationKey: { } childId })
-                {
-                    effects.CancelChildren.Add(childId);
-                }
             }
 
             var journal = await OnTerminalAsync(write, updated, effects, now);

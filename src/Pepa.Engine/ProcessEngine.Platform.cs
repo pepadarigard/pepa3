@@ -596,6 +596,15 @@ public sealed partial class ProcessEngine
             if (subscription.State == SubscriptionState.Active)
             {
                 await write.TrySetSubscriptionStateAsync(subscription.Id, SubscriptionState.Active, SubscriptionState.Cancelled, null);
+
+                // Сценарий, которого процесс ждёт («Вызвать сценарий»), — часть этого процесса и останавливается вместе с ним,
+                // как бы процесс ни закончился (остановлен или завершён в другой параллельной ветви). Запущенные без ожидания
+                // («Запустить сценарий») работают дальше независимо.
+                if (subscription is { Purpose: SubscriptionPurpose.ChildProcess, CorrelationKey: { } childId })
+                {
+                    effects.CancelChildren.Add(childId);
+                    journal.Add((JournalLevel.Warning, $"Вызванный сценарий (процесс #{childId[^Math.Min(6, childId.Length)..]}) остановлен: этот процесс завершился."));
+                }
             }
 
             await ReturnMatchedEventsAsync(write, subscription.Id, $"Процесс #{process.Id[^6..]} завершился, не применив событие.", effects);

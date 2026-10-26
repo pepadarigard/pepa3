@@ -293,21 +293,44 @@ public sealed class ClickElementNode(IDesktop desktop) : INodeExecutor
         {
             var how = context.GetString("how") ?? "auto";
             var label = Label(element!);
+            // Окна программы до нажатия: если она «зависнет» на нажатии, новое окно (диалог) подтвердит, что нажатие прошло.
+            var before = how == "auto" ? await WindowsOfAsync(window.Info.ProcessId, cancellationToken) : null;
             var invoked = how == "auto" ? await desktop.InvokeAsync(element!, cancellationToken) : InvokeOutcome.NotSupported;
             switch (invoked)
             {
                 case InvokeOutcome.Done:
                     return NodeResult.Ok(Ports.Out, $"Нажато (без мыши): {label} в «{window.Info.Title}».");
                 case InvokeOutcome.Pending:
-                    return new NodeResult.Success(Ports.Out, new Dictionary<string, JsonNode?>(), null,
-                        $"Нажато (без мыши): {label} в «{window.Info.Title}». Программа ещё не ответила — обычно это значит, что открылось окно-диалог.",
-                        MessageLevel.Warning);
+                {
+                    var after = await WindowsOfAsync(window.Info.ProcessId, cancellationToken);
+                    var dialog = before is null ? null : after?.FirstOrDefault(w => before.All(b => b.Handle != w.Handle));
+                    return dialog is not null
+                        ? new NodeResult.Success(Ports.Out, new Dictionary<string, JsonNode?>(), null,
+                            $"Нажато (без мыши): {label} в «{window.Info.Title}». Программа открыла окно «{dialog.Title}» и ждёт ответа в нём.",
+                            MessageLevel.Warning)
+                        : new NodeResult.Unknown(
+                            $"Нажатие {label} в «{window.Info.Title}» отправлено, но программа не ответила и нового окна не открыла — " +
+                            "неизвестно, сработало ли оно (программа может быть занята). Посмотрите на программу и решите, повторять ли.");
+                }
             }
 
             await desktop.ActivateAsync(window, cancellationToken);
             await desktop.ClickAsync(window, element!, how == "right" ? MouseButtonKind.Right : MouseButtonKind.Left, how == "double", cancellationToken);
             return NodeResult.Ok(Ports.Out, $"Нажато мышью: {label} в «{window.Info.Title}».");
         }, cancellationToken);
+
+    /// <summary>Окна процесса; не удалось перечислить — null (тогда новое окно не подтверждает нажатие).</summary>
+    private async Task<IReadOnlyList<WindowInfo>?> WindowsOfAsync(int processId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return (await desktop.ListWindowsAsync(cancellationToken)).Where(w => w.ProcessId == processId).ToList();
+        }
+        catch (DesktopException)
+        {
+            return null;
+        }
+    }
 
     internal static string Label(DesktopElement element) =>
         element.Info.Name is { Length: > 0 } name ? $"«{name}» ({element.Info.ControlType})" : $"{element.Info.ControlType} {element.Info.AutomationId}".Trim();

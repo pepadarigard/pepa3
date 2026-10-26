@@ -121,6 +121,41 @@ public sealed class ParallelTests
     }
 
     [Fact]
+    public async Task Ending_in_one_branch_stops_the_scenario_called_in_the_other()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var child = await h.CreateScenarioAsync(new ScenarioBuilder("Дочерний")
+            .Node("start", "start")
+            .Node("wait", "wait", new { amount = 30, unit = "minutes" })
+            .Node("act", "test.action", new { key = "child-act" })
+            .Node("end", "end")
+            .Chain("start", "wait", "act", "end").Build());
+        var parent = await h.RunAsync(new ScenarioBuilder("Родитель")
+            .Node("start", "start")
+            .Node("split", "parallel")
+            .Node("pause", "wait", new { amount = 1, unit = "minutes" })
+            .Node("stop", "end", new { message = "закончили в ветви 1" })
+            .Node("check", "condition", new { expression = "true" })
+            .Node("call", "scenario.call", new { scenario = child })
+            .Node("join", "join")
+            .Node("end", "end")
+            .Edge("start", "split").Edge("split", "pause", "b1").Edge("split", "call", "b2")
+            .Edge("pause", "check").Edge("check", "stop", Ports.True).Edge("check", "join", Ports.False).Edge("call", "join", Ports.Done)
+            .Edge("join", "end")
+            .Build());
+
+        await h.WaitForAsync(parent, _ => Describe(h, parent).Contains("call:Waiting/Event", StringComparison.Ordinal));
+        await h.WaitForStatusAsync(parent, ProcessStatus.Completed, advance: TimeSpan.FromSeconds(10));
+        var called = (await h.Store.ListProcessesAsync(new ProcessQuery { Limit = 100 })).Single(p => p.ParentProcessId == parent);
+
+        // Вызванный сценарий — часть процесса: он останавливается и своё действие уже не выполнит.
+        await h.WaitForStatusAsync(called.Id, ProcessStatus.Cancelled);
+        await h.IdleAsync(TimeSpan.FromMinutes(40), ticks: 40);
+        Assert.Equal(0, h.World.Executions("child-act"));
+        Assert.Contains(await h.Store.GetJournalAsync(parent), j => j.Message.Contains("Вызванный сценарий", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Nested_parallel_sections_join_in_order()
     {
         await using var h = await EngineHarness.CreateAsync();
