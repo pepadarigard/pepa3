@@ -125,6 +125,17 @@ public sealed class ScenarioAssistant
         };
     }
 
+    /// <summary>
+    /// Повторять можно, только когда ответа точно не было: лимит запросов, перегрузка (529), внутренняя ошибка или
+    /// недоступность сервиса. Ошибки шлюза (502, 504) — нет: за шлюзом запрос мог выполниться и быть оплачен.
+    /// </summary>
+    private static bool Retryable(Exception ex) => ex switch
+    {
+        AnthropicRateLimitException => true,
+        Anthropic5xxException server => (int)server.StatusCode is 500 or 503 or 529,
+        _ => false,
+    };
+
     private static void CheckScenario(ScenarioDefinition scenario)
     {
         if (!scenario.Nodes.Any(n => n.Type != "start"))
@@ -195,7 +206,7 @@ public sealed class ScenarioAssistant
                 response = await client.Beta.Messages.Create(parameters, cancellationToken);
                 break;
             }
-            catch (Exception ex) when (ex is AnthropicRateLimitException or Anthropic5xxException && attempt < MaxRetries)
+            catch (Exception ex) when (Retryable(ex) && attempt < MaxRetries)
             {
                 await Task.Delay(RetryDelay * Math.Pow(3, attempt), cancellationToken);
             }

@@ -70,6 +70,8 @@ internal sealed class ParallelCheck(
         var branches = _outgoing.GetValueOrDefault(split) ?? [];
         var region = new HashSet<string>(StringComparer.Ordinal);
         var branchOf = new Dictionary<string, int>(StringComparer.Ordinal);
+        // Пути к «Завершению», которые ветви могут делить (общий обработчик ошибок): какие ветви туда приходят.
+        var tails = new Dictionary<string, HashSet<int>>(StringComparer.Ordinal);
         string? join = null;
         var ok = true;
         if (branches.Count < 2)
@@ -81,7 +83,7 @@ internal sealed class ParallelCheck(
         for (var i = 0; i < branches.Count; i++)
         {
             var port = descriptors[split].FindOutput(branches[i].SourcePort)?.Label ?? branches[i].SourcePort;
-            var joins = Walk(branches[i].Target, split, i, region, branchOf, stack, ref ok);
+            var joins = Walk(branches[i].Target, split, i, region, branchOf, tails, stack, ref ok);
             if (joins.Count == 0)
             {
                 error("parallel.branch.open",
@@ -140,15 +142,18 @@ internal sealed class ParallelCheck(
         }
 
         _joinOwner[join] = split;
-        CheckSharedState(split, branchOf);
+        CheckSharedState(split, branchOf, tails);
         return _resolved[split] = (join, region);
     }
 
     /// <summary>Блоки разных ветвей не должны работать с одним общим состоянием (одним окном браузера).</summary>
-    private void CheckSharedState(string split, Dictionary<string, int> branchOf)
+    private void CheckSharedState(string split, Dictionary<string, int> branchOf, Dictionary<string, HashSet<int>> tails)
     {
         var users = new Dictionary<string, (HashSet<int> Branches, List<string> Nodes)>(StringComparer.Ordinal);
-        foreach (var (node, branch) in branchOf)
+        // Блок общего пути к «Завершению» выполняется в той ветви, что пришла туда, — пока другие ещё работают.
+        var visits = branchOf.SelectMany(p => new[] { (Node: p.Key, Branch: p.Value) })
+            .Concat(tails.SelectMany(p => p.Value.Select(b => (Node: p.Key, Branch: b))));
+        foreach (var (node, branch) in visits)
         {
             if (!descriptors.TryGetValue(node, out var descriptor) || !nodes.TryGetValue(node, out var definition))
             {
@@ -174,7 +179,10 @@ internal sealed class ParallelCheck(
                 }
 
                 entry.Branches.Add(branch);
-                entry.Nodes.Add(node);
+                if (!entry.Nodes.Contains(node))
+                {
+                    entry.Nodes.Add(node);
+                }
             }
         }
 
@@ -185,6 +193,33 @@ internal sealed class ParallelCheck(
                 $"Параллельные ветви блока {name(split)} работают с одним окном браузера «{value}» ({string.Join(", ", entry.Nodes.Take(4).Select(name))}): " +
                 "шаги ветвей перемешались бы на одной вкладке. Дайте ветвям разные окна (поле «Окно браузера») или перенесите шаги браузера " +
                 "до или после параллельного участка.", entry.Nodes[0]);
+        }
+    }
+
+    /// <summary>Отметить блоки пути к «Завершению» (кроме него самого) как выполняемые и этой ветвью.</summary>
+    private void MarkTail(string start, int branch, Dictionary<string, HashSet<int>> tails)
+    {
+        var queue = new Queue<string>([start]);
+        while (queue.Count > 0)
+        {
+            var node = queue.Dequeue();
+            if (!descriptors.TryGetValue(node, out var descriptor) || descriptor.IsEnd)
+            {
+                continue;
+            }
+
+            if (!tails.TryGetValue(node, out var branches))
+            {
+                tails[node] = branches = [];
+            }
+
+            if (branches.Add(branch))
+            {
+                foreach (var edge in _outgoing.GetValueOrDefault(node) ?? [])
+                {
+                    queue.Enqueue(edge.Target);
+                }
+            }
         }
     }
 
@@ -220,7 +255,7 @@ internal sealed class ParallelCheck(
 
     /// <summary>Обойти ветвь до слияния (вложенные участки — целиком), собрать её блоки; вернуть встреченные слияния.</summary>
     private HashSet<string> Walk(string start, string split, int branch, HashSet<string> region, Dictionary<string, int> branchOf,
-        HashSet<string> stack, ref bool ok)
+        Dictionary<string, HashSet<int>> tails, HashSet<string> stack, ref bool ok)
     {
         var joins = new HashSet<string>(StringComparer.Ordinal);
         var visited = new HashSet<string>(StringComparer.Ordinal);
@@ -250,8 +285,14 @@ internal sealed class ParallelCheck(
 
             // «Завершение» заканчивает весь процесс: его можно делить между ветвями и основной схемой — как и путь, который
             // ведёт только к нему (например, общий обработчик ошибок «Записать в журнал» → «Завершение»).
-            if (descriptor.IsEnd || EndsOnly(node))
+            if (descriptor.IsEnd)
             {
+                continue;
+            }
+
+            if (EndsOnly(node))
+            {
+                MarkTail(node, branch, tails);
                 continue;
             }
 

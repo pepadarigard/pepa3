@@ -101,11 +101,13 @@ public sealed class UiaDesktop : IDesktop, IDisposable
                     NativeMethods.ShowWindow(handle, NativeMethods.SwRestore);
                 }
 
-                if (!OwnsForeground(handle))
+                // Впереди должно быть само окно: его окно поменьше (например, «Найти») не в счёт — ввод пошёл бы туда. Если
+                // программа показывает диалог, Windows выведет вперёд его — тогда ввод остановится с понятной причиной.
+                if (NativeMethods.GetForegroundWindow() != handle)
                 {
                     Native(window).SetForeground();
                     var deadline = DateTime.UtcNow + TimeSpan.FromMilliseconds(700);
-                    while (!OwnsForeground(handle) && DateTime.UtcNow < deadline)
+                    while (NativeMethods.GetForegroundWindow() != handle && DateTime.UtcNow < deadline)
                     {
                         Thread.Sleep(50);
                     }
@@ -306,11 +308,17 @@ public sealed class UiaDesktop : IDesktop, IDisposable
                     focus = FocusOf(Handle(window));
                     refocus = false;
                 }
-                else if (focus != IntPtr.Zero && FocusOf(Handle(window)) != focus)
+                else if (focus != IntPtr.Zero && FocusOf(Handle(window)) is var now && now != focus)
                 {
-                    throw new DesktopInputBlockedException(
-                        $"Во время ввода в окне «{window.Info.Title}» фокус перешёл на другое поле — Pepa остановилась, чтобы не печатать не туда.",
-                        partial: sent > 0);
+                    if (now == IntPtr.Zero || !NativeMethods.IsChild(focus, now))
+                    {
+                        throw new DesktopInputBlockedException(
+                            $"Во время ввода в окне «{window.Info.Title}» фокус перешёл на другое поле — Pepa остановилась, чтобы не печатать не туда.",
+                            partial: sent > 0);
+                    }
+
+                    // Таблицы и списки на первом же символе открывают поле правки внутри себя — это тот же ввод.
+                    focus = now;
                 }
 
                 switch (ch)
@@ -938,6 +946,10 @@ internal static partial class NativeMethods
     [LibraryImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool GetGUIThreadInfo(uint threadId, ref GuiThreadInfo info);
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool IsChild(IntPtr parent, IntPtr window);
 
     [LibraryImport("user32.dll", SetLastError = true)]
     public static partial uint SendInput(uint count, [In] Input[] inputs, int size);

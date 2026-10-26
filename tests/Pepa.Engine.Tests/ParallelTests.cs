@@ -374,6 +374,17 @@ public sealed class ParallelTests
         Assert.Equal("parallel.shared.state", shared.Code);
         Assert.Contains("«main»", shared.Message);
         Assert.Empty(Errors(new { session = "main" }, new { session = "второе" }));
+
+        // Обработчик ошибки одной ветви (путь к «Завершению») работает в окне другой ветви — тоже нельзя.
+        var tail = h.Engine.Validator.Validate(new ScenarioBuilder("Обработчик в окне")
+                .Node("start", "start").Node("split", "parallel")
+                .Node("a", "test.action", new { key = "a" }).Node("b", "test.window", new { session = "main" }).Node("join", "join")
+                .Node("shot", "test.window", new { session = "main" }).Node("end", "end").Node("fail", "end", new { outcome = "failure" })
+                .Edge("start", "split").Edge("split", "a", "b1").Edge("split", "b", "b2").Edge("a", "join").Edge("b", "join")
+                .Edge("a", "shot", Ports.Error).Edge("shot", "fail").Edge("join", "end")
+                .Build()).Issues
+            .Where(i => i.Severity == Core.Validation.IssueSeverity.Error).ToArray();
+        Assert.Equal("parallel.shared.state", Assert.Single(tail).Code);
         Assert.Empty(Errors(new { session = "{{ vars.window }}" }, new { }));
     }
 }

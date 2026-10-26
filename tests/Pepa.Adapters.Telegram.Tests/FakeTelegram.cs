@@ -159,7 +159,7 @@ internal sealed class FakeTelegram : ITelegramGateway
     {
         Pressed.Enqueue((messageId, button.Text));
         return PressLosesAnswer
-            ? Task.FromException<TelegramCallbackAnswer>(new IOException("Связь оборвалась после нажатия."))
+            ? Task.FromException<TelegramCallbackAnswer>(new TelegramPressUncertainException("Связь оборвалась после нажатия — неизвестно, получил ли бот нажатие."))
             : Task.FromResult(new TelegramCallbackAnswer(BotAnswer, null, false));
     }
 

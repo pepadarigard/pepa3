@@ -299,6 +299,11 @@ public sealed class ScenarioAssistantTests : IDisposable
         _api.ReplyError(529, "overloaded_error", "Overloaded");
         await Assert.ThrowsAsync<AssistantException>(() => Assistant(maxRetries: 1).DraftAsync("sk-ant-test", Ask(), ct));
         Assert.Equal(4, _api.Requests.Count);
+
+        // Ошибка шлюза: за ним запрос мог выполниться (и быть оплачен) — не повторяем.
+        _api.ReplyError(504, "api_error", "Gateway Timeout");
+        await Assert.ThrowsAsync<AssistantException>(() => Assistant(maxRetries: 2).DraftAsync("sk-ant-test", Ask(), ct));
+        Assert.Equal(5, _api.Requests.Count);
     }
 
     [Fact]

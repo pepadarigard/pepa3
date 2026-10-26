@@ -88,6 +88,13 @@ public sealed class SendTelegramNode(ITelegramGateway telegram, IWorkspace works
         try
         {
             var chat = await telegram.ResolveAsync(context.RequireString("chat"), cancellationToken);
+            if (previous?.GetString("chat") is { } earlierChat && earlierChat != chat.Key)
+            {
+                // Чат сменился: ключ прошлой попытки относится к другому чату — Telegram ответил бы «уже отправлено», хотя
+                // в этот чат ничего не уходило.
+                checkpoint["randomId"] = Random.Shared.NextInt64(1, long.MaxValue).ToString(CultureInfo.InvariantCulture);
+            }
+
             checkpoint["chat"] = chat.Key;
             checkpoint["afterId"] = previous?.GetString("chat") == chat.Key && previous.GetNumber("afterId") is { } earlier
                 ? earlier

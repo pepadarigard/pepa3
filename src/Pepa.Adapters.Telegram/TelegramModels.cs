@@ -226,3 +226,6 @@ public static class TelegramEvents
                long.TryParse(parts[1], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out id);
     }
 }
+
+/// <summary>Нажатие кнопки могло дойти до бота не один раз или ни разу (связь прерывалась) — итог неизвестен.</summary>
+public sealed class TelegramPressUncertainException(string message) : Exception(message);

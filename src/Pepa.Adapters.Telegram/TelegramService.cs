@@ -59,6 +59,9 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
     /// <summary>null — файл настроек прокси не прочитался: напрямую не подключаемся (пользователь просил прокси).</summary>
     private TelegramProxy? _proxy;
     private TelegramStatus _status;
+
+    /// <summary>Сколько раз Telegram ответил «-503» (библиотека в этом случае сама повторяет запрос).</summary>
+    private static int _rpc503;
     private string? _stateWarning;
     private string? _clockWarning;
     private volatile bool _caughtUpReported;
@@ -74,6 +77,12 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
         // Журнал библиотеки — только предупреждения и ошибки (по умолчанию она пишет всё в консоль).
         WTelegram.Helpers.Log = (level, message) =>
         {
+            // Ответ «-503 Timeout» библиотека молча повторяет запросом ещё раз — для нажатия кнопки это второе нажатие.
+            if (message.Contains("RpcError -503", StringComparison.Ordinal))
+            {
+                Interlocked.Increment(ref _rpc503);
+            }
+
             // При закрытии библиотека сообщает об оборванном соединении — это не ошибка.
             if (level >= 4 && !_disposed)
             {
@@ -706,6 +715,21 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
     /// Вход через <c>Client.Login</c>: номер, код и пароль библиотека запрашивает у <see cref="LoginStepAsync"/>, поэтому на эти
     /// вопросы здесь ответа нет (null). При восстановлении сессии такой вопрос означает, что сессия недействительна.
     /// </param>
+    private static async Task<System.Net.Sockets.TcpClient> DirectAsync(string address, int port)
+    {
+        var tcp = new System.Net.Sockets.TcpClient();
+        try
+        {
+            await tcp.ConnectAsync(address, port);
+            return tcp;
+        }
+        catch
+        {
+            tcp.Dispose();
+            throw;
+        }
+    }
+
     private async Task<Connection> CreateConnectionAsync(TelegramCredentials credentials, bool interactive)
     {
         Directory.CreateDirectory(_folder);
@@ -733,16 +757,28 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
                     or "email_verification_code" or "bot_token" => connection.Interactive && !connection.Abandoned ? null : throw new LoginRequiredException(),
                 _ => null,
             });
-            switch (proxy.Kind)
+            if (proxy.Kind == TelegramProxyKind.MTProxy)
             {
-                case TelegramProxyKind.Socks5:
-                    // Все соединения библиотеки (и к другим серверам Telegram — за файлами) идут через прокси.
-                    client.TcpHandler = (address, port) => Socks5Connector.ConnectAsync(proxy, address, port, ConnectTimeout, connection.Life.Token);
-                    break;
-                case TelegramProxyKind.MTProxy:
-                    client.MTProxyUrl = proxy.MTProxyUrl;
-                    break;
+                client.MTProxyUrl = proxy.MTProxyUrl;
             }
+
+            client.TcpHandler = async (address, port) =>
+            {
+                // Пока нажатие кнопки ждёт ответа, библиотеке не даём переподключиться самой: после переподключения она
+                // отправила бы нажатие ещё раз, а у нажатия нет ключа от повторов. Запрос тогда завершится ошибкой (итог
+                // неизвестен — решит пользователь), а подключится заново уже Pepa.
+                if (Volatile.Read(ref connection.PressesInFlight) > 0)
+                {
+                    throw new TelegramUnavailableException("Связь с Telegram прервалась во время нажатия кнопки.");
+                }
+
+                // Все соединения библиотеки (и к другим серверам Telegram — за файлами) идут через прокси, если он задан.
+                var tcp = proxy.Kind == TelegramProxyKind.Socks5
+                    ? await Socks5Connector.ConnectAsync(proxy, address, port, ConnectTimeout, connection.Life.Token)
+                    : await DirectAsync(address, port);
+                Interlocked.Increment(ref connection.Connects);
+                return tcp;
+            };
 
             client.MaxAutoReconnects = 50;
             // Короткие «подождите N секунд» библиотека выжидает сама; длинные — понятная ошибка, а не зависание.
@@ -920,7 +956,7 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
                     _stateWarning = $"Сообщение Telegram не удалось принять ({ex.Message}). Оно и следующие придут снова после перезапуска Pepa.";
                     if (_connection == connection)
                     {
-                        SetStatus(Status.State, Status.Account, Warning);
+                        RefreshWarning();
                     }
 
                     return;
@@ -1101,7 +1137,7 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
             ? $"Часы компьютера {(offset > TimeSpan.Zero ? "спешат" : "отстают")} на {FormatOffset(offset)}. " +
               "Pepa учитывает это для сообщений Telegram, но лучше включить синхронизацию времени в Windows."
             : null;
-        SetStatus(Status.State, Status.Account, Warning);
+        RefreshWarning();
     }
 
     /// <summary>Поправка и когда она измерена: по часам компьютера и по монотонному таймеру (<see cref="Stopwatch"/>).</summary>
@@ -1146,7 +1182,7 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
               "Проверьте нужные чаты вручную.";
         if (_connection == connection)
         {
-            SetStatus(Status.State, Status.Account, Warning);
+            RefreshWarning();
         }
     }
 
@@ -1372,20 +1408,28 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
     public async Task<TelegramSentMessage> SendFileAsync(TelegramPeer chat, string path, string? caption, long randomId, CancellationToken cancellationToken)
     {
         var (connection, input) = Target(chat);
-        InputFileBase uploaded;
+        FileStream stream;
         try
         {
-            // Загрузка файла — ещё не отправка: сбой здесь значит «не отправлено».
-            await using var stream = File.OpenRead(path);
-            uploaded = await connection.Client.UploadFileAsync(stream, Path.GetFileName(path)).WaitAsync(cancellationToken);
+            stream = File.OpenRead(path);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            throw new TelegramSendRejectedException($"Файл не прочитался ({ex.Message}) — ничего не отправлено.", retryable: false);
+            throw new TelegramSendRejectedException($"Файл не открылся ({ex.Message}) — ничего не отправлено.", retryable: false);
         }
-        catch (Exception ex) when (ex is not (OperationCanceledException or TelegramUnavailableException))
+
+        InputFileBase uploaded;
+        await using (stream)
         {
-            throw Unavailable(connection, ex, "загрузить файл в Telegram (ничего не отправлено)");
+            try
+            {
+                // Загрузка файла — ещё не отправка: сбой здесь (обычно связь) значит «не отправлено», можно повторить.
+                uploaded = await connection.Client.UploadFileAsync(stream, Path.GetFileName(path)).WaitAsync(cancellationToken);
+            }
+            catch (Exception ex) when (ex is not (OperationCanceledException or TelegramUnavailableException))
+            {
+                throw Unavailable(connection, ex, "загрузить файл в Telegram (ничего не отправлено)");
+            }
         }
 
         var media = new InputMediaUploadedDocument(uploaded, MimeType(path),
@@ -1487,14 +1531,44 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
             throw new TelegramSendRejectedException($"Кнопка «{button.Text}» требует пароль двухэтапной проверки — такие Pepa не нажимает.", retryable: false);
         }
 
+        // Пока запрос в пути, библиотеке нельзя переподключаться (иначе она повторит нажатие) — до самого его конца, даже если
+        // шаг перестал ждать.
+        Interlocked.Increment(ref connection.PressesInFlight);
+        var connects = Volatile.Read(ref connection.Connects);
+        var errors503 = Volatile.Read(ref _rpc503);
+        Task<Messages_BotCallbackAnswer> call;
         try
         {
-            var answer = await connection.Client.Messages_GetBotCallbackAnswer(input, message.id, callback.data).WaitAsync(cancellationToken);
+            call = connection.Client.Messages_GetBotCallbackAnswer(input, message.id, callback.data);
+        }
+        catch
+        {
+            Interlocked.Decrement(ref connection.PressesInFlight);
+            throw;
+        }
+
+        _ = call.ContinueWith(_ => Interlocked.Decrement(ref connection.PressesInFlight), CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        void CheckOnce()
+        {
+            if (Volatile.Read(ref connection.Connects) != connects || Volatile.Read(ref _rpc503) != errors503)
+            {
+                throw new TelegramPressUncertainException(
+                    "Во время нажатия связь с Telegram прерывалась — бот мог получить нажатие не один раз (или ни разу). " +
+                    "Посмотрите в чате и решите, что дальше.");
+            }
+        }
+
+        try
+        {
+            var answer = await call.WaitAsync(cancellationToken);
+            CheckOnce();
             return new TelegramCallbackAnswer(answer.message, answer.url, answer.flags.HasFlag(Messages_BotCallbackAnswer.Flags.alert));
         }
         catch (RpcException ex) when (ex.Message.Contains("BOT_RESPONSE_TIMEOUT", StringComparison.Ordinal))
         {
             // Нажатие дошло до бота, он просто не ответил всплывающим текстом.
+            CheckOnce();
             return new TelegramCallbackAnswer(null, null, false);
         }
         catch (RpcException ex) when (IsSessionRevoked(ex))
@@ -1510,6 +1584,12 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
         {
             throw new TelegramSendRejectedException($"Telegram не принял нажатие ({ex.Message}) — кнопка не нажата.", retryable: false);
         }
+        catch (Exception ex) when (ex is not (OperationCanceledException or TelegramPressUncertainException or TelegramSendRejectedException))
+        {
+            // Обрыв связи, внутренняя ошибка Telegram: нажатие могло дойти до бота, а могло и нет.
+            throw new TelegramPressUncertainException($"Связь с Telegram прервалась во время нажатия ({ex.Message}) — неизвестно, получил ли бот " +
+                                                      "нажатие. Посмотрите в чате и решите, что дальше.");
+        }
     }
 
     public async Task<long> DownloadAsync(TelegramPeer chat, int messageId, string targetPath, CancellationToken cancellationToken)
@@ -1521,18 +1601,26 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
         var temp = targetPath + ".part";
         try
         {
+            // Ошибки диска (создать, записать, переименовать) — ошибки файла; ошибки самой загрузки — связь, повтор возможен.
             await using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
             {
-                switch (message.media)
+                try
                 {
-                    case MessageMediaDocument { document: Document document }:
-                        await connection.Client.DownloadFileAsync(document, stream).WaitAsync(cancellationToken);
-                        break;
-                    case MessageMediaPhoto { photo: Photo photo }:
-                        await connection.Client.DownloadFileAsync(photo, stream).WaitAsync(cancellationToken);
-                        break;
-                    default:
-                        throw new TelegramNoMediaException($"В сообщении №{messageId} нет файла или фото.");
+                    switch (message.media)
+                    {
+                        case MessageMediaDocument { document: Document document }:
+                            await connection.Client.DownloadFileAsync(document, stream).WaitAsync(cancellationToken);
+                            break;
+                        case MessageMediaPhoto { photo: Photo photo }:
+                            await connection.Client.DownloadFileAsync(photo, stream).WaitAsync(cancellationToken);
+                            break;
+                        default:
+                            throw new TelegramNoMediaException($"В сообщении №{messageId} нет файла или фото.");
+                    }
+                }
+                catch (Exception ex) when (ex is not (OperationCanceledException or TelegramNoMediaException or TelegramUnavailableException))
+                {
+                    throw Unavailable(connection, ex, "скачать файл из Telegram");
                 }
 
                 await stream.FlushAsync(cancellationToken);
@@ -1540,10 +1628,6 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
 
             File.Move(temp, targetPath, overwrite: true);
             return new FileInfo(targetPath).Length;
-        }
-        catch (Exception ex) when (ex is not (OperationCanceledException or TelegramNoMediaException or IOException or UnauthorizedAccessException))
-        {
-            throw Unavailable(connection, ex, "скачать файл из Telegram");
         }
         finally
         {
@@ -1709,6 +1793,36 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
     };
 
     // ───────────── Вспомогательное ─────────────
+
+    /// <summary>
+    /// Обновить предупреждение у подключённого Telegram, не трогая само состояние: его могли сменить параллельно (например,
+    /// связь оборвалась) — тогда предупреждение покажется при следующем подключении.
+    /// </summary>
+    private void RefreshWarning()
+    {
+        while (true)
+        {
+            var current = Volatile.Read(ref _status);
+            if (current.State != TelegramState.Connected)
+            {
+                return;
+            }
+
+            if (ReferenceEquals(Interlocked.CompareExchange(ref _status, current with { Message = Warning }, current), current))
+            {
+                break;
+            }
+        }
+
+        try
+        {
+            StatusChanged?.Invoke();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Ошибка в обработчике состояния Telegram.");
+        }
+    }
 
     private TelegramStatus SetStatus(TelegramState state, string? account, string? message)
     {
@@ -1911,6 +2025,12 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
 
         /// <summary>Какое-то сообщение не принято движком: состояние обновлений больше не сохранять.</summary>
         public volatile bool Tainted;
+
+        /// <summary>Сколько нажатий кнопок ждут ответа (пока их больше нуля, библиотека не переподключается сама).</summary>
+        public int PressesInFlight;
+
+        /// <summary>Сколько раз библиотека открывала соединение (переподключение во время нажатия — повод не доверять итогу).</summary>
+        public int Connects;
 
         /// <summary>
         /// Насколько часы компьютера отличаются от часов Telegram (прибавить к времени Telegram). Измеряется сразу после

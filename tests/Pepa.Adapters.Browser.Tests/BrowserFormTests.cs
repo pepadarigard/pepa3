@@ -151,6 +151,18 @@ public sealed class BrowserFormTests
         var stopped = await f.H.WaitForStatusAsync(broken, ProcessStatus.NeedsAttention);
         Assert.Equal(AttentionKind.StepFailed, stopped.Attention);
         Assert.Contains("код не выполнялся", stopped.StatusMessage);
+
+        // «return» вне функции: разбор не прошёл — тоже «не выполнялся».
+        var returned = await f.H.RunAsync(Single(f, "browser.evaluate", new { script = "window.ran = true; return 1" }));
+        var notRun = await f.H.WaitForStatusAsync(returned, ProcessStatus.NeedsAttention);
+        Assert.Equal(AttentionKind.StepFailed, notRun.Attention);
+        Assert.Contains("код не выполнялся", notRun.StatusMessage);
+
+        // Ошибка во время выполнения (код уже что-то сделал) — итог неизвестен, а не «ошибка селектора».
+        var failed = await f.H.RunAsync(Single(f, "browser.evaluate", new { script = "window.ran = true; JSON.parse('не json')" }));
+        var unknown = await f.H.WaitForStatusAsync(failed, ProcessStatus.NeedsAttention);
+        Assert.Equal(AttentionKind.UnknownStep, unknown.Attention);
+        Assert.Contains("начал выполняться", unknown.StatusMessage);
     }
 
     [Fact]

@@ -566,7 +566,14 @@ public sealed class EvaluateNode(BrowserSessions sessions) : INodeExecutor
     /// </summary>
     internal static string Wrap(string script) => LooksLikeFunction(script)
         ? $"async (vars) => {{ {Clean} const __pepa = (\n{script}\n); return __clean(await (typeof __pepa === 'function' ? __pepa(vars) : __pepa), 0); }}"
-        : $"async (vars) => {{ {Clean} const __pepa = eval({JsonSerializer.Serialize(script)}); return __clean(await (typeof __pepa === 'function' ? __pepa(vars) : __pepa), 0); }}";
+        : $"async (vars) => {{ {Clean} let __started = false; const __mark = () => {{ __started = true; }}; let __pepa; " +
+          // Перед кодом — отметка «начали». Если eval упал, не дойдя до неё, код не разобрался и ничего не выполнялось.
+          $"try {{ __pepa = eval({JsonSerializer.Serialize("__mark();\n" + script)}); }} " +
+          $"catch (e) {{ if (!__started) throw new Error('{NotParsedMarker}' + (e && e.message)); throw e; }} " +
+          "return __clean(await (typeof __pepa === 'function' ? __pepa(vars) : __pepa), 0); }";
+
+    /// <summary>Метка ошибки разбора кода (код не выполнялся) в сообщении об ошибке со страницы.</summary>
+    private const string NotParsedMarker = "PEPA_NOT_PARSED: ";
 
     /// <summary>NaN и бесконечность в результате — пустое значение: в JSON их не записать, а код уже выполнен.</summary>
     private const string Clean =
@@ -609,7 +616,23 @@ public sealed class EvaluateNode(BrowserSessions sessions) : INodeExecutor
                 return NodeResult.Fail($"В коде JavaScript ошибка записи — код не выполнялся: {syntaxError}.", retryable: false);
             }
 
-            var result = await page.EvaluateAsync<JsonElement?>(Wrap(script), Plain(UsedVariables(script, context.Variables)));
+            JsonElement? result;
+            try
+            {
+                result = await page.EvaluateAsync<JsonElement?>(Wrap(script), Plain(UsedVariables(script, context.Variables)));
+            }
+            catch (PlaywrightException ex) when (ex.Message.Contains(NotParsedMarker, StringComparison.Ordinal))
+            {
+                var reason = ex.Message[(ex.Message.IndexOf(NotParsedMarker, StringComparison.Ordinal) + NotParsedMarker.Length)..];
+                return NodeResult.Fail($"В коде JavaScript ошибка записи — код не выполнялся: {BrowserSessions.FirstLine(reason)}.", retryable: false);
+            }
+            catch (PlaywrightException ex) when (!page.IsClosed)
+            {
+                // Код уже начал выполняться: что он успел изменить на странице, неизвестно — повторять сам по себе нельзя.
+                return new NodeResult.Unknown(
+                    $"Код JavaScript начал выполняться и завершился ошибкой: {BrowserSessions.FirstLine(ex.Message)}. Что он успел сделать " +
+                    "на странице, неизвестно — посмотрите и решите.");
+            }
             var value = result is { } element ? JsonSerializer.SerializeToNode(element) : null;
             var updates = new Dictionary<string, JsonNode?>();
             if (context.GetString("saveTo") is { Length: > 0 } saveTo)

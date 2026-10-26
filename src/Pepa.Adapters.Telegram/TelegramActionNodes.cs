@@ -75,6 +75,12 @@ public sealed class PressTelegramButtonNode(ITelegramGateway telegram) : INodeEx
         try
         {
             var chat = await telegram.ResolveAsync(context.RequireString("chat"), cancellationToken);
+            if (previous?.GetString("chat") is { } earlierChat && earlierChat != chat.Key)
+            {
+                // Ключ прошлой попытки — для другого чата (см. «Отправить сообщение»).
+                checkpoint["randomId"] = Random.Shared.NextInt64(1, long.MaxValue).ToString(CultureInfo.InvariantCulture);
+            }
+
             checkpoint["chat"] = chat.Key;
             checkpoint["afterId"] = previous?.GetString("chat") == chat.Key && previous.GetNumber("afterId") is { } earlier
                 ? earlier
@@ -172,6 +178,10 @@ public sealed class PressTelegramButtonNode(ITelegramGateway telegram) : INodeEx
         {
             return NodeResult.Fail(ex.Message, ex.Retryable);
         }
+        catch (TelegramPressUncertainException ex)
+        {
+            return new NodeResult.Unknown(ex.Message);
+        }
         catch (TelegramAlreadySentException)
         {
             // Текст кнопки уже отправлен прошлой попыткой (Telegram узнал ключ) — второй раз не отправлен.
@@ -207,9 +217,21 @@ public sealed class PressTelegramButtonNode(ITelegramGateway telegram) : INodeEx
             var text = TelegramEvents.NormalizeText(target.GetString("text") ?? "");
             var newer = await telegram.MessagesAfterAsync(chat, (int)afterId, 1000, cancellationToken);
             var found = newer.Where(m => m.Outgoing && TelegramEvents.NormalizeText(m.Text) == text).MinBy(m => m.MessageId);
-            return found is not null
-                ? VerificationResult.Done($"текст кнопки есть в истории чата (№{found.MessageId})")
-                : newer.Count >= 1000
+            if (found is not null)
+            {
+                // Итог — как у нажатия, подтверждённого сразу: переменная заполняется так же.
+                var output = new JsonObject
+                {
+                    ["messageId"] = context.Checkpoint.GetNumber("messageId") is { } pressedOn ? JsonValue.Create(pressedOn) : null,
+                    ["chat"] = TelegramEvents.PeerJson(chat),
+                    ["button"] = target.DeepClone(),
+                    ["sentMessageId"] = found.MessageId,
+                };
+                return new VerificationResult(VerificationOutcome.Done, $"текст кнопки есть в истории чата (№{found.MessageId})",
+                    VariableUpdates: SaveTo(context, output), Output: output);
+            }
+
+            return newer.Count >= 1000
                     ? VerificationResult.Inconclusive("после отметки в чате слишком много сообщений — решите сами")
                     : VerificationResult.NotDone("кнопка не нажата (её текста нет в истории чата) — можно нажать снова");
         }

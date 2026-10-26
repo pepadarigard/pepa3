@@ -25,9 +25,9 @@ public sealed class Workspace(Func<string> rootProvider) : IWorkspace
 
     private static readonly HashSet<string> ReservedNames = new(StringComparer.OrdinalIgnoreCase)
     {
-        "CON", "PRN", "AUX", "NUL",
-        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+        "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "COM¹", "COM²", "COM³",
+        "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "LPT¹", "LPT²", "LPT³",
     };
 
     private static StringComparison Comparison =>
@@ -119,7 +119,9 @@ public sealed class Workspace(Func<string> rootProvider) : IWorkspace
     {
         var leaf = (name ?? "").Replace('\\', '/');
         leaf = leaf[(leaf.LastIndexOf('/') + 1)..];
-        var safe = new string(leaf.Select(c => char.IsControl(c) || Array.IndexOf(ForbiddenChars, c) >= 0 ? '_' : c).ToArray())
+        // Невидимые символы (смена направления письма и т. п.) убираются: «счёт‮fdp.exe» выглядел бы как «счётexe.pdf».
+        var safe = new string(leaf.Where(c => char.GetUnicodeCategory(c) != System.Globalization.UnicodeCategory.Format)
+                .Select(c => char.IsControl(c) || Array.IndexOf(ForbiddenChars, c) >= 0 ? '_' : c).ToArray())
             .Trim().TrimEnd('.', ' ');
         if (safe.Length == 0 || safe.All(c => c == '.'))
         {
