@@ -243,6 +243,15 @@ async function main() {
     await page.getByRole("dialog").getByPlaceholder("k1bitq6l").waitFor();
     await page.waitForTimeout(300);
     await page.screenshot({ path: path.join(shots, "17-recorder.png") });
+    // Запись в окнах Windows — только в Pepa.exe: причина видна сразу, кнопка записи недоступна.
+    await page.getByRole("dialog").getByRole("button", { name: "В окнах Windows" }).click();
+    await page.getByRole("dialog").getByText("Записать действия в окнах Windows").waitFor();
+    await page.getByRole("dialog").getByText("только в приложении Pepa для Windows").waitFor();
+    if (!(await page.getByRole("dialog").getByRole("button", { name: "Начать запись" }).isDisabled())) {
+      throw new Error("Запись в окнах доступна без Windows");
+    }
+    await page.waitForTimeout(200);
+    await page.screenshot({ path: path.join(shots, "17c-recorder-windows.png") });
     await page.getByRole("dialog").getByRole("button", { name: "Закрыть" }).click();
 
     step("Выбор элемента окна: без Windows — понятная причина");

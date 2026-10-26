@@ -443,6 +443,24 @@ export interface RecorderState {
   actions: import("../lib/recording").RecordedAction[];
 }
 
+/** Записанный шаг в окнах Windows — готовый блок. */
+export interface RecordedDesktopStep {
+  type: string;
+  config: Record<string, Json>;
+  label: string | null;
+  /** Что проверить в шаге (ненадёжный поиск, сокращённый заголовок окна, пропущенные действия). */
+  note: string | null;
+  /** Введён пароль: в блоке переменная password. */
+  secret: boolean;
+}
+
+export interface DesktopRecorderState {
+  /** Почему запись в окнах недоступна (null — доступна). */
+  unavailableReason: string | null;
+  recording: boolean;
+  steps: RecordedDesktopStep[];
+}
+
 export interface ScenarioTemplate {
   name: string;
   description: string;

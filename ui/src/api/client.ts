@@ -8,6 +8,7 @@ import type {
   DesktopWindow,
   ScenarioTemplate,
   RecorderState,
+  DesktopRecorderState,
   TelegramProxyRequest,
   TelegramStatus,
   Info,
@@ -176,6 +177,9 @@ export const api = {
   recorderStart: (start: { browser: "pepa" | "adspower"; profileId: string | null; url: string | null }) =>
     request<RecorderState>("POST", "/recorder/start", start),
   recorderStop: () => request<RecorderState>("POST", "/recorder/stop"),
+  desktopRecorder: () => request<DesktopRecorderState>("GET", "/recorder/desktop"),
+  desktopRecorderStart: () => request<DesktopRecorderState>("POST", "/recorder/desktop/start"),
+  desktopRecorderStop: () => request<DesktopRecorderState>("POST", "/recorder/desktop/stop"),
 
   telegram: () => request<TelegramStatus>("GET", "/integrations/telegram"),
   telegramLogin: (login: { apiId: number; apiHash: string | null; phone: string }) =>

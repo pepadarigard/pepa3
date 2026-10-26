@@ -29,9 +29,11 @@ public partial class App : Application
         var activationName = $"Local\\Pepa.Activate.{Hash(_dataDirectory)}";
 
         IDesktop? desktop = null;
+        IDesktopInputMonitor? desktopInput = null;
         try
         {
             desktop = _desktop = new UiaDesktop();
+            desktopInput = new UiaInputMonitor();
         }
         catch (Exception ex)
         {
@@ -46,6 +48,7 @@ public partial class App : Application
                 DataDirectory = _dataDirectory,
                 IsDesktop = true,
                 Desktop = desktop,
+                DesktopInput = desktopInput,
             });
         }
         catch (InstanceAlreadyRunningException)

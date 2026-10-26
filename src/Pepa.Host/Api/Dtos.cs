@@ -248,6 +248,9 @@ public sealed record RecorderStartRequest(string? Browser, string? ProfileId, st
 public sealed record RecorderStateDto(bool Recording, string? Browser, string? ProfileId, string? StartUrl,
     IReadOnlyList<Adapters.Browser.RecordedAction> Actions);
 
+/// <param name="UnavailableReason">Почему запись в окнах Windows недоступна (null — доступна).</param>
+public sealed record DesktopRecorderDto(string? UnavailableReason, bool Recording, IReadOnlyList<Adapters.Desktop.RecordedDesktopStep> Steps);
+
 /// <summary>Шаблон сценария (из набора примеров): из него можно создать свой сценарий.</summary>
 public sealed record TemplateDto(string Name, string Description, IReadOnlyList<string> Blocks, ScenarioDefinition Definition);
 

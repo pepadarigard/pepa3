@@ -310,6 +310,41 @@ internal static class ApiEndpoints
             return RecorderDto(recorder.State);
         });
 
+        // ───────────── Запись действий в окнах Windows ─────────────
+        api.MapGet("/recorder/desktop", (Adapters.Desktop.DesktopRecorder recorder) => DesktopRecorderDto(recorder));
+
+        api.MapPost("/recorder/desktop/start", async (Adapters.Desktop.DesktopRecorder recorder, IPepaStore store, CancellationToken ct) =>
+        {
+            if (recorder.UnavailableReason is { } reason)
+            {
+                return Results.Json(new ErrorDto(reason), Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status409Conflict);
+            }
+
+            // Пока процесс работает мышью и клавиатурой, запись перемешала бы его действия с действиями пользователя.
+            var key = Adapters.Desktop.DesktopNodes.InputResource.Key;
+            if ((await store.ListResourcesAsync(ct)).FirstOrDefault(r => r.Key == key && r.HolderProcessId is not null) is { } held)
+            {
+                return Results.Json(new ErrorDto($"Мышь и клавиатура сейчас заняты процессом #{held.HolderProcessId![^6..]} — дождитесь его окончания или остановите."),
+                    Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status409Conflict);
+            }
+
+            try
+            {
+                await recorder.StartAsync(ct);
+                return Results.Ok(DesktopRecorderDto(recorder));
+            }
+            catch (Adapters.Desktop.DesktopRecorderException ex)
+            {
+                return Results.Json(new ErrorDto(ex.Message), Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status409Conflict);
+            }
+        });
+
+        api.MapPost("/recorder/desktop/stop", async (Adapters.Desktop.DesktopRecorder recorder, CancellationToken ct) =>
+        {
+            await recorder.StopAsync(ct);
+            return DesktopRecorderDto(recorder);
+        });
+
         // ИИ-помощник: ключ API и черновик блоков по описанию.
         api.MapGet("/assistant", async (AssistantKeyStore keys, Assistant.ScenarioAssistant assistant, CancellationToken ct) =>
             AssistantDto(await keys.GetAsync(ct), assistant));
@@ -626,6 +661,12 @@ internal static class ApiEndpoints
             UpdatedAt = default,
         }, ct);
         return (await mapper.TriggersAsync([saved], ct))[0];
+    }
+
+    private static DesktopRecorderDto DesktopRecorderDto(Adapters.Desktop.DesktopRecorder recorder)
+    {
+        var state = recorder.State;
+        return new DesktopRecorderDto(recorder.UnavailableReason, state.Recording, state.Steps);
     }
 
     private static RecorderStateDto RecorderDto(Adapters.Browser.RecorderState state) =>

@@ -1,0 +1,757 @@
+using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
+using FlaUI.Core.AutomationElements;
+using FlaUI.Core.Conditions;
+using FlaUI.Core.Definitions;
+using FlaUI.UIA3;
+using DrawingPoint = System.Drawing.Point;
+
+namespace Pepa.Adapters.Desktop.Windows;
+
+/// <summary>
+/// Перехват мыши и клавиатуры для записи действий в окнах Windows: глобальные перехватчики (low-level hooks) только
+/// отмечают, что и где нажато, и сразу возвращают управление; элементы под мышью и в фокусе определяет UI Automation в
+/// отдельном потоке, а подсчёт похожих элементов (долгий в больших окнах) — в третьем, чтобы следующие нажатия
+/// определялись сразу, пока окно не изменилось. Ввод программ (SendInput, в том числе блоков Pepa) и ввод в окна самой
+/// Pepa не записывается.
+/// </summary>
+public sealed class UiaInputMonitor : IDesktopInputMonitor
+{
+    public string? UnavailableReason => null;
+
+    public IDesktopInputWatch Start(Action<DesktopInput> sink)
+    {
+        var watch = new Watch(sink);
+        watch.Start();
+        return watch;
+    }
+
+    private enum RawKind
+    {
+        MouseDown,
+        MouseUp,
+        Wheel,
+        KeyDown,
+        KeyUp,
+    }
+
+    /// <summary>Сырое событие из перехватчика: только то, что можно узнать мгновенно.</summary>
+    private readonly record struct Raw(RawKind Kind, DateTimeOffset At, int X, int Y, MouseButtonKind Button, int Vk, bool Own, int RootProcessId);
+
+    /// <summary>Действие, ожидающее подсчёта похожих элементов (окно — для поиска).</summary>
+    private sealed record Pending(DesktopInput Input, AutomationElement? Window);
+
+    private sealed class Watch(Action<DesktopInput> sink) : IDesktopInputWatch
+    {
+        /// <summary>Перехватчик один на процесс: функция обратного вызова статическая.</summary>
+        private static Watch? s_active;
+
+        private readonly BlockingCollection<Raw> _raw = new();
+        private readonly BlockingCollection<Pending> _pending = new();
+        private readonly TaskCompletionSource _stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private UIA3Automation? _automation;
+        private Thread? _hookThread;
+        private uint _hookThreadId;
+        private nint _mouseHook;
+        private nint _keyboardHook;
+
+        // Состояние потока разбора (только из него).
+        private bool _ctrl, _alt, _shift, _win, _altAlone;
+        private (AutomationElement Element, DesktopTarget Target)? _typing;
+        private readonly Dictionary<MouseButtonKind, (Raw Down, DesktopTarget? Target, AutomationElement? Window)> _down = [];
+
+        public void Start()
+        {
+            lock (typeof(Watch))
+            {
+                if (s_active is not null)
+                {
+                    throw new DesktopException("Запись в окнах Windows уже идёт.");
+                }
+
+                s_active = this;
+            }
+
+            try
+            {
+                var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                _hookThread = new Thread(() => HookLoop(ready)) { IsBackground = true, Name = "Pepa запись: перехват" };
+                _hookThread.Start();
+                ready.Task.GetAwaiter().GetResult();
+
+                _automation = new UIA3Automation { ConnectionTimeout = TimeSpan.FromSeconds(5), TransactionTimeout = TimeSpan.FromSeconds(10) };
+                var parse = new Thread(ParseLoop) { IsBackground = true, Name = "Pepa запись: элементы" };
+                parse.SetApartmentState(ApartmentState.MTA);
+                parse.Start();
+                var count = new Thread(CountLoop) { IsBackground = true, Name = "Pepa запись: подсчёт" };
+                count.SetApartmentState(ApartmentState.MTA);
+                count.Start();
+            }
+            catch
+            {
+                // Перехватчики уже стоят — снять их, а не оставить работать без записи.
+                if (_hookThreadId != 0)
+                {
+                    HookNative.PostThreadMessage(_hookThreadId, HookNative.WmQuit, 0, 0);
+                }
+
+                Release();
+                throw;
+            }
+        }
+
+        public async Task StopAsync()
+        {
+            if (_hookThreadId != 0)
+            {
+                HookNative.PostThreadMessage(_hookThreadId, HookNative.WmQuit, 0, 0);
+            }
+
+            await _stopped.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        }
+
+        private void Release()
+        {
+            lock (typeof(Watch))
+            {
+                if (s_active == this)
+                {
+                    s_active = null;
+                }
+            }
+        }
+
+        // ───────────── Поток перехвата ─────────────
+
+        private unsafe void HookLoop(TaskCompletionSource ready)
+        {
+            try
+            {
+                var module = HookNative.GetModuleHandle(null);
+                _mouseHook = HookNative.SetWindowsHookEx(HookNative.WhMouseLl, &MouseProc, module, 0);
+                _keyboardHook = HookNative.SetWindowsHookEx(HookNative.WhKeyboardLl, &KeyboardProc, module, 0);
+                if (_mouseHook == 0 || _keyboardHook == 0)
+                {
+                    throw new DesktopException($"Windows не дал перехватывать мышь и клавиатуру (код {Marshal.GetLastPInvokeError()}).");
+                }
+
+                _hookThreadId = HookNative.GetCurrentThreadId();
+                ready.SetResult();
+            }
+            catch (Exception ex)
+            {
+                Unhook();
+                _raw.CompleteAdding();
+                ready.TrySetException(ex);
+                return;
+            }
+
+            // Перехватчики работают, пока этот поток разбирает сообщения.
+            while (HookNative.GetMessage(out var message, 0, 0, 0) > 0)
+            {
+                HookNative.TranslateMessage(message);
+                HookNative.DispatchMessage(message);
+            }
+
+            Unhook();
+            Release();
+            _raw.CompleteAdding();
+        }
+
+        private void Unhook()
+        {
+            if (_mouseHook != 0)
+            {
+                HookNative.UnhookWindowsHookEx(_mouseHook);
+                _mouseHook = 0;
+            }
+
+            if (_keyboardHook != 0)
+            {
+                HookNative.UnhookWindowsHookEx(_keyboardHook);
+                _keyboardHook = 0;
+            }
+        }
+
+        [UnmanagedCallersOnly]
+        private static unsafe nint MouseProc(int code, nint message, nint data)
+        {
+            if (code >= 0 && s_active is { } watch)
+            {
+                try
+                {
+                    var info = (HookNative.MouseInfo*)data;
+                    if ((info->Flags & (HookNative.LlmhfInjected | HookNative.LlmhfLowerIlInjected)) == 0)
+                    {
+                        var kind = (int)message switch
+                        {
+                            0x0201 or 0x0204 or 0x0207 => RawKind.MouseDown,
+                            0x0202 or 0x0205 or 0x0208 => RawKind.MouseUp,
+                            0x020A or 0x020E => RawKind.Wheel,
+                            _ => (RawKind?)null,
+                        };
+                        if (kind is { } k)
+                        {
+                            var button = (int)message switch
+                            {
+                                0x0204 or 0x0205 => MouseButtonKind.Right,
+                                0x0207 or 0x0208 => MouseButtonKind.Middle,
+                                _ => MouseButtonKind.Left,
+                            };
+                            var root = HookNative.GetAncestor(HookNative.WindowFromPoint(info->Point), HookNative.GaRoot);
+                            HookNative.GetWindowThreadProcessId(root, out var processId);
+                            watch._raw.TryAdd(new Raw(k, DateTimeOffset.Now, info->Point.X, info->Point.Y, button, 0,
+                                processId == Environment.ProcessId, (int)processId));
+                        }
+                    }
+                }
+                catch
+                {
+                    // Исключение из обратного вызова уронило бы Pepa; пропущенное событие хуже не сделает.
+                }
+            }
+
+            return HookNative.CallNextHookEx(0, code, message, data);
+        }
+
+        [UnmanagedCallersOnly]
+        private static unsafe nint KeyboardProc(int code, nint message, nint data)
+        {
+            if (code >= 0 && s_active is { } watch)
+            {
+                try
+                {
+                    var info = (HookNative.KeyboardInfo*)data;
+                    if ((info->Flags & HookNative.LlkhfInjected) == 0)
+                    {
+                        var down = (int)message is 0x0100 or 0x0104;
+                        HookNative.GetWindowThreadProcessId(HookNative.GetForegroundWindow(), out var processId);
+                        watch._raw.TryAdd(new Raw(down ? RawKind.KeyDown : RawKind.KeyUp, DateTimeOffset.Now, 0, 0, MouseButtonKind.Left,
+                            (int)info->VkCode, processId == Environment.ProcessId, (int)processId));
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            return HookNative.CallNextHookEx(0, code, message, data);
+        }
+
+        // ───────────── Поток разбора ─────────────
+
+        private void ParseLoop()
+        {
+            try
+            {
+                foreach (var raw in _raw.GetConsumingEnumerable())
+                {
+                    try
+                    {
+                        Parse(raw);
+                    }
+                    catch (Exception ex) when (IsUiaFailure(ex))
+                    {
+                        Emit(new DesktopSkippedInput(raw.At, $"Windows не ответил, что за элемент под мышью или в фокусе ({ex.Message}) — действие не записано"));
+                    }
+                }
+
+                FlushTyping(DateTimeOffset.Now);
+            }
+            finally
+            {
+                _pending.CompleteAdding();
+            }
+        }
+
+        private void Parse(Raw raw)
+        {
+            switch (raw.Kind)
+            {
+                case RawKind.Wheel:
+                    if (!raw.Own)
+                    {
+                        Emit(new DesktopSkippedInput(raw.At, "прокрутка колесом мыши не записывается (блоки находят элементы и без неё)"));
+                    }
+
+                    break;
+                case RawKind.MouseDown:
+                    _altAlone = false;
+                    // Набор в поле закончился: прочитать текст, пока нажатие ничего не изменило.
+                    FlushTyping(raw.At);
+                    if (raw.Own)
+                    {
+                        _down.Remove(raw.Button);
+                        break;
+                    }
+
+                    var (target, window) = Resolve(raw);
+                    _down[raw.Button] = (raw, target, window);
+                    break;
+                case RawKind.MouseUp:
+                    if (!_down.Remove(raw.Button, out var pressed) || pressed.Target is null)
+                    {
+                        break;
+                    }
+
+                    if (Math.Abs(raw.X - pressed.Down.X) > 5 || Math.Abs(raw.Y - pressed.Down.Y) > 5)
+                    {
+                        Emit(new DesktopSkippedInput(raw.At, "перетаскивание мышью не записывается"));
+                        break;
+                    }
+
+                    Emit(new DesktopClickInput(pressed.Down.At, pressed.Target, pressed.Down.X, pressed.Down.Y, raw.Button), pressed.Window);
+                    break;
+                case RawKind.KeyDown:
+                    OnKeyDown(raw);
+                    break;
+                case RawKind.KeyUp:
+                    UpdateModifiers(raw.Vk, down: false);
+                    if (raw.Vk is 0x12 or 0xA4 or 0xA5 && _altAlone)
+                    {
+                        _altAlone = false;
+                        if (!raw.Own)
+                        {
+                            Key(raw, 0x12);
+                        }
+                    }
+
+                    break;
+            }
+        }
+
+        private void OnKeyDown(Raw raw)
+        {
+            if (DesktopKeyRules.IsModifier(raw.Vk))
+            {
+                var wasDown = _alt;
+                UpdateModifiers(raw.Vk, down: true);
+                if (raw.Vk is 0x12 or 0xA4 or 0xA5)
+                {
+                    // Повтор зажатого Alt не сбрасывает «нажат один Alt»; Alt вместе с Ctrl — это AltGr или сочетание.
+                    _altAlone = (wasDown ? _altAlone : true) && !_ctrl && !_shift && !_win;
+                }
+                else
+                {
+                    _altAlone = false;
+                }
+
+                return;
+            }
+
+            _altAlone = false;
+            if (raw.Own)
+            {
+                return;
+            }
+
+            Key(raw, raw.Vk);
+        }
+
+        private void Key(Raw raw, int vk)
+        {
+            var focused = _automation!.FocusedElement();
+            var (editable, multiLine) = Editable(focused);
+            var decision = DesktopKeyRules.Classify(vk, _ctrl, _alt, _shift, _win, editable, multiLine);
+            switch (decision.Role)
+            {
+                case KeyRole.Typing:
+                    if (_typing is { } typing && !Same(typing.Element, focused))
+                    {
+                        FlushTyping(raw.At);
+                    }
+
+                    if (_typing is null && Target(focused, raw) is { } target)
+                    {
+                        _typing = (focused, target.Target);
+                    }
+
+                    break;
+                case KeyRole.Key:
+                    FlushTyping(raw.At);
+                    if (Target(focused, raw) is { } keyTarget)
+                    {
+                        Emit(new DesktopKeyInput(raw.At, keyTarget.Target, decision.Keys!), keyTarget.Window);
+                    }
+
+                    break;
+                default:
+                    if (decision.Note is { } note)
+                    {
+                        Emit(new DesktopSkippedInput(raw.At, note));
+                    }
+
+                    break;
+            }
+        }
+
+        private void UpdateModifiers(int vk, bool down)
+        {
+            switch (vk)
+            {
+                case 0x11 or 0xA2 or 0xA3:
+                    _ctrl = down;
+                    break;
+                case 0x12 or 0xA4 or 0xA5:
+                    _alt = down;
+                    break;
+                case 0x10 or 0xA0 or 0xA1:
+                    _shift = down;
+                    break;
+                case 0x5B or 0x5C:
+                    _win = down;
+                    break;
+            }
+        }
+
+        private void FlushTyping(DateTimeOffset at)
+        {
+            if (_typing is not { } typing)
+            {
+                return;
+            }
+
+            _typing = null;
+            string? text = null;
+            if (!typing.Target.IsPassword)
+            {
+                try
+                {
+                    text = ReadText(typing.Element);
+                }
+                catch (Exception ex) when (IsUiaFailure(ex))
+                {
+                    // Поле закрылось вместе с окном — текст не прочитать; шаг будет с пояснением.
+                }
+            }
+
+            Emit(new DesktopTextInput(at, typing.Target, text), WindowOf(typing.Element));
+        }
+
+        private static string? ReadText(AutomationElement element)
+        {
+            if (element.Patterns.Value.TryGetPattern(out var value))
+            {
+                return value.Value.ValueOrDefault;
+            }
+
+            return element.Patterns.Text.TryGetPattern(out var text) ? text.DocumentRange.GetText(-1) : null;
+        }
+
+        private static (bool Editable, bool MultiLine) Editable(AutomationElement? element)
+        {
+            if (element is null)
+            {
+                return (false, false);
+            }
+
+            var type = element.Properties.ControlType.ValueOrDefault;
+            var editable = element.Patterns.Value.TryGetPattern(out var value)
+                ? !value.IsReadOnly.ValueOrDefault && type is ControlType.Edit or ControlType.Document or ControlType.ComboBox
+                : type is ControlType.Edit or ControlType.Document && element.Patterns.Text.IsSupported;
+            if (!editable)
+            {
+                return (false, false);
+            }
+
+            var multiLine = type == ControlType.Document;
+            var handle = element.Properties.NativeWindowHandle.ValueOrDefault;
+            if (!multiLine && handle != 0)
+            {
+                multiLine = (HookNative.GetWindowLongPtr(handle, HookNative.GwlStyle) & HookNative.EsMultiline) != 0;
+            }
+
+            return (true, multiLine);
+        }
+
+        /// <summary>Что под мышью: элемент и его окно верхнего уровня (null — окно, которое не записывается).</summary>
+        private (DesktopTarget? Target, AutomationElement? Window) Resolve(Raw raw)
+        {
+            var element = _automation!.FromPoint(new DrawingPoint(raw.X, raw.Y));
+            var result = Target(element, raw);
+            if (result is null)
+            {
+                return (null, null);
+            }
+
+            var target = result.Value.Target;
+            if (target.Window.ProcessId != raw.RootProcessId && raw.RootProcessId != 0)
+            {
+                target = target with { Note = "под мышью во время нажатия сменилось окно — проверьте, тот ли элемент записан" };
+            }
+
+            return (target, result.Value.Window);
+        }
+
+        /// <summary>Окно и сведения об элементе; null — окна Pepa и оболочки Windows (не записываются).</summary>
+        private (DesktopTarget Target, AutomationElement Window)? Target(AutomationElement? element, Raw raw)
+        {
+            if (element is null)
+            {
+                return null;
+            }
+
+            var window = WindowOf(element);
+            if (window is null)
+            {
+                return null;
+            }
+
+            var processId = window.Properties.ProcessId.ValueOrDefault;
+            if (processId == Environment.ProcessId)
+            {
+                return null;
+            }
+
+            var processName = UiaDesktop.WindowProcessName(window, processId);
+            if (processName is null)
+            {
+                return null;
+            }
+
+            if (IsShell(window, processName))
+            {
+                Emit(new DesktopSkippedInput(raw.At,
+                    "действия на панели задач, рабочем столе и в меню «Пуск» не записываются — программу запускает блок «Запустить программу»"));
+                return null;
+            }
+
+            var r = window.Properties.BoundingRectangle.ValueOrDefault;
+            var info = new WindowInfo(window.Properties.NativeWindowHandle.ValueOrDefault.ToInt64(), UiaDesktop.SafeName(window), processName, processId,
+                new DesktopRect(r.X, r.Y, r.Width, r.Height));
+            // Нажатие в само окно (фон, рамка) — элемента нет, будет нажатие в точке.
+            var described = Same(element, window) ? null : UiaDesktop.Describe(element);
+            return (new DesktopTarget { Window = info, Element = described, IsPassword = element.Properties.IsPassword.ValueOrDefault }, window);
+        }
+
+        /// <summary>Окно верхнего уровня элемента — так же, как окна перебирают блоки (дети «рабочего стола» UI Automation).</summary>
+        private AutomationElement? WindowOf(AutomationElement element)
+        {
+            try
+            {
+                var walker = _automation!.TreeWalkerFactory.GetControlViewWalker();
+                var root = _automation.GetDesktop();
+                var current = element;
+                while (true)
+                {
+                    var parent = walker.GetParent(current);
+                    if (parent is null)
+                    {
+                        return null;
+                    }
+
+                    if (Same(parent, root))
+                    {
+                        return current;
+                    }
+
+                    current = parent;
+                }
+            }
+            catch (Exception ex) when (IsUiaFailure(ex))
+            {
+                return null;
+            }
+        }
+
+        private static bool IsShell(AutomationElement window, string processName)
+        {
+            if (processName is "StartMenuExperienceHost" or "SearchHost" or "SearchApp" or "ShellExperienceHost")
+            {
+                return true;
+            }
+
+            return string.Equals(processName, "explorer", StringComparison.OrdinalIgnoreCase) &&
+                   window.Properties.ClassName.ValueOrDefault is "Shell_TrayWnd" or "Shell_SecondaryTrayWnd" or "Progman" or "WorkerW";
+        }
+
+        private bool Same(AutomationElement a, AutomationElement b)
+        {
+            try
+            {
+                return _automation!.Compare(a, b);
+            }
+            catch (Exception ex) when (IsUiaFailure(ex))
+            {
+                return false;
+            }
+        }
+
+        private void Emit(DesktopInput input, AutomationElement? window = null)
+        {
+            if (!_pending.IsAddingCompleted)
+            {
+                _pending.Add(new Pending(input, window));
+            }
+        }
+
+        // ───────────── Поток подсчёта ─────────────
+
+        private void CountLoop()
+        {
+            try
+            {
+                foreach (var pending in _pending.GetConsumingEnumerable())
+                {
+                    var input = pending.Input;
+                    try
+                    {
+                        input = input switch
+                        {
+                            DesktopClickInput click => click with { Target = Count(click.Target, pending.Window) },
+                            DesktopTextInput text => text with { Target = Count(text.Target, pending.Window) },
+                            // Блок «Клавиатура» элемент не ищет — считать незачем.
+                            _ => input,
+                        };
+                    }
+                    catch (Exception ex) when (IsUiaFailure(ex))
+                    {
+                        // Окно закрылось — похожие элементы не подсчитать: шаг всё равно записывается, с пояснением.
+                        input = input switch
+                        {
+                            DesktopClickInput click => click with { Target = click.Target with { Note = Unchecked(click.Target) } },
+                            DesktopTextInput text => text with { Target = text.Target with { Note = Unchecked(text.Target) } },
+                            _ => input,
+                        };
+                    }
+
+                    try
+                    {
+                        sink(input);
+                    }
+                    catch
+                    {
+                        // Запись не должна прерываться из-за получателя.
+                    }
+                }
+            }
+            finally
+            {
+                _automation?.Dispose();
+                Release();
+                _stopped.TrySetResult();
+            }
+        }
+
+        private static string Unchecked(DesktopTarget target) =>
+            string.Join("; ", new[] { target.Note, "окно закрылось раньше, чем Pepa проверила, единственный ли это элемент" }.Where(n => n is not null));
+
+        /// <summary>Сколько в окне элементов с тем же кодом и с той же подписью — так же, как их ищет блок.</summary>
+        private DesktopTarget Count(DesktopTarget target, AutomationElement? window)
+        {
+            if (window is null || target.Element is not { } element)
+            {
+                return target;
+            }
+
+            var cf = _automation!.ConditionFactory;
+            var sameId = element.AutomationId.Length > 0 ? window.FindAllDescendants(cf.ByAutomationId(element.AutomationId)).Length : 0;
+            var sameName = 0;
+            if (element.Name.Length > 0)
+            {
+                ConditionBase condition = DesktopNodes.ControlTypes.Any(t => t.Value == element.ControlType) &&
+                                          Enum.TryParse<ControlType>(element.ControlType, out var type)
+                    ? cf.ByControlType(type)
+                    : TrueCondition.Default;
+                sameName = window.FindAllDescendants(condition)
+                    .Count(e => string.Equals(UiaDesktop.SafeName(e), element.Name, StringComparison.CurrentCultureIgnoreCase));
+            }
+
+            return target with { SameId = sameId, SameName = sameName };
+        }
+
+        private static bool IsUiaFailure(Exception ex) =>
+            ex is COMException or InvalidOperationException or TimeoutException or FlaUI.Core.Exceptions.ElementNotAvailableException
+                or FlaUI.Core.Exceptions.PropertyNotSupportedException or FlaUI.Core.Exceptions.PatternNotSupportedException;
+    }
+}
+
+internal static partial class HookNative
+{
+    public const int WhMouseLl = 14;
+    public const int WhKeyboardLl = 13;
+    public const uint WmQuit = 0x0012;
+    public const uint GaRoot = 2;
+    public const uint LlmhfInjected = 0x01;
+    public const uint LlmhfLowerIlInjected = 0x02;
+    public const uint LlkhfInjected = 0x10;
+    public const int GwlStyle = -16;
+    public const nint EsMultiline = 0x0004;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MouseInfo
+    {
+        public NativeMethods.Point Point;
+        public uint MouseData;
+        public uint Flags;
+        public uint Time;
+        public nuint ExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct KeyboardInfo
+    {
+        public uint VkCode;
+        public uint ScanCode;
+        public uint Flags;
+        public uint Time;
+        public nuint ExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Message
+    {
+        public nint Window;
+        public uint Id;
+        public nuint WParam;
+        public nint LParam;
+        public uint Time;
+        public NativeMethods.Point Point;
+        public uint Private;
+    }
+
+    [LibraryImport("user32.dll", EntryPoint = "SetWindowsHookExW", SetLastError = true)]
+    public static unsafe partial nint SetWindowsHookEx(int hook, delegate* unmanaged<int, nint, nint, nint> callback, nint module, uint threadId);
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool UnhookWindowsHookEx(nint hook);
+
+    [LibraryImport("user32.dll")]
+    public static partial nint CallNextHookEx(nint hook, int code, nint wParam, nint lParam);
+
+    [LibraryImport("user32.dll", EntryPoint = "GetMessageW")]
+    public static partial int GetMessage(out Message message, nint window, uint min, uint max);
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool TranslateMessage(in Message message);
+
+    [LibraryImport("user32.dll", EntryPoint = "DispatchMessageW")]
+    public static partial nint DispatchMessage(in Message message);
+
+    [LibraryImport("user32.dll", EntryPoint = "PostThreadMessageW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool PostThreadMessage(uint threadId, uint message, nuint wParam, nint lParam);
+
+    [LibraryImport("kernel32.dll", EntryPoint = "GetModuleHandleW", StringMarshalling = StringMarshalling.Utf16)]
+    public static partial nint GetModuleHandle(string? name);
+
+    [LibraryImport("kernel32.dll")]
+    public static partial uint GetCurrentThreadId();
+
+    [LibraryImport("user32.dll")]
+    public static partial nint GetForegroundWindow();
+
+    [LibraryImport("user32.dll")]
+    public static partial nint GetAncestor(nint window, uint flags);
+
+    [LibraryImport("user32.dll")]
+    public static partial nint WindowFromPoint(NativeMethods.Point point);
+
+    [LibraryImport("user32.dll")]
+    public static partial uint GetWindowThreadProcessId(nint window, out uint processId);
+
+    [LibraryImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+    public static partial nint GetWindowLongPtr(nint window, int index);
+}

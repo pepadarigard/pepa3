@@ -606,20 +606,10 @@ public sealed class UiaDesktop : IDesktop, IDisposable
                     continue;
                 }
 
-                var processName = ProcessName(processId);
+                var processName = WindowProcessName(element, processId);
                 if (processName is null)
                 {
                     continue;
-                }
-
-                if (string.Equals(processName, "ApplicationFrameHost", StringComparison.OrdinalIgnoreCase))
-                {
-                    // Приложения из Microsoft Store живут в рамке ApplicationFrameHost — настоящая программа внутри неё.
-                    processName = element.FindAllChildren()
-                        .Select(child => child.Properties.ProcessId.ValueOrDefault)
-                        .Where(id => id != processId && id != 0)
-                        .Select(ProcessName)
-                        .FirstOrDefault(name => name is not null) ?? processName;
                 }
 
                 var r = element.Properties.BoundingRectangle.ValueOrDefault;
@@ -633,6 +623,23 @@ public sealed class UiaDesktop : IDesktop, IDisposable
         }
 
         return result;
+    }
+
+    /// <summary>Программа окна верхнего уровня (null — процесс уже завершился).</summary>
+    internal static string? WindowProcessName(AutomationElement window, int processId)
+    {
+        var processName = ProcessName(processId);
+        if (processName is not null && string.Equals(processName, "ApplicationFrameHost", StringComparison.OrdinalIgnoreCase))
+        {
+            // Приложения из Microsoft Store живут в рамке ApplicationFrameHost — настоящая программа внутри неё.
+            processName = window.FindAllChildren()
+                .Select(child => child.Properties.ProcessId.ValueOrDefault)
+                .Where(id => id != processId && id != 0)
+                .Select(ProcessName)
+                .FirstOrDefault(name => name is not null) ?? processName;
+        }
+
+        return processName;
     }
 
     private static string? ProcessName(int processId)
@@ -649,7 +656,7 @@ public sealed class UiaDesktop : IDesktop, IDisposable
         }
     }
 
-    private static ElementInfo Describe(AutomationElement element)
+    internal static ElementInfo Describe(AutomationElement element)
     {
         var r = element.Properties.BoundingRectangle.ValueOrDefault;
         return new ElementInfo(SafeName(element), element.Properties.ControlType.ValueOrDefault.ToString(),
@@ -660,7 +667,7 @@ public sealed class UiaDesktop : IDesktop, IDisposable
     private static string Describe(DesktopElement element) =>
         element.Info.Name is { Length: > 0 } name ? $"«{name}»" : $"{element.Info.ControlType} {element.Info.AutomationId}".Trim();
 
-    private static string SafeName(AutomationElement element) => element.Properties.Name.ValueOrDefault?.Trim() ?? "";
+    internal static string SafeName(AutomationElement element) => element.Properties.Name.ValueOrDefault?.Trim() ?? "";
 
     private static bool NameMatches(string name, ElementQuery query) => query.NameContains
         ? name.Contains(query.Name!, StringComparison.CurrentCultureIgnoreCase)

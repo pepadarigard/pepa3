@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { recordingToBlocks, type RecordedAction } from "./recording";
+import { desktopRecordingToBlocks, recordingToBlocks, type RecordedAction } from "./recording";
 
 const action = (kind: RecordedAction["kind"], extra: Partial<RecordedAction> = {}): RecordedAction =>
   ({ kind, selector: null, value: null, url: null, note: null, label: null, secret: false, ...extra });
@@ -36,5 +36,21 @@ describe("запись → блоки", () => {
     const blocks = recordingToBlocks([action("click", { selector: "#go" })], { browser: "adspower", profileId: "k1abc" });
     expect(blocks.nodes[0]).toMatchObject({ type: "adspower.open", config: { profileId: "k1abc" } });
     expect(blocks.nodes[1]).toMatchObject({ type: "browser.click", config: { selector: "#go" } });
+  });
+});
+
+describe("запись в окнах Windows → блоки", () => {
+  it("шаги становятся цепочкой блоков с заметками, пароль — переменной", () => {
+    const blocks = desktopRecordingToBlocks([
+      { type: "desktop.click", config: { window: "Блокнот", process: "notepad", name: "Сохранить" }, label: "Нажать «Сохранить»", note: "проверьте", secret: false },
+      { type: "desktop.fill", config: { window: "Блокнот", process: "notepad", name: "Пароль", text: "{{ vars.password }}" }, label: "Ввести пароль", note: null, secret: true },
+    ]);
+    expect(blocks.nodes.map((n) => [n.type, n.label, n.note])).toEqual([
+      ["desktop.click", "Нажать «Сохранить»", "проверьте"],
+      ["desktop.fill", "Ввести пароль", null],
+    ]);
+    expect(blocks.edges).toEqual([{ id: "rec-e1", source: "rec1", sourcePort: "out", target: "rec2" }]);
+    expect(blocks.variables.map((v) => [v.name, v.isInput])).toEqual([["password", true]]);
+    expect(desktopRecordingToBlocks([]).variables).toEqual([]);
   });
 });

@@ -39,6 +39,7 @@ export function startEventStream(queryClient: QueryClient, onState: (state: Conn
       queryClient.invalidateQueries({ queryKey: ["overview"] });
     } else if (event.type === "recorder") {
       queryClient.invalidateQueries({ queryKey: ["recorder"] });
+      queryClient.invalidateQueries({ queryKey: ["recorder-desktop"] });
     } else if (event.type === "integrations") {
       queryClient.invalidateQueries({ queryKey: ["telegram"] });
     } else if (event.type === "scenarios") {

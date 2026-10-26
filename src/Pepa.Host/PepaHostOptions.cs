@@ -49,6 +49,9 @@ public sealed record PepaHostOptions
     /// но при запуске честно сообщают, что работают только в приложении Pepa для Windows.
     /// </summary>
     public Adapters.Desktop.IDesktop? Desktop { get; init; }
+
+    /// <summary>Перехват мыши и клавиатуры для записи действий в окнах Windows. null — запись честно сообщает, что недоступна.</summary>
+    public Adapters.Desktop.IDesktopInputMonitor? DesktopInput { get; init; }
 }
 
 public static class HostPaths

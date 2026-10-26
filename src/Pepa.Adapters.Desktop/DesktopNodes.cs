@@ -64,19 +64,22 @@ public static class DesktopNodes
         new FieldDescriptor
         {
             Name = "controlType", Label = "Тип элемента", Kind = FieldKind.Select, Default = "",
-            Options =
-            [
-                new("", "любой"), new("Button", "кнопка"), new("Edit", "поле ввода"), new("Text", "текст"),
-                new("CheckBox", "флажок"), new("RadioButton", "переключатель"), new("ComboBox", "выпадающий список"),
-                new("ListItem", "пункт списка"), new("MenuItem", "пункт меню"), new("TabItem", "вкладка"),
-                new("Hyperlink", "ссылка"), new("Document", "документ"), new("TreeItem", "элемент дерева"),
-            ],
+            Options = [new("", "любой"), .. ControlTypes],
         },
         new FieldDescriptor
         {
             Name = "match", Label = "Если подходит несколько элементов", Kind = FieldKind.Select, Default = "strict",
             Options = [new("strict", "Остановиться с ошибкой"), new("first", "Взять первый"), new("last", "Взять последний")],
         },
+    ];
+
+    /// <summary>Типы элементов, которые можно выбрать в блоках (остальные — «любой»).</summary>
+    public static readonly IReadOnlyList<SelectOption> ControlTypes =
+    [
+        new("Button", "кнопка"), new("Edit", "поле ввода"), new("Text", "текст"),
+        new("CheckBox", "флажок"), new("RadioButton", "переключатель"), new("ComboBox", "выпадающий список"),
+        new("ListItem", "пункт списка"), new("MenuItem", "пункт меню"), new("TabItem", "вкладка"),
+        new("Hyperlink", "ссылка"), new("Document", "документ"), new("TreeItem", "элемент дерева"),
     ];
 
     internal static FieldDescriptor WaitField(int seconds = 30) => new()

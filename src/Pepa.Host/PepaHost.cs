@@ -159,6 +159,9 @@ public sealed class PepaHost : IAsyncDisposable
         builder.Services.AddSingleton(recorder);
         builder.Services.AddSingleton(telegram);
         builder.Services.AddSingleton(desktop);
+        var desktopRecorder = new DesktopRecorder(options.DesktopInput ?? new UnavailableInputMonitor(
+            "Запись действий в окнах Windows доступна только в приложении Pepa для Windows (Pepa.exe), а сейчас Pepa запущена без окна."));
+        builder.Services.AddSingleton(desktopRecorder);
         builder.Services.AddSingleton(sp => new ProcessEngine(
             sp.GetRequiredService<IPepaStore>(),
             sp.GetRequiredService<NodeRegistry>(),
@@ -195,6 +198,7 @@ public sealed class PepaHost : IAsyncDisposable
         telegram.Logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger<TelegramService>();
         telegram.StatusChanged += () => events.Publish("integrations");
         recorder.Changed += () => events.Publish("recorder");
+        desktopRecorder.Changed += () => events.Publish("recorder");
         engine.Changed += change => events.Publish("process", change.ProcessId);
         engine.EventsChanged += () => events.Publish("events");
         engine.TriggersChanged += () => events.Publish("triggers");
@@ -351,6 +355,12 @@ public sealed class PepaHost : IAsyncDisposable
             await engine.StopAsync();
             await telegram.DisposeAsync();
             await Services.GetRequiredService<BrowserRecorder>().DisposeAsync();
+            if (Services.GetRequiredService<DesktopRecorder>().State.Recording)
+            {
+                // Перехват мыши и клавиатуры не должен пережить Pepa.
+                await Services.GetRequiredService<DesktopRecorder>().StopAsync(CancellationToken.None);
+            }
+
             await Services.GetRequiredService<BrowserSessions>().DisposeAsync();
             Services.GetRequiredService<AdsPowerClient>().Dispose();
             await events.DisposeAsync();

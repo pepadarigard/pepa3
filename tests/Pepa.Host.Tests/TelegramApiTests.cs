@@ -135,6 +135,43 @@ public sealed class DesktopApiTests
         Assert.Equal(409, status);
         Assert.Contains("Pepa.exe", error!["error"]!.GetValue<string>());
         Assert.Equal(409, (await f.SendAsync(HttpMethod.Get, "/api/integrations/desktop/elements?window=Блокнот")).Status);
+
+        // Запись в окнах Windows — тоже только в Pepa.exe: причина видна до начала записи.
+        var recorder = await f.GetAsync("/api/recorder/desktop");
+        Assert.Contains("Pepa.exe", recorder["unavailableReason"]!.GetValue<string>());
+        var (start, why) = await f.SendAsync(HttpMethod.Post, "/api/recorder/desktop/start");
+        Assert.Equal(409, start);
+        Assert.Contains("Pepa.exe", why!["error"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Actions_in_windows_are_recorded_into_blocks()
+    {
+        var desktop = new Adapters.Desktop.Tests.FakeDesktop();
+        var notepad = desktop.AddWindow("Документ — Блокнот", "notepad");
+        var save = notepad.Add("Сохранить", id: "save");
+        var monitor = new Adapters.Desktop.Tests.FakeInputMonitor();
+        await using var f = await HostFixture.StartAsync(seedSamples: false, desktop: desktop, desktopInput: monitor);
+
+        var (status, started) = await f.SendAsync(HttpMethod.Post, "/api/recorder/desktop/start");
+        Assert.Equal(200, status);
+        Assert.True(started!["recording"]!.GetValue<bool>());
+        Assert.Null(started["unavailableReason"]);
+        monitor.Send(new Adapters.Desktop.DesktopClickInput(DateTimeOffset.Now,
+            new Adapters.Desktop.DesktopTarget { Window = notepad.Info, Element = save.Info, SameId = 1, SameName = 1 }, 120, 220,
+            Adapters.Desktop.MouseButtonKind.Left));
+        var live = await f.GetAsync("/api/recorder/desktop");
+        Assert.Single(live["steps"]!.AsArray());
+        Assert.Equal(409, (await f.SendAsync(HttpMethod.Post, "/api/recorder/desktop/start")).Status);
+
+        var (_, stopped) = await f.SendAsync(HttpMethod.Post, "/api/recorder/desktop/stop");
+        Assert.False(stopped!["recording"]!.GetValue<bool>());
+        var step = stopped["steps"]!.AsArray().Single()!;
+        Assert.Equal("desktop.click", step["type"]!.GetValue<string>());
+        Assert.Equal("Нажать «Сохранить»", step["label"]!.GetValue<string>());
+        Assert.Equal("save", step["config"]!["automationId"]!.GetValue<string>());
+        Assert.Equal("Блокнот", step["config"]!["window"]!.GetValue<string>());
+        Assert.False(monitor.Watching);
     }
 
     [Fact]

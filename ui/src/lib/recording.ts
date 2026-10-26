@@ -1,4 +1,4 @@
-import type { NodeDefinition, VariableDefinition } from "../api/types";
+import type { NodeDefinition, RecordedDesktopStep, VariableDefinition } from "../api/types";
 import type { BlockClipboard } from "./clipboard";
 
 /** Записанное действие (как его присылает сервер). */
@@ -86,6 +86,27 @@ export function recordingToBlocks(actions: RecordedAction[], source: RecordingSo
     }
   }
 
+  const edges = nodes.slice(1).map((node, i) => ({ id: `rec-e${i + 1}`, source: nodes[i].id, sourcePort: "out", target: node.id }));
+  return { kind: "pepa-blocks", version: 1, nodes, edges, variables };
+}
+
+/**
+ * Записанные шаги в окнах Windows → цепочка блоков (сервер уже собрал параметры блоков). Пояснения к шагам становятся
+ * заметками блоков — их видно на схеме. Пароль не записывается — вместо него переменная «password» (вводится при запуске).
+ */
+export function desktopRecordingToBlocks(steps: RecordedDesktopStep[]): BlockClipboard {
+  const nodes: NodeDefinition[] = steps.map((step, i) => ({
+    id: `rec${i + 1}`,
+    type: step.type,
+    label: step.label,
+    position: { x: i * 280, y: 0 },
+    config: structuredClone(step.config),
+    settings,
+    note: step.note,
+  }));
+  const variables: VariableDefinition[] = steps.some((s) => s.secret)
+    ? [{ name: "password", type: "text", default: null, description: "Пароль (вводится при запуске)", isInput: true }]
+    : [];
   const edges = nodes.slice(1).map((node, i) => ({ id: `rec-e${i + 1}`, source: nodes[i].id, sourcePort: "out", target: node.id }));
   return { kind: "pepa-blocks", version: 1, nodes, edges, variables };
 }

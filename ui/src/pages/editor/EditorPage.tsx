@@ -545,7 +545,7 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
         <Button size="small" variant="ghost" iconOnly icon={ClipboardPaste} title="Вставить блоки (Ctrl+V) — можно и в другой сценарий" onClick={pasteFromClipboard} />
         <Button size="small" variant="ghost" iconOnly icon={Group} title="Объединить выбранные блоки в группу (Ctrl+G) — её можно свернуть в один блок" onClick={createGroup} />
         <Button size="small" icon={Sparkles} title="Описать сценарий словами — помощник предложит блоки" onClick={() => setAssistantOpen(true)}>ИИ-помощник</Button>
-        <Button size="small" icon={CircleDot} title="Записать действия в браузере и превратить их в блоки" onClick={() => setRecorderOpen(true)}>Записать</Button>
+        <Button size="small" icon={CircleDot} title="Записать действия в браузере или в окнах Windows и превратить их в блоки" onClick={() => setRecorderOpen(true)}>Записать</Button>
         <Button size="small" icon={LayoutGrid} title="Расставить блоки автоматически" onClick={layout}>Упорядочить</Button>
         <Button size="small" icon={CalendarClock} title="Запуск по расписанию и по событиям"
           onClick={() => triggersDialog.open(scenario.id, state.meta.name || scenario.name)}>
