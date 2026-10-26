@@ -64,6 +64,16 @@ internal sealed class TestSite : IDisposable
                            <script>setTimeout(() => { const b = document.createElement('button'); b.id = 'late'; b.textContent = 'Появилась'; document.body.appendChild(b); }, 1500);</script>
                            </body></html>
                            """,
+                "/controls" => """
+                           <!doctype html><html><head><title>Элементы</title></head><body>
+                           <select id="city"><option value="msk">Москва</option><option value="spb">Санкт-Петербург</option></select>
+                           <div id="fake-select">Не список</div>
+                           <label><input type="checkbox" id="agree"> Согласен</label>
+                           <input type="file" id="file" style="display:none">
+                           <a id="popup" href="/second?from=popup" target="_blank">Открыть во вкладке</a>
+                           <button id="later" onclick="setTimeout(() => location.href = '/second?step=done', 700)">Перейти позже</button>
+                           </body></html>
+                           """,
                 "/submit" => $"Принято: {context.Request.QueryString["u"]}",
                 _ => null,
             };
