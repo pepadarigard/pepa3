@@ -86,4 +86,8 @@ public static class Ports
     public const string Error = "error";
     public const string True = "true";
     public const string False = "false";
+    public const string Event = "event";
+    public const string Timeout = "timeout";
+    public const string Done = "done";
+    public const string Item = "item";
 }

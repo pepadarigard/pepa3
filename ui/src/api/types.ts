@@ -65,7 +65,7 @@ export interface ValidationReport {
 }
 
 export type NodeEffect = "none" | "readOnly" | "external";
-export type PortKind = "normal" | "error";
+export type PortKind = "normal" | "error" | "optional";
 export type FieldKind =
   | "text"
   | "template"

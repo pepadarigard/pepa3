@@ -22,8 +22,15 @@ public interface IExpressionEvaluator
     string RenderTemplate(string template, ExpressionScope scope);
 }
 
-/// <summary>Что доступно выражению: <c>vars</c>, <c>lastError</c>, <c>process</c>.</summary>
-public sealed record ExpressionScope(JsonObject Variables, JsonObject? LastError = null, JsonObject? Process = null)
+/// <summary>
+/// Что доступно выражению: <c>vars</c>, <c>lastError</c>, <c>process</c> и дополнительные значения
+/// (например, <c>event</c> при сопоставлении события).
+/// </summary>
+public sealed record ExpressionScope(
+    JsonObject Variables,
+    JsonObject? LastError = null,
+    JsonObject? Process = null,
+    JsonObject? Extra = null)
 {
     public static ExpressionScope Empty { get; } = new(new JsonObject());
 }

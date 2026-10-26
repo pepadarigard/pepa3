@@ -6,11 +6,13 @@ using Pepa.Engine.Persistence;
 
 namespace Pepa.Engine;
 
-public sealed record RecoveryReport(int Paused, int UnknownSteps, int CancelledPlannedSteps)
+public sealed record RecoveryReport(int Paused, int UnknownSteps, int CancelledPlannedSteps, int ReleasedResources = 0,
+    int MissedRuns = 0)
 {
     public override string ToString() =>
         $"Восстановление: приостановлено процессов — {Paused}, шагов с неизвестным итогом — {UnknownSteps}, " +
-        $"отменено неначатых шагов — {CancelledPlannedSteps}.";
+        $"отменено неначатых шагов — {CancelledPlannedSteps}, освобождено ресурсов — {ReleasedResources}, " +
+        $"пропущено запусков по расписанию — {MissedRuns}.";
 }
 
 public sealed partial class ProcessEngine
@@ -88,8 +90,10 @@ public sealed partial class ProcessEngine
             await write.CommitAsync();
         }
 
-        var report = new RecoveryReport(paused, unknown, cancelled);
-        if (unknown > 0 || paused > 0)
+        var released = await ReconcileResourcesAsync(cancellationToken);
+        var missed = await RecordMissedSchedulesAsync(cancellationToken);
+        var report = new RecoveryReport(paused, unknown, cancelled, released, missed);
+        if (unknown > 0 || paused > 0 || released > 0 || missed > 0)
         {
             _logger.LogWarning("{Report}", report);
         }

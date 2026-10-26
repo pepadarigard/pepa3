@@ -59,7 +59,7 @@ public sealed class EngineHarness : IAsyncDisposable
 
     public NodeRegistry CreateRegistry()
     {
-        var registry = new NodeRegistry().RegisterLogicNodes().Register(new TestActionNode(World));
+        var registry = new NodeRegistry().RegisterLogicNodes().RegisterFlowNodes().Register(new TestActionNode(World));
         return _extraNodes?.Invoke(registry) ?? registry;
     }
 

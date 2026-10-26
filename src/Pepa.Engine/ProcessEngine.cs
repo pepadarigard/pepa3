@@ -83,6 +83,10 @@ public sealed partial class ProcessEngine : IAsyncDisposable
         }
 
         _background.Add(Task.Run(() => TimerLoopAsync(_stop.Token)));
+        _background.Add(Task.Run(() => RouterLoopAsync(_stop.Token)));
+        _background.Add(Task.Run(() => TriggerLoopAsync(_stop.Token)));
+        // События, принятые до закрытия, но не сопоставленные, — сопоставить. Применятся они только после ручного возобновления.
+        SignalRouter();
         _logger.LogInformation("Движок запущен: {Workers} исполнителей. {Report}", _options.MaxParallelProcesses, report);
         return report;
     }
@@ -117,10 +121,46 @@ public sealed partial class ProcessEngine : IAsyncDisposable
 
     // ───────────────────────────── Запуск процесса ─────────────────────────────
 
-    public async Task<string> StartProcessAsync(string scenarioId, JsonObject? inputs = null,
+    public Task<string> StartProcessAsync(string scenarioId, JsonObject? inputs = null,
+        CancellationToken cancellationToken = default) =>
+        StartProcessAsync(scenarioId, inputs, originKey: null, origin: null, cancellationToken);
+
+    /// <summary>
+    /// Запустить процесс. <paramref name="originKey"/> защищает от двойного запуска (расписание, событие):
+    /// если процесс с таким ключом уже есть, новый не создаётся и возвращается существующий.
+    /// </summary>
+    public async Task<string> StartProcessAsync(string scenarioId, JsonObject? inputs, string? originKey, string? origin,
         CancellationToken cancellationToken = default)
     {
         EnsureRunning();
+        var prepared = await PrepareStartAsync(scenarioId, inputs, cancellationToken);
+        var now = _time.GetUtcNow();
+        var (process, token) = NewProcess(prepared, now, parentId: null, depth: 0, originKey);
+
+        await using (var write = await _store.BeginWriteAsync(cancellationToken))
+        {
+            if (originKey is not null && await write.GetProcessByOriginAsync(originKey) is { } existing)
+            {
+                return existing.Id;
+            }
+
+            await write.InsertProcessAsync(process);
+            await write.UpsertTokenAsync(token);
+            await write.AddJournalAsync(Journal(process.Id, JournalLevel.Info,
+                $"Процесс запущен{(origin is null ? "" : $" ({origin})")}: сценарий «{prepared.Scenario.Name}», " +
+                $"версия {prepared.Scenario.Version}."));
+            await write.CommitAsync();
+        }
+
+        Notify(process.Id);
+        Enqueue(process.Id);
+        return process.Id;
+    }
+
+    /// <summary>Загрузить и проверить сценарий, собрать начальные переменные.</summary>
+    internal async Task<PreparedStart> PrepareStartAsync(string scenarioId, JsonObject? inputs,
+        CancellationToken cancellationToken = default)
+    {
         var stored = await _store.GetScenarioAsync(scenarioId, cancellationToken)
                      ?? throw new EngineOperationException("Сценарий не найден.");
         var definition = PepaJson.Deserialize<ScenarioDefinition>(stored.DefinitionJson);
@@ -132,41 +172,7 @@ public sealed partial class ProcessEngine : IAsyncDisposable
 
         var variables = BuildVariables(definition, inputs);
         var start = definition.Nodes.First(n => _registry.FindDescriptor(n.Type)?.IsStart == true);
-        var now = _time.GetUtcNow();
-        var process = new ProcessRecord
-        {
-            Id = NewId(),
-            ScenarioId = stored.Id,
-            ScenarioName = stored.Name,
-            ScenarioVersion = stored.Version,
-            DefinitionJson = stored.DefinitionJson,
-            Status = ProcessStatus.Running,
-            Variables = variables,
-            StepBudget = _options.DefaultStepBudget,
-            CreatedAt = now,
-            UpdatedAt = now,
-        };
-        var token = new TokenRecord
-        {
-            Id = NewId(),
-            ProcessId = process.Id,
-            NodeId = start.Id,
-            State = TokenState.Ready,
-            CreatedAt = now,
-        };
-
-        await using (var write = await _store.BeginWriteAsync(cancellationToken))
-        {
-            await write.InsertProcessAsync(process);
-            await write.UpsertTokenAsync(token);
-            await write.AddJournalAsync(Journal(process.Id, JournalLevel.Info,
-                $"Процесс запущен: сценарий «{stored.Name}», версия {stored.Version}."));
-            await write.CommitAsync();
-        }
-
-        Notify(process.Id);
-        Enqueue(process.Id);
-        return process.Id;
+        return new PreparedStart(stored, definition, variables, start);
     }
 
     private static JsonObject BuildVariables(ScenarioDefinition definition, JsonObject? inputs)

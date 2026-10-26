@@ -32,6 +32,16 @@ public sealed class FaultInjectingStore(IPepaStore inner) : IPepaStore
     public Task<IReadOnlyList<string>> GetRunnableProcessIdsAsync(DateTimeOffset now, CancellationToken cancellationToken = default) => inner.GetRunnableProcessIdsAsync(now, cancellationToken);
     public Task<IReadOnlyDictionary<string, ProcessRecord>> GetLatestProcessPerScenarioAsync(CancellationToken cancellationToken = default) => inner.GetLatestProcessPerScenarioAsync(cancellationToken);
     public Task<IReadOnlyDictionary<string, string>> GetSettingsAsync(CancellationToken cancellationToken = default) => inner.GetSettingsAsync(cancellationToken);
+    public Task<IReadOnlyList<ProcessRecord>> GetChildProcessesAsync(string parentProcessId, CancellationToken cancellationToken = default) => inner.GetChildProcessesAsync(parentProcessId, cancellationToken);
+    public Task<EventRecord?> GetEventAsync(long id, CancellationToken cancellationToken = default) => inner.GetEventAsync(id, cancellationToken);
+    public Task<IReadOnlyList<EventRecord>> ListEventsAsync(EventQuery query, CancellationToken cancellationToken = default) => inner.ListEventsAsync(query, cancellationToken);
+    public Task<SubscriptionRecord?> GetSubscriptionAsync(long id, CancellationToken cancellationToken = default) => inner.GetSubscriptionAsync(id, cancellationToken);
+    public Task<IReadOnlyList<SubscriptionRecord>> GetActiveSubscriptionsAsync(string source, CancellationToken cancellationToken = default) => inner.GetActiveSubscriptionsAsync(source, cancellationToken);
+    public Task<IReadOnlyList<SubscriptionRecord>> GetSubscriptionsAsync(string processId, CancellationToken cancellationToken = default) => inner.GetSubscriptionsAsync(processId, cancellationToken);
+    public Task<IReadOnlyList<ResourceRecord>> ListResourcesAsync(CancellationToken cancellationToken = default) => inner.ListResourcesAsync(cancellationToken);
+    public Task<IReadOnlyList<ResourceWaiterRecord>> ListResourceWaitersAsync(CancellationToken cancellationToken = default) => inner.ListResourceWaitersAsync(cancellationToken);
+    public Task<IReadOnlyList<TriggerRecord>> ListTriggersAsync(string? scenarioId = null, CancellationToken cancellationToken = default) => inner.ListTriggersAsync(scenarioId, cancellationToken);
+    public Task<TriggerRecord?> GetTriggerAsync(string id, CancellationToken cancellationToken = default) => inner.GetTriggerAsync(id, cancellationToken);
 
     public async Task<IStoreWrite> BeginWriteAsync(CancellationToken cancellationToken = default) =>
         new FaultInjectingWrite(await inner.BeginWriteAsync(cancellationToken), this);
@@ -60,6 +70,27 @@ public sealed class FaultInjectingStore(IPepaStore inner) : IPepaStore
 
         public Task AddJournalAsync(JournalEntry entry) => inner.AddJournalAsync(entry);
         public Task SetSettingAsync(string key, string value) => inner.SetSettingAsync(key, value);
+        public Task<ProcessRecord?> GetProcessByOriginAsync(string originKey) => inner.GetProcessByOriginAsync(originKey);
+        public Task<ProcessRecord?> GetProcessAsync(string id) => inner.GetProcessAsync(id);
+        public Task<long?> TryInsertEventAsync(EventRecord record) => inner.TryInsertEventAsync(record);
+        public Task<EventRecord?> FindEventByExternalIdAsync(string source, string externalId) => inner.FindEventByExternalIdAsync(source, externalId);
+        public Task UpdateEventAsync(EventRecord record) => inner.UpdateEventAsync(record);
+        public Task<IReadOnlyList<EventRecord>> GetEventsForSubscriptionAsync(long subscriptionId) => inner.GetEventsForSubscriptionAsync(subscriptionId);
+        public Task<long> InsertSubscriptionAsync(SubscriptionRecord record) => inner.InsertSubscriptionAsync(record);
+        public Task<bool> TrySetSubscriptionStateAsync(long id, SubscriptionState expected, SubscriptionState state, long? eventId) => inner.TrySetSubscriptionStateAsync(id, expected, state, eventId);
+        public Task<SubscriptionRecord?> GetSubscriptionAsync(long id) => inner.GetSubscriptionAsync(id);
+        public Task<IReadOnlyList<SubscriptionRecord>> GetSubscriptionsAsync(string processId) => inner.GetSubscriptionsAsync(processId);
+        public Task<ResourceRecord?> GetResourceAsync(string key) => inner.GetResourceAsync(key);
+        public Task UpsertResourceAsync(ResourceRecord resource) => inner.UpsertResourceAsync(resource);
+        public Task<IReadOnlyList<ResourceRecord>> GetResourcesHeldByAsync(string processId) => inner.GetResourcesHeldByAsync(processId);
+        public Task<IReadOnlyList<ResourceRecord>> GetAllResourcesAsync() => inner.GetAllResourcesAsync();
+        public Task<IReadOnlyList<ResourceWaiterRecord>> GetWaitersAsync(string resourceKey) => inner.GetWaitersAsync(resourceKey);
+        public Task<IReadOnlyList<ResourceWaiterRecord>> GetAllWaitersAsync() => inner.GetAllWaitersAsync();
+        public Task AddWaiterAsync(ResourceWaiterRecord waiter) => inner.AddWaiterAsync(waiter);
+        public Task RemoveWaiterAsync(string resourceKey, string processId) => inner.RemoveWaiterAsync(resourceKey, processId);
+        public Task RemoveWaitersOfProcessAsync(string processId) => inner.RemoveWaitersOfProcessAsync(processId);
+        public Task SaveTriggerAsync(TriggerRecord trigger) => inner.SaveTriggerAsync(trigger);
+        public Task<bool> DeleteTriggerAsync(string id) => inner.DeleteTriggerAsync(id);
 
         public Task CommitAsync()
         {

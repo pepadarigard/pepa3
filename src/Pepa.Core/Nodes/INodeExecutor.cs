@@ -50,6 +50,15 @@ public sealed record NodeExecutionContext
     public required int Attempt { get; init; }
     public required TimeProvider Time { get; init; }
 
+    /// <summary>Память блока в этом процессе (например, позиция цикла). null — блок ещё ничего не запоминал.</summary>
+    public JsonObject? Memory { get; init; }
+
+    /// <summary>Сценарий процесса (только для чтения) — блокам, которым важна структура схемы, например циклу.</summary>
+    public ScenarioGraph? Graph { get; init; }
+
+    /// <summary>Из какого блока процесс пришёл в этот; null — начало процесса.</summary>
+    public string? EnteredFrom { get; init; }
+
     public string? GetString(string name) => Input.GetString(name);
 
     public string RequireString(string name) =>
@@ -74,7 +83,13 @@ public abstract record NodeResult
         IReadOnlyDictionary<string, JsonNode?> VariableUpdates,
         JsonObject? Output,
         string? Message,
-        MessageLevel Level = MessageLevel.Info) : NodeResult;
+        MessageLevel Level = MessageLevel.Info) : NodeResult
+    {
+        /// <summary>Новая память блока (если <see cref="ReplaceMemory"/>); null вместе с ReplaceMemory — очистить.</summary>
+        public JsonObject? Memory { get; init; }
+
+        public bool ReplaceMemory { get; init; }
+    }
 
     /// <summary>Действие подтверждено НЕ выполненным. Повтор безопасен.</summary>
     public sealed record Failure(string Error, bool Retryable = true) : NodeResult;
@@ -87,6 +102,24 @@ public abstract record NodeResult
 
     /// <summary>Завершить процесс.</summary>
     public sealed record Finish(bool Succeeded, string? Message) : NodeResult;
+
+    // ───── Действия платформы: применяются движком в той же транзакции, что и итог шага ─────
+
+    /// <summary>Ждать подходящее событие (или тайм-аут). Порты блока: «event» и «timeout».</summary>
+    public sealed record WaitForEvent(EventSubscriptionSpec Subscription, DateTimeOffset? TimeoutAt) : NodeResult;
+
+    /// <summary>Занять ресурс: сразу, если свободен, иначе встать в очередь. Порты: «out» и «timeout».</summary>
+    public sealed record AcquireResource(string Key, string? Title, DateTimeOffset? TimeoutAt) : NodeResult;
+
+    /// <summary>Освободить ресурс, если он занят этим процессом. Затем порт «out».</summary>
+    public sealed record ReleaseResource(string Key) : NodeResult;
+
+    /// <summary>Опубликовать событие (с ключом дедупликации). Затем порт «out».</summary>
+    public sealed record PublishEvent(EventInput Event) : NodeResult;
+
+    /// <summary>Запустить другой сценарий отдельным процессом; при <paramref name="WaitForCompletion"/> — дождаться его завершения.</summary>
+    public sealed record StartChild(string ScenarioId, JsonObject? Inputs, bool WaitForCompletion, DateTimeOffset? TimeoutAt, string? SaveTo)
+        : NodeResult;
 
     public static Success Ok(string port = Ports.Out, string? message = null) =>
         new(port, EmptyUpdates, null, message);

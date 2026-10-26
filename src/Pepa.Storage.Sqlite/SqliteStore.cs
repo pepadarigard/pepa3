@@ -1,9 +1,8 @@
 using System.Globalization;
 using System.Text;
-using System.Text.Json.Nodes;
 using Microsoft.Data.Sqlite;
-using Pepa.Core.Nodes;
 using Pepa.Engine.Persistence;
+using static Pepa.Storage.Sqlite.SqliteMapping;
 
 namespace Pepa.Storage.Sqlite;
 
@@ -13,7 +12,6 @@ namespace Pepa.Storage.Sqlite;
 /// </summary>
 public sealed partial class SqliteStore : IPepaStore
 {
-    private const string DateFormat = "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'";
     private readonly string _connectionString;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
 
@@ -61,7 +59,7 @@ public sealed partial class SqliteStore : IPepaStore
         }
     }
 
-    // ───────────────────────────── Чтение ─────────────────────────────
+    // ───────────────────────────── Сценарии ─────────────────────────────
 
     public Task<IReadOnlyList<StoredScenario>> ListScenariosAsync(CancellationToken cancellationToken = default) =>
         QueryAsync("SELECT * FROM scenarios ORDER BY updated_at DESC;", null, ReadScenario, cancellationToken);
@@ -69,6 +67,8 @@ public sealed partial class SqliteStore : IPepaStore
     public async Task<StoredScenario?> GetScenarioAsync(string id, CancellationToken cancellationToken = default) =>
         (await QueryAsync("SELECT * FROM scenarios WHERE id = $id;", c => c.Parameters.AddWithValue("$id", id),
             ReadScenario, cancellationToken)).FirstOrDefault();
+
+    // ───────────────────────────── Процессы ─────────────────────────────
 
     public async Task<ProcessRecord?> GetProcessAsync(string id, CancellationToken cancellationToken = default) =>
         (await QueryAsync("SELECT * FROM processes WHERE id = $id;", c => c.Parameters.AddWithValue("$id", id),
@@ -80,9 +80,7 @@ public sealed partial class SqliteStore : IPepaStore
         var sql = new StringBuilder("SELECT * FROM processes WHERE 1 = 1");
         if (query.Statuses is { Count: > 0 } statuses)
         {
-            sql.Append(" AND status IN (")
-                .Append(string.Join(", ", statuses.Select((_, i) => $"$s{i}")))
-                .Append(')');
+            sql.Append(" AND status IN (").Append(string.Join(", ", statuses.Select((_, i) => $"$s{i}"))).Append(')');
         }
 
         if (query.ScenarioId is not null)
@@ -117,6 +115,11 @@ public sealed partial class SqliteStore : IPepaStore
             command.Parameters.AddWithValue("$limit", query.Limit);
         }, ReadProcess, cancellationToken);
     }
+
+    public Task<IReadOnlyList<ProcessRecord>> GetChildProcessesAsync(string parentProcessId,
+        CancellationToken cancellationToken = default) =>
+        QueryAsync("SELECT * FROM processes WHERE parent_process_id = $p ORDER BY created_at;",
+            c => c.Parameters.AddWithValue("$p", parentProcessId), ReadProcess, cancellationToken);
 
     public Task<IReadOnlyList<TokenRecord>> GetTokensAsync(string processId, CancellationToken cancellationToken = default) =>
         QueryAsync("SELECT * FROM tokens WHERE process_id = $p ORDER BY created_at;",
@@ -170,7 +173,13 @@ public sealed partial class SqliteStore : IPepaStore
         QueryAsync("""
                    SELECT DISTINCT p.id FROM processes p JOIN tokens t ON t.process_id = p.id
                    WHERE (p.status = 'Waiting' AND t.state = 'Waiting' AND t.wake_at <= $now)
-                      OR (p.status = 'Running' AND (t.state = 'Ready' OR (t.state = 'Waiting' AND t.wake_at <= $now)));
+                      OR (p.status = 'Running' AND (t.state = 'Ready' OR (t.state = 'Waiting' AND t.wake_at <= $now)))
+                      OR (p.status IN ('Waiting', 'Running') AND t.state = 'Waiting' AND t.wait_kind = 'Event'
+                          AND EXISTS (SELECT 1 FROM subscriptions s
+                                      WHERE s.step_id = t.waiting_step_id AND s.state = 'Fulfilled'))
+                      OR (p.status IN ('Waiting', 'Running') AND t.state = 'Waiting' AND t.wait_kind = 'Resource'
+                          AND EXISTS (SELECT 1 FROM resources r
+                                      WHERE r.key = t.wait_ref AND (r.holder_process_id = p.id OR r.holder_process_id IS NULL)));
                    """,
             c => c.Parameters.AddWithValue("$now", Date(now)), r => r.GetString(0), cancellationToken);
 
@@ -190,6 +199,83 @@ public sealed partial class SqliteStore : IPepaStore
 
         return result;
     }
+
+    // ───────────────────────────── События ─────────────────────────────
+
+    public async Task<EventRecord?> GetEventAsync(long id, CancellationToken cancellationToken = default) =>
+        (await QueryAsync("SELECT * FROM events WHERE id = $id;", c => c.Parameters.AddWithValue("$id", id),
+            ReadEvent, cancellationToken)).FirstOrDefault();
+
+    public Task<IReadOnlyList<EventRecord>> ListEventsAsync(EventQuery query, CancellationToken cancellationToken = default)
+    {
+        var sql = new StringBuilder("SELECT * FROM events WHERE 1 = 1");
+        if (query.States is { Count: > 0 } states)
+        {
+            sql.Append(" AND state IN (").Append(string.Join(", ", states.Select((_, i) => $"$s{i}"))).Append(')');
+        }
+
+        if (query.ProcessId is not null)
+        {
+            sql.Append(" AND process_id = $process");
+        }
+
+        // Для «необработанных» — в порядке поступления, иначе — сначала новые.
+        sql.Append(query.States is { Count: 1 } single && single.Contains(EventState.Received)
+            ? " ORDER BY id LIMIT $limit;"
+            : " ORDER BY id DESC LIMIT $limit;");
+        return QueryAsync(sql.ToString(), command =>
+        {
+            var i = 0;
+            foreach (var state in query.States ?? [])
+            {
+                command.Parameters.AddWithValue($"$s{i++}", state.ToString());
+            }
+
+            if (query.ProcessId is not null)
+            {
+                command.Parameters.AddWithValue("$process", query.ProcessId);
+            }
+
+            command.Parameters.AddWithValue("$limit", query.Limit);
+        }, ReadEvent, cancellationToken);
+    }
+
+    public async Task<SubscriptionRecord?> GetSubscriptionAsync(long id, CancellationToken cancellationToken = default) =>
+        (await QueryAsync("SELECT * FROM subscriptions WHERE id = $id;", c => c.Parameters.AddWithValue("$id", id),
+            ReadSubscription, cancellationToken)).FirstOrDefault();
+
+    public Task<IReadOnlyList<SubscriptionRecord>> GetActiveSubscriptionsAsync(string source,
+        CancellationToken cancellationToken = default) =>
+        QueryAsync("SELECT * FROM subscriptions WHERE state = 'Active' AND source = $s ORDER BY id;",
+            c => c.Parameters.AddWithValue("$s", source), ReadSubscription, cancellationToken);
+
+    public Task<IReadOnlyList<SubscriptionRecord>> GetSubscriptionsAsync(string processId,
+        CancellationToken cancellationToken = default) =>
+        QueryAsync("SELECT * FROM subscriptions WHERE process_id = $p ORDER BY id;",
+            c => c.Parameters.AddWithValue("$p", processId), ReadSubscription, cancellationToken);
+
+    // ───────────────────────────── Ресурсы ─────────────────────────────
+
+    public Task<IReadOnlyList<ResourceRecord>> ListResourcesAsync(CancellationToken cancellationToken = default) =>
+        QueryAsync("SELECT * FROM resources ORDER BY key;", null, ReadResource, cancellationToken);
+
+    public Task<IReadOnlyList<ResourceWaiterRecord>> ListResourceWaitersAsync(CancellationToken cancellationToken = default) =>
+        QueryAsync($"{WaiterSelect} ORDER BY w.resource_key, w.priority DESC, w.id;", null, ReadWaiter, cancellationToken);
+
+    // ───────────────────────────── Триггеры ─────────────────────────────
+
+    public Task<IReadOnlyList<TriggerRecord>> ListTriggersAsync(string? scenarioId = null,
+        CancellationToken cancellationToken = default) =>
+        scenarioId is null
+            ? QueryAsync("SELECT * FROM triggers ORDER BY created_at;", null, ReadTrigger, cancellationToken)
+            : QueryAsync("SELECT * FROM triggers WHERE scenario_id = $s ORDER BY created_at;",
+                c => c.Parameters.AddWithValue("$s", scenarioId), ReadTrigger, cancellationToken);
+
+    public async Task<TriggerRecord?> GetTriggerAsync(string id, CancellationToken cancellationToken = default) =>
+        (await QueryAsync("SELECT * FROM triggers WHERE id = $id;", c => c.Parameters.AddWithValue("$id", id),
+            ReadTrigger, cancellationToken)).FirstOrDefault();
+
+    // ───────────────────────────── Настройки ─────────────────────────────
 
     public async Task<IReadOnlyDictionary<string, string>> GetSettingsAsync(CancellationToken cancellationToken = default)
     {
@@ -237,17 +323,7 @@ public sealed partial class SqliteStore : IPepaStore
         Func<SqliteDataReader, T> map, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
-        await using var command = connection.CreateCommand();
-        command.CommandText = sql;
-        bind?.Invoke(command);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        var result = new List<T>();
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            result.Add(map(reader));
-        }
-
-        return result;
+        return await SqliteMapping.QueryAsync(connection, null, sql, bind, map, cancellationToken);
     }
 
     internal static async Task ExecuteAsync(SqliteConnection connection, SqliteTransaction? transaction, string sql,
@@ -267,118 +343,4 @@ public sealed partial class SqliteStore : IPepaStore
         command.CommandText = sql;
         return await command.ExecuteScalarAsync(cancellationToken);
     }
-
-    internal static string Date(DateTimeOffset value) =>
-        value.UtcDateTime.ToString(DateFormat, CultureInfo.InvariantCulture);
-
-    internal static object DateOrNull(DateTimeOffset? value) => value is { } v ? Date(v) : DBNull.Value;
-
-    internal static object JsonOrNull(JsonNode? value) => value is null ? DBNull.Value : value.ToJsonString();
-
-    internal static object OrNull(string? value) => value is null ? DBNull.Value : value;
-
-    internal static object OrNull(long? value) => value is { } v ? v : DBNull.Value;
-
-    private static DateTimeOffset ParseDate(string value) =>
-        DateTimeOffset.ParseExact(value, DateFormat, CultureInfo.InvariantCulture,
-            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
-
-    private static string? Str(SqliteDataReader r, string column)
-    {
-        var ordinal = r.GetOrdinal(column);
-        return r.IsDBNull(ordinal) ? null : r.GetString(ordinal);
-    }
-
-    private static long? Long(SqliteDataReader r, string column)
-    {
-        var ordinal = r.GetOrdinal(column);
-        return r.IsDBNull(ordinal) ? null : r.GetInt64(ordinal);
-    }
-
-    private static DateTimeOffset? DateOf(SqliteDataReader r, string column) =>
-        Str(r, column) is { } s ? ParseDate(s) : null;
-
-    private static JsonObject? JsonOf(SqliteDataReader r, string column) =>
-        Str(r, column) is { } s ? JsonNode.Parse(s) as JsonObject : null;
-
-    private static TEnum EnumOf<TEnum>(SqliteDataReader r, string column) where TEnum : struct, Enum =>
-        Enum.Parse<TEnum>(Str(r, column)!);
-
-    private static StoredScenario ReadScenario(SqliteDataReader r) => new()
-    {
-        Id = Str(r, "id")!,
-        Name = Str(r, "name")!,
-        Description = Str(r, "description")!,
-        DefinitionJson = Str(r, "definition")!,
-        Version = (int)Long(r, "version")!,
-        CreatedAt = DateOf(r, "created_at")!.Value,
-        UpdatedAt = DateOf(r, "updated_at")!.Value,
-    };
-
-    private static ProcessRecord ReadProcess(SqliteDataReader r) => new()
-    {
-        Id = Str(r, "id")!,
-        ScenarioId = Str(r, "scenario_id")!,
-        ScenarioName = Str(r, "scenario_name")!,
-        ScenarioVersion = (int)Long(r, "scenario_version")!,
-        DefinitionJson = Str(r, "definition")!,
-        Status = EnumOf<ProcessStatus>(r, "status"),
-        Attention = EnumOf<AttentionKind>(r, "attention"),
-        PauseReason = EnumOf<PauseReason>(r, "pause_reason"),
-        StatusMessage = Str(r, "status_message"),
-        AttentionStepId = Long(r, "attention_step_id"),
-        Variables = JsonOf(r, "variables") ?? new JsonObject(),
-        LastError = JsonOf(r, "last_error"),
-        StepCount = (int)Long(r, "step_count")!,
-        StepBudget = (int)Long(r, "step_budget")!,
-        CreatedAt = DateOf(r, "created_at")!.Value,
-        UpdatedAt = DateOf(r, "updated_at")!.Value,
-        FinishedAt = DateOf(r, "finished_at"),
-    };
-
-    private static TokenRecord ReadToken(SqliteDataReader r) => new()
-    {
-        Id = Str(r, "id")!,
-        ProcessId = Str(r, "process_id")!,
-        NodeId = Str(r, "node_id")!,
-        State = EnumOf<TokenState>(r, "state"),
-        WaitKind = EnumOf<WaitKind>(r, "wait_kind"),
-        WakeAt = DateOf(r, "wake_at"),
-        Attempt = (int)Long(r, "attempt")!,
-        WaitingStepId = Long(r, "waiting_step_id"),
-        CreatedAt = DateOf(r, "created_at")!.Value,
-    };
-
-    private static StepRecord ReadStep(SqliteDataReader r) => new()
-    {
-        Id = Long(r, "id")!.Value,
-        ProcessId = Str(r, "process_id")!,
-        TokenId = Str(r, "token_id")!,
-        NodeId = Str(r, "node_id")!,
-        NodeType = Str(r, "node_type")!,
-        NodeLabel = Str(r, "node_label")!,
-        Attempt = (int)Long(r, "attempt")!,
-        Effect = EnumOf<NodeEffect>(r, "effect"),
-        State = EnumOf<StepState>(r, "state"),
-        Input = JsonOf(r, "input"),
-        Checkpoint = JsonOf(r, "checkpoint"),
-        Output = JsonOf(r, "output"),
-        Port = Str(r, "port"),
-        Error = Str(r, "error"),
-        Resolution = Str(r, "resolution"),
-        PlannedAt = DateOf(r, "planned_at")!.Value,
-        StartedAt = DateOf(r, "started_at"),
-        FinishedAt = DateOf(r, "finished_at"),
-    };
-
-    private static JournalEntry ReadJournal(SqliteDataReader r) => new()
-    {
-        Id = Long(r, "id")!.Value,
-        ProcessId = Str(r, "process_id")!,
-        StepId = Long(r, "step_id"),
-        NodeId = Str(r, "node_id"),
-        At = DateOf(r, "at")!.Value,
-        Level = EnumOf<JournalLevel>(r, "level"),
-        Message = Str(r, "message")!,
-    };
 }

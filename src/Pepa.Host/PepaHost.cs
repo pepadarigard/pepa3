@@ -80,7 +80,7 @@ public sealed class PepaHost : IAsyncDisposable
         var settings = await SettingsService.LoadAsync(store, dataDirectory,
             options.DefaultWorkspaceRoot ?? HostPaths.DefaultWorkspace(dataDirectory));
         var workspace = new Workspace(() => settings.Current.WorkspaceRoot);
-        var registry = new NodeRegistry().RegisterLogicNodes().RegisterFileNodes(workspace);
+        var registry = new NodeRegistry().RegisterLogicNodes().RegisterFlowNodes().RegisterFileNodes(workspace);
         var token = options.Token ?? Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
         var hostContext = new HostContext
         {

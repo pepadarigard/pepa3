@@ -15,6 +15,7 @@ public interface IPepaStore
     // Процессы
     Task<ProcessRecord?> GetProcessAsync(string id, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<ProcessRecord>> ListProcessesAsync(ProcessQuery query, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<ProcessRecord>> GetChildProcessesAsync(string parentProcessId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<TokenRecord>> GetTokensAsync(string processId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<TokenRecord>> GetTokensAsync(IReadOnlyCollection<string> processIds, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<StepRecord>> GetStepsAsync(string processId, CancellationToken cancellationToken = default);
@@ -25,13 +26,28 @@ public interface IPepaStore
     Task<IReadOnlyList<JournalEntry>> GetJournalAsync(string processId, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Процессы, которым есть что делать: «ждёт» с наступившим сроком или «выполняется» с готовым маркером.
-    /// Приостановленные и требующие решения сюда не попадают никогда.
+    /// Процессы, которым есть что делать: «ждёт» с наступившим сроком, получившие событие или ресурс,
+    /// «выполняется» с готовым маркером. Приостановленные и требующие решения сюда не попадают никогда.
     /// </summary>
     Task<IReadOnlyList<string>> GetRunnableProcessIdsAsync(DateTimeOffset now, CancellationToken cancellationToken = default);
 
     /// <summary>Последний запуск каждого сценария (для списка сценариев).</summary>
     Task<IReadOnlyDictionary<string, ProcessRecord>> GetLatestProcessPerScenarioAsync(CancellationToken cancellationToken = default);
+
+    // События и подписки
+    Task<EventRecord?> GetEventAsync(long id, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<EventRecord>> ListEventsAsync(EventQuery query, CancellationToken cancellationToken = default);
+    Task<SubscriptionRecord?> GetSubscriptionAsync(long id, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<SubscriptionRecord>> GetActiveSubscriptionsAsync(string source, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<SubscriptionRecord>> GetSubscriptionsAsync(string processId, CancellationToken cancellationToken = default);
+
+    // Ресурсы
+    Task<IReadOnlyList<ResourceRecord>> ListResourcesAsync(CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<ResourceWaiterRecord>> ListResourceWaitersAsync(CancellationToken cancellationToken = default);
+
+    // Триггеры
+    Task<IReadOnlyList<TriggerRecord>> ListTriggersAsync(string? scenarioId = null, CancellationToken cancellationToken = default);
+    Task<TriggerRecord?> GetTriggerAsync(string id, CancellationToken cancellationToken = default);
 
     // Настройки
     Task<IReadOnlyDictionary<string, string>> GetSettingsAsync(CancellationToken cancellationToken = default);
@@ -39,7 +55,10 @@ public interface IPepaStore
     Task<IStoreWrite> BeginWriteAsync(CancellationToken cancellationToken = default);
 }
 
-/// <summary>Транзакция записи. Без <see cref="CommitAsync"/> все изменения отменяются.</summary>
+/// <summary>
+/// Транзакция записи. Без <see cref="CommitAsync"/> все изменения отменяются.
+/// Методы чтения внутри транзакции видят её собственные изменения и не пересекаются с другими записями.
+/// </summary>
 public interface IStoreWrite : IAsyncDisposable
 {
     Task SaveScenarioAsync(StoredScenario scenario, int? expectedVersion);
@@ -47,11 +66,43 @@ public interface IStoreWrite : IAsyncDisposable
 
     Task InsertProcessAsync(ProcessRecord process);
     Task UpdateProcessAsync(ProcessRecord process);
+    Task<ProcessRecord?> GetProcessByOriginAsync(string originKey);
+    Task<ProcessRecord?> GetProcessAsync(string id);
     Task UpsertTokenAsync(TokenRecord token);
     Task<long> InsertStepAsync(StepRecord step);
     Task UpdateStepAsync(StepRecord step);
     Task AddJournalAsync(JournalEntry entry);
     Task SetSettingAsync(string key, string value);
+
+    // События: вставка с защитой от повторов (null — такое событие уже есть).
+    Task<long?> TryInsertEventAsync(EventRecord record);
+    Task<EventRecord?> FindEventByExternalIdAsync(string source, string externalId);
+    Task UpdateEventAsync(EventRecord record);
+    Task<IReadOnlyList<EventRecord>> GetEventsForSubscriptionAsync(long subscriptionId);
+
+    Task<long> InsertSubscriptionAsync(SubscriptionRecord record);
+
+    /// <summary>Сменить состояние подписки, только если оно сейчас <paramref name="expected"/>.</summary>
+    Task<bool> TrySetSubscriptionStateAsync(long id, SubscriptionState expected, SubscriptionState state, long? eventId);
+    Task<SubscriptionRecord?> GetSubscriptionAsync(long id);
+    Task<IReadOnlyList<SubscriptionRecord>> GetSubscriptionsAsync(string processId);
+
+    // Ресурсы
+    Task<ResourceRecord?> GetResourceAsync(string key);
+    Task UpsertResourceAsync(ResourceRecord resource);
+    Task<IReadOnlyList<ResourceRecord>> GetResourcesHeldByAsync(string processId);
+    Task<IReadOnlyList<ResourceRecord>> GetAllResourcesAsync();
+
+    /// <summary>Очередь за ресурсом по порядку (с состоянием процессов).</summary>
+    Task<IReadOnlyList<ResourceWaiterRecord>> GetWaitersAsync(string resourceKey);
+    Task<IReadOnlyList<ResourceWaiterRecord>> GetAllWaitersAsync();
+    Task AddWaiterAsync(ResourceWaiterRecord waiter);
+    Task RemoveWaiterAsync(string resourceKey, string processId);
+    Task RemoveWaitersOfProcessAsync(string processId);
+
+    // Триггеры
+    Task SaveTriggerAsync(TriggerRecord trigger);
+    Task<bool> DeleteTriggerAsync(string id);
 
     Task CommitAsync();
 }

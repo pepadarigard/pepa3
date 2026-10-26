@@ -22,6 +22,12 @@ public enum PortKind
 
     /// <summary>Порт для обработки ошибки. Подключать необязательно.</summary>
     Error,
+
+    /// <summary>
+    /// Необязательный обычный выход (например, «тайм-аут»). Если он не подключён, а процесс должен пойти по нему,
+    /// шаг считается невыполненным, и процесс останавливается с понятной причиной.
+    /// </summary>
+    Optional,
 }
 
 public sealed record PortDescriptor(string Id, string Label, PortKind Kind = PortKind.Normal)
@@ -58,6 +64,18 @@ public enum FieldKind
 
     /// <summary>Время суток ЧЧ:ММ.</summary>
     Time,
+
+    /// <summary>
+    /// Условие, которое проверяется позже (при сопоставлении события): синтаксис проверяется сразу,
+    /// значение не вычисляется при выполнении шага.
+    /// </summary>
+    MatchCondition,
+
+    /// <summary>Идентификатор сценария (выбор из списка).</summary>
+    Scenario,
+
+    /// <summary>Длительность в секундах.</summary>
+    Seconds,
 }
 
 public sealed record SelectOption(string Value, string Label);
@@ -111,7 +129,7 @@ public sealed record NodeTypeDescriptor
 
     /// <summary>Порты успешного завершения (не порты ошибки).</summary>
     [JsonIgnore]
-    public IEnumerable<PortDescriptor> SuccessOutputs => Outputs.Where(p => p.Kind == PortKind.Normal);
+    public IEnumerable<PortDescriptor> SuccessOutputs => Outputs.Where(p => p.Kind != PortKind.Error);
 }
 
 public sealed record NodeCategory(string Id, string Title, int Order);
@@ -119,5 +137,6 @@ public sealed record NodeCategory(string Id, string Title, int Order);
 public static class NodeCategories
 {
     public static readonly NodeCategory Logic = new("logic", "Логика", 0);
+    public static readonly NodeCategory Flow = new("flow", "События и процессы", 5);
     public static readonly NodeCategory Files = new("files", "Файлы и папки", 10);
 }

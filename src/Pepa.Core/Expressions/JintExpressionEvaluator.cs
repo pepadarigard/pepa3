@@ -124,6 +124,14 @@ public sealed class JintExpressionEvaluator(ExpressionLimits? limits = null) : I
         engine.SetValue("vars", parser.Parse(scope.Variables.ToJsonString()));
         engine.SetValue("lastError", scope.LastError is null ? JsValue.Null : parser.Parse(scope.LastError.ToJsonString()));
         engine.SetValue("process", parser.Parse(scope.Process?.ToJsonString() ?? "{}"));
+        if (scope.Extra is not null)
+        {
+            foreach (var (name, value) in scope.Extra)
+            {
+                engine.SetValue(name, value is null ? JsValue.Null : parser.Parse(value.ToJsonString()));
+            }
+        }
+
         return engine;
     }
 

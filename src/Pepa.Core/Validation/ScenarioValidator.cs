@@ -307,7 +307,7 @@ public sealed partial class ScenarioValidator(NodeRegistry registry, IExpression
 
                     break;
 
-                case FieldKind.Expression or FieldKind.Condition:
+                case FieldKind.Expression or FieldKind.Condition or FieldKind.MatchCondition:
                     if (expressions.CheckExpression(text!) is { } expressionError)
                     {
                         error("field.expression", $"{name}, поле «{field.Label}»: {expressionError}", node.Id, null, field.Name);
@@ -315,7 +315,7 @@ public sealed partial class ScenarioValidator(NodeRegistry registry, IExpression
 
                     break;
 
-                case FieldKind.Number:
+                case FieldKind.Number or FieldKind.Seconds:
                     var number = value.AsNumber();
                     if (number is null)
                     {

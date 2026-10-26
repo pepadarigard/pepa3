@@ -16,7 +16,8 @@ public static class LogicNodes
         .Register(new ConditionNode())
         .Register(new SetVariableNode())
         .Register(new LogNode())
-        .Register(new WaitNode());
+        .Register(new WaitNode())
+        .Register(new ForEachNode());
 }
 
 public sealed class StartNode : INodeExecutor

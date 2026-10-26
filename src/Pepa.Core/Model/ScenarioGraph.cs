@@ -50,6 +50,48 @@ public sealed class ScenarioGraph
     public IReadOnlyList<EdgeDefinition> Incoming(string nodeId) =>
         _incoming.TryGetValue(nodeId, out var list) ? list : [];
 
+    /// <summary>
+    /// Блоки «тела цикла»: достижимые из порта <paramref name="port"/> блока <paramref name="nodeId"/> и ведущие обратно в него.
+    /// </summary>
+    public HashSet<string> LoopBody(string nodeId, string port)
+    {
+        var forward = new HashSet<string>(StringComparer.Ordinal);
+        var queue = new Queue<string>();
+        foreach (var edge in Outgoing(nodeId, port))
+        {
+            if (edge.Target != nodeId && forward.Add(edge.Target))
+            {
+                queue.Enqueue(edge.Target);
+            }
+        }
+
+        while (queue.Count > 0)
+        {
+            foreach (var edge in OutgoingAll(queue.Dequeue()))
+            {
+                if (edge.Target != nodeId && forward.Add(edge.Target))
+                {
+                    queue.Enqueue(edge.Target);
+                }
+            }
+        }
+
+        var backward = new HashSet<string>(StringComparer.Ordinal);
+        queue.Enqueue(nodeId);
+        while (queue.Count > 0)
+        {
+            foreach (var edge in Incoming(queue.Dequeue()))
+            {
+                if (edge.Source != nodeId && forward.Contains(edge.Source) && backward.Add(edge.Source))
+                {
+                    queue.Enqueue(edge.Source);
+                }
+            }
+        }
+
+        return backward;
+    }
+
     /// <summary>Единственная связь из порта или null, если порт не подключён.</summary>
     public EdgeDefinition? Next(string nodeId, string port)
     {

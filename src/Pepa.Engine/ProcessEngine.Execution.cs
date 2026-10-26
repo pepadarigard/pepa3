@@ -71,7 +71,27 @@ public sealed partial class ProcessEngine
             var tokens = await _store.GetTokensAsync(processId);
             var now = _time.GetUtcNow();
             var token = tokens.FirstOrDefault(t => t.State == TokenState.Ready)
-                        ?? tokens.FirstOrDefault(t => t.State == TokenState.Waiting && t.WakeAt <= now);
+                        ?? tokens.FirstOrDefault(t => t is { State: TokenState.Waiting, WaitKind: WaitKind.Timer or WaitKind.Retry }
+                                                      && t.WakeAt <= now);
+            if (token is null)
+            {
+                // Ожидание события или ресурса: проверить, не пришло ли то, чего ждём (или тайм-аут).
+                var resolved = false;
+                foreach (var waiting in tokens.Where(t => t is { State: TokenState.Waiting, WaitKind: WaitKind.Event or WaitKind.Resource }))
+                {
+                    if (await TryResolveWaitAsync(process, Graph(process), waiting, now))
+                    {
+                        resolved = true;
+                        break;
+                    }
+                }
+
+                if (resolved)
+                {
+                    continue;
+                }
+            }
+
             if (token is null)
             {
                 if (tokens.All(t => t.State == TokenState.Completed))
@@ -147,6 +167,9 @@ public sealed partial class ProcessEngine
             Variables = (JsonObject)process.Variables.DeepClone(),
             Attempt = token.Attempt,
             Time = _time,
+            Memory = process.Memory?[node.Id]?.DeepClone() as JsonObject,
+            Graph = graph,
+            EnteredFrom = token.FromNodeId,
         };
 
         if (descriptor.Effect == NodeEffect.None)
@@ -318,15 +341,74 @@ public sealed partial class ProcessEngine
     }
 
     /// <summary>
-    /// Применяет итог шага одной транзакцией: состояние шага, переменные, переход маркера, состояние процесса, журнал.
+    /// Применяет итог шага одной транзакцией: состояние шага, переменные, переход маркера, состояние процесса,
+    /// действия платформы (подписки, ресурсы, дочерние процессы, события) и журнал.
     /// </summary>
-    private async Task ApplyResultAsync(ProcessRecord process, ScenarioGraph graph, TokenRecord token,
+    /// <param name="decide">
+    /// Необязательное решение внутри транзакции (например, успел ли прийти ресурс). Если возвращает null —
+    /// ничего не записывается, и метод возвращает false.
+    /// </param>
+    private async Task<bool> ApplyResultAsync(ProcessRecord process, ScenarioGraph graph, TokenRecord token,
         NodeDefinition node, NodeTypeDescriptor descriptor, StepRecord step, NodeResult result, string? resolution,
-        StepState successState = StepState.Succeeded)
+        StepState successState = StepState.Succeeded, Func<IStoreWrite, Task<NodeResult?>>? decide = null,
+        Func<IStoreWrite, long, Task>? extraWrites = null)
+    {
+        var effects = new CommitEffects();
+        var committed = await CommitResultAsync(process, graph, token, node, descriptor, step, result, resolution, successState,
+            decide, extraWrites, effects);
+        if (committed is null)
+        {
+            return false;
+        }
+
+        // Только после того, как транзакция закрыта: последствия сами пишут в хранилище.
+        AfterCommit(committed);
+        await ApplyEffectsAsync(effects);
+        return true;
+    }
+
+    private async Task<ProcessRecord?> CommitResultAsync(ProcessRecord process, ScenarioGraph graph, TokenRecord token,
+        NodeDefinition node, NodeTypeDescriptor descriptor, StepRecord step, NodeResult result, string? resolution,
+        StepState successState, Func<IStoreWrite, Task<NodeResult?>>? decide, Func<IStoreWrite, long, Task>? extraWrites,
+        CommitEffects effects)
     {
         var now = _time.GetUtcNow();
         var label = Label(node, descriptor);
+
+        // Подготовка вне транзакции: дочернему процессу нужен проверенный сценарий.
+        PreparedStart? child = null;
+        if (result is NodeResult.StartChild start)
+        {
+            (child, var problem) = await PrepareChildAsync(process, start);
+            if (problem is not null)
+            {
+                result = problem;
+            }
+        }
+
+        await using var write = await _store.BeginWriteAsync();
+        if (decide is not null)
+        {
+            var decided = await decide(write);
+            if (decided is null)
+            {
+                return null;
+            }
+
+            result = decided;
+        }
+
         result = CheckVariableTypes(result, graph.Definition, descriptor);
+        result = await ResolveIntentAsync(write, process, token, label, result, effects, now);
+
+        // Необязательный выход (например, «Тайм-аут») не подключён — процессу некуда идти: это невыполненный шаг.
+        if (result is NodeResult.Success { Port: var port } routed && descriptor.FindOutput(port) is { Kind: PortKind.Optional } optional &&
+            graph.Next(node.Id, port) is null)
+        {
+            result = NodeResult.Fail(
+                (routed.Message is { Length: > 0 } reason ? reason + " " : "") + $"Выход «{optional.Label}» не подключён.",
+                retryable: false);
+        }
 
         // Итоговые поля шага.
         var finalStep = step with { FinishedAt = now, Resolution = resolution ?? step.Resolution };
@@ -342,6 +424,23 @@ public sealed partial class ProcessEngine
                     FinishedAt = null,
                     Output = new JsonObject { ["until"] = wait.Until.ToString("O") },
                 };
+                break;
+            case NodeResult.WaitForEvent waitEvent:
+                finalStep = finalStep with { State = StepState.Waiting, FinishedAt = null, Output = DescribeWait(waitEvent) };
+                break;
+            case NodeResult.AcquireResource acquire:
+                finalStep = finalStep with
+                {
+                    State = StepState.Waiting,
+                    FinishedAt = null,
+                    Output = new JsonObject { ["resource"] = acquire.Key, ["until"] = acquire.TimeoutAt?.ToString("O") },
+                };
+                break;
+            case NodeResult.StartChild { WaitForCompletion: true }:
+                finalStep = finalStep with { State = StepState.Waiting, FinishedAt = null };
+                break;
+            case NodeResult.StartChild:
+                finalStep = finalStep with { State = successState, Port = Ports.Out };
                 break;
             case NodeResult.Finish:
                 finalStep = finalStep with { State = StepState.Succeeded, Port = null };
@@ -359,7 +458,6 @@ public sealed partial class ProcessEngine
         var t = token;
         var journal = new List<(JournalLevel Level, string Message)>();
 
-        await using var write = await _store.BeginWriteAsync();
         long stepId;
         if (isNew)
         {
@@ -369,6 +467,53 @@ public sealed partial class ProcessEngine
         {
             stepId = finalStep.Id;
             await write.UpdateStepAsync(finalStep);
+        }
+
+        if (extraWrites is not null)
+        {
+            await extraWrites(write, stepId);
+        }
+
+        // Дочерний процесс создаётся в той же транзакции: он начнёт работу только после её подтверждения.
+        string? childId = null;
+        if (result is NodeResult.StartChild startChild && child is not null)
+        {
+            childId = await CreateChildAsync(write, child, process, stepId, now);
+            effects.Enqueue.Add(childId);
+            if (startChild.WaitForCompletion)
+            {
+                await write.UpdateStepAsync(finalStep with
+                {
+                    Id = stepId,
+                    Output = new JsonObject { ["childProcessId"] = childId, ["scenario"] = child.Scenario.Name },
+                });
+                result = new NodeResult.WaitForEvent(new EventSubscriptionSpec
+                {
+                    Source = EventSources.Platform,
+                    EventType = "finished",
+                    CorrelationKey = childId,
+                    SaveTo = startChild.SaveTo,
+                    Purpose = SubscriptionPurpose.ChildProcess,
+                }, startChild.TimeoutAt);
+                journal.Add((JournalLevel.Info,
+                    $"Запущен сценарий «{child.Scenario.Name}» (процесс #{childId[^6..]}), ожидание его завершения."));
+            }
+            else
+            {
+                var updates = new Dictionary<string, JsonNode?>();
+                if (!string.IsNullOrEmpty(startChild.SaveTo))
+                {
+                    updates[startChild.SaveTo] = childId;
+                }
+
+                await write.UpdateStepAsync(finalStep with
+                {
+                    Id = stepId,
+                    Output = new JsonObject { ["childProcessId"] = childId, ["scenario"] = child.Scenario.Name },
+                });
+                result = NodeResult.Ok(Ports.Out, updates, null,
+                    $"Запущен сценарий «{child.Scenario.Name}» (процесс #{childId[^6..]}).");
+            }
         }
 
         switch (result)
@@ -383,12 +528,13 @@ public sealed partial class ProcessEngine
                     break;
                 }
 
-                p = Cleared(p) with { Variables = ApplyUpdates(p.Variables, ok.VariableUpdates), Status = ProcessStatus.Running };
-                t = t with
+                p = Cleared(p) with
                 {
-                    NodeId = edge.Target, State = TokenState.Ready, WaitKind = WaitKind.None, WakeAt = null, Attempt = 1,
-                    WaitingStepId = null,
+                    Variables = ApplyUpdates(p.Variables, ok.VariableUpdates),
+                    Memory = ok.ReplaceMemory ? WithMemory(p.Memory, node.Id, ok.Memory) : p.Memory,
+                    Status = ProcessStatus.Running,
                 };
+                t = Moved(t, edge.Target);
                 if (!string.IsNullOrWhiteSpace(ok.Message))
                 {
                     journal.Add((ok.Level == MessageLevel.Warning ? JournalLevel.Warning : JournalLevel.Info, ok.Message));
@@ -399,9 +545,68 @@ public sealed partial class ProcessEngine
 
             case NodeResult.Wait wait:
                 p = Cleared(p) with { Status = ProcessStatus.Waiting };
-                t = t with { State = TokenState.Waiting, WaitKind = WaitKind.Timer, WakeAt = wait.Until, WaitingStepId = stepId };
+                t = t with { State = TokenState.Waiting, WaitKind = WaitKind.Timer, WakeAt = wait.Until, WaitingStepId = stepId, WaitRef = null };
                 journal.Add((JournalLevel.Info, wait.Message ?? $"Ожидание до {FormatLocal(wait.Until)}."));
                 break;
+
+            case NodeResult.WaitForEvent waitEvent:
+            {
+                var spec = waitEvent.Subscription;
+                var subscriptionId = await write.InsertSubscriptionAsync(new SubscriptionRecord
+                {
+                    ProcessId = p.Id,
+                    TokenId = t.Id,
+                    StepId = stepId,
+                    NodeId = node.Id,
+                    Source = spec.Source,
+                    EventType = string.IsNullOrWhiteSpace(spec.EventType) ? null : spec.EventType,
+                    CorrelationKey = string.IsNullOrEmpty(spec.CorrelationKey) ? null : spec.CorrelationKey,
+                    MatchExpression = string.IsNullOrWhiteSpace(spec.MatchExpression) ? null : spec.MatchExpression,
+                    Priority = spec.Priority,
+                    LookbackSeconds = Math.Max(0, spec.LookbackSeconds),
+                    SaveTo = string.IsNullOrEmpty(spec.SaveTo) ? null : spec.SaveTo,
+                    Purpose = spec.Purpose,
+                    State = SubscriptionState.Active,
+                    CreatedAt = now,
+                    ExpiresAt = waitEvent.TimeoutAt,
+                });
+                p = Cleared(p) with { Status = ProcessStatus.Waiting };
+                t = t with
+                {
+                    State = TokenState.Waiting, WaitKind = WaitKind.Event, WakeAt = waitEvent.TimeoutAt, WaitingStepId = stepId,
+                    WaitRef = subscriptionId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                };
+                if (spec.Purpose == SubscriptionPurpose.Event)
+                {
+                    journal.Add((JournalLevel.Info, $"Ожидание события {DescribeSpec(spec)}" +
+                                                    (waitEvent.TimeoutAt is { } until ? $" до {FormatLocal(until)}." : ".")));
+                }
+
+                effects.Reclaim.Add((spec.Source, now - TimeSpan.FromSeconds(Math.Max(0, spec.LookbackSeconds))));
+                break;
+            }
+
+            case NodeResult.AcquireResource acquire:
+            {
+                await write.AddWaiterAsync(new ResourceWaiterRecord
+                {
+                    ResourceKey = acquire.Key,
+                    ProcessId = p.Id,
+                    TokenId = t.Id,
+                    RequestedAt = now,
+                });
+                var holder = (await write.GetResourceAsync(acquire.Key))?.HolderProcessId;
+                p = Cleared(p) with { Status = ProcessStatus.Waiting };
+                t = t with
+                {
+                    State = TokenState.Waiting, WaitKind = WaitKind.Resource, WakeAt = acquire.TimeoutAt, WaitingStepId = stepId,
+                    WaitRef = acquire.Key,
+                };
+                journal.Add((JournalLevel.Info,
+                    $"Ресурс «{acquire.Key}» занят" + (holder is null ? "" : $" процессом #{holder[^6..]}") +
+                    " — процесс встал в очередь" + (acquire.TimeoutAt is { } until ? $" (не дольше чем до {FormatLocal(until)})." : ".")));
+                break;
+            }
 
             case NodeResult.Finish finish:
                 var finishMessage = finish.Message ?? (finish.Succeeded ? "Процесс завершён успешно." : "Процесс завершён с ошибкой.");
@@ -411,7 +616,7 @@ public sealed partial class ProcessEngine
                     StatusMessage = finishMessage,
                     FinishedAt = now,
                 };
-                t = t with { State = TokenState.Completed, WaitKind = WaitKind.None, WakeAt = null, WaitingStepId = null };
+                t = t with { State = TokenState.Completed, WaitKind = WaitKind.None, WakeAt = null, WaitingStepId = null, WaitRef = null };
                 journal.Add((finish.Succeeded ? JournalLevel.Info : JournalLevel.Error, finishMessage));
                 break;
 
@@ -433,8 +638,8 @@ public sealed partial class ProcessEngine
                 {
                     var delay = TimeSpan.FromSeconds(Math.Max(0, node.Settings.RetryDelaySeconds));
                     t = delay == TimeSpan.Zero
-                        ? t with { State = TokenState.Ready, Attempt = token.Attempt + 1, WaitKind = WaitKind.None, WakeAt = null }
-                        : t with { State = TokenState.Waiting, Attempt = token.Attempt + 1, WaitKind = WaitKind.Retry, WakeAt = now + delay };
+                        ? t with { State = TokenState.Ready, Attempt = token.Attempt + 1, WaitKind = WaitKind.None, WakeAt = null, WaitRef = null }
+                        : t with { State = TokenState.Waiting, Attempt = token.Attempt + 1, WaitKind = WaitKind.Retry, WakeAt = now + delay, WaitRef = null };
                     p = Cleared(p) with { Status = delay == TimeSpan.Zero ? ProcessStatus.Running : ProcessStatus.Waiting };
                     journal.Add((JournalLevel.Warning,
                         $"Шаг {label} не выполнен: {failure.Error} Попытка {token.Attempt + 1} из {maxAttempts}" +
@@ -442,7 +647,7 @@ public sealed partial class ProcessEngine
                 }
                 else if (errorEdge is not null)
                 {
-                    t = t with { NodeId = errorEdge.Target, State = TokenState.Ready, Attempt = 1, WaitKind = WaitKind.None, WakeAt = null };
+                    t = Moved(t, errorEdge.Target);
                     p = Cleared(p) with { Status = ProcessStatus.Running };
                     journal.Add((JournalLevel.Warning, $"Шаг {label} не выполнен: {failure.Error} Процесс продолжен по ветке «Ошибка»."));
                 }
@@ -466,6 +671,11 @@ public sealed partial class ProcessEngine
             journal.Insert(0, (JournalLevel.Info, $"Шаг {label}: {resolution}"));
         }
 
+        if (p.IsTerminal)
+        {
+            journal.AddRange(await OnTerminalAsync(write, p, effects, now));
+        }
+
         await write.UpsertTokenAsync(t);
         await write.UpdateProcessAsync(p);
         foreach (var (level, message) in journal)
@@ -474,7 +684,34 @@ public sealed partial class ProcessEngine
         }
 
         await write.CommitAsync();
-        AfterCommit(p);
+        return p;
+    }
+
+    private static TokenRecord Moved(TokenRecord token, string target) => token with
+    {
+        NodeId = target,
+        FromNodeId = token.NodeId,
+        State = TokenState.Ready,
+        WaitKind = WaitKind.None,
+        WakeAt = null,
+        Attempt = 1,
+        WaitingStepId = null,
+        WaitRef = null,
+    };
+
+    private static JsonObject? WithMemory(JsonObject? memory, string nodeId, JsonObject? value)
+    {
+        var result = (JsonObject?)memory?.DeepClone() ?? new JsonObject();
+        if (value is null)
+        {
+            result.Remove(nodeId);
+        }
+        else
+        {
+            result[nodeId] = value.DeepClone();
+        }
+
+        return result.Count == 0 ? null : result;
     }
 
     private NodeResult CheckVariableTypes(NodeResult result, ScenarioDefinition definition, NodeTypeDescriptor descriptor)
@@ -624,33 +861,57 @@ public sealed partial class ProcessEngine
         var now = _time.GetUtcNow();
         var tokens = await _store.GetTokensAsync(process.Id);
         var openSteps = await _store.GetOpenStepsAsync(process.Id);
+        var message = process.ParentProcessId is not null && process.Status != ProcessStatus.Paused
+            ? "Процесс остановлен."
+            : "Процесс остановлен пользователем.";
         var updated = Cleared(process) with
         {
             Status = ProcessStatus.Cancelled,
-            StatusMessage = "Процесс остановлен пользователем.",
+            StatusMessage = message,
             FinishedAt = now,
             UpdatedAt = now,
         };
-        await using var write = await _store.BeginWriteAsync();
-        foreach (var token in tokens.Where(t => t.State != TokenState.Completed))
+        var effects = new CommitEffects();
+        await using (var write = await _store.BeginWriteAsync())
         {
-            await write.UpsertTokenAsync(token with { State = TokenState.Completed, WaitKind = WaitKind.None, WakeAt = null });
-        }
-
-        foreach (var step in openSteps.Where(s => s.State is StepState.Planned or StepState.Waiting))
-        {
-            await write.UpdateStepAsync(step with
+            foreach (var token in tokens.Where(t => t.State != TokenState.Completed))
             {
-                State = StepState.Cancelled,
-                FinishedAt = now,
-                Resolution = "Отменён: процесс остановлен пользователем.",
-            });
+                await write.UpsertTokenAsync(token with { State = TokenState.Completed, WaitKind = WaitKind.None, WakeAt = null, WaitRef = null });
+            }
+
+            foreach (var step in openSteps.Where(s => s.State is StepState.Planned or StepState.Waiting))
+            {
+                await write.UpdateStepAsync(step with
+                {
+                    State = StepState.Cancelled,
+                    FinishedAt = now,
+                    Resolution = "Отменён: процесс остановлен.",
+                });
+            }
+
+            // Сценарий, которого процесс ждёт («Вызвать сценарий»), — часть этого процесса и останавливается вместе с ним.
+            // Запущенные без ожидания («Запустить сценарий») работают дальше независимо.
+            foreach (var subscription in await write.GetSubscriptionsAsync(process.Id))
+            {
+                if (subscription is { Purpose: SubscriptionPurpose.ChildProcess, State: SubscriptionState.Active, CorrelationKey: { } childId })
+                {
+                    effects.CancelChildren.Add(childId);
+                }
+            }
+
+            var journal = await OnTerminalAsync(write, updated, effects, now);
+            await write.UpdateProcessAsync(updated);
+            await write.AddJournalAsync(Journal(process.Id, JournalLevel.Warning, message));
+            foreach (var (level, text) in journal)
+            {
+                await write.AddJournalAsync(Journal(process.Id, level, text));
+            }
+
+            await write.CommitAsync();
         }
 
-        await write.UpdateProcessAsync(updated);
-        await write.AddJournalAsync(Journal(process.Id, JournalLevel.Warning, "Процесс остановлен пользователем."));
-        await write.CommitAsync();
         AfterCommit(updated);
+        await ApplyEffectsAsync(effects);
     }
 
     private async Task ApplyPendingAsync(ProcessSlot slot, string processId)
