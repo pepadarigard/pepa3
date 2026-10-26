@@ -1,0 +1,66 @@
+# Тестирование
+
+Надёжность проверяется автоматическими тестами поведения, а не ручным запуском. Внешние сервисы заменяются
+имитациями там, где это позволяет проверить логику без реальных действий.
+
+## Уровни
+
+| Уровень | Где | Что проверяет |
+|---|---|---|
+| Ядро | `tests/Pepa.Core.Tests` | проверка сценариев, выражения и их песочница, шаблоны, сериализация |
+| Движок | `tests/Pepa.Engine.Tests` | исполнение, ожидания, ошибки, повторы, параллельность, восстановление — на **настоящем SQLite** и **управляемом времени** (`FakeTimeProvider`) |
+| Файлы | `tests/Pepa.Adapters.FileSystem.Tests` | рабочая папка, каждое действие и его проверка результата, сквозные сценарии с движком |
+| API | `tests/Pepa.Host.Tests` | настоящий экземпляр на случайном порту: доступ, сценарии, запуск, настройки, блокировка экземпляра, поток событий, перезапуск |
+| Интерфейс (модули) | `ui/src/**/*.test.ts` (vitest) | преобразование сценария ↔ схема, раскладка, помощники блоков |
+| Интерфейс (сквозная) | `ui/e2e/smoke.cjs` (Playwright) | живой сервер + Chromium: запуск с вводом, конструктор (добавить блок, связать, сохранить, отменить/вернуть, запустить), пауза/продолжение/остановка, история, тёмная тема |
+
+### Инструменты имитации
+
+- `ExternalWorld` + `TestActionNode` — внешнее действие с управляемым поведением: успех, подтверждённая ошибка,
+  исключение до/после эффекта, остановка внутри действия до команды теста, принудительный итог проверки.
+  Считает и вызовы, и фактические эффекты — отдельно.
+- `FaultInjectingStore` — обёртка хранилища, которая «роняет» запись в заданный момент (например, при записи
+  «подтверждено» для конкретного шага), а затем — все последующие записи (жёсткий сбой).
+- `EngineHarness` — движок над временной базой; «перезапуск» и «аварийный перезапуск» создают новый движок над
+  тем же файлом.
+
+## Обязательные категории ТЗ → тесты
+
+| Категория | Тесты |
+|---|---|
+| последовательные шаги | `ExecutionTests.Sequential_steps_run_in_order_once_each` |
+| условия, циклы, переменные | `Condition_routes_by_variable`, `Loop_with_counter_runs_body_expected_number_of_times`, `Action_output_is_saved_to_variable`, `Variable_type_mismatch_stops_process_with_clear_reason`, `Inputs_are_validated_against_declared_variables` |
+| тайм-ауты и ожидания | `WaitAndConcurrencyTests.Wait_completes_only_after_its_time`, `Waiting_process_does_not_occupy_a_worker`, `Action_timeout_gives_unknown_result_and_checks_external_system`, `Next_time_of_day_is_today_or_tomorrow` |
+| независимые параллельные процессы | `Instances_of_one_scenario_have_independent_variables`, `Independent_processes_run_in_parallel`, `Failure_of_one_process_does_not_affect_another` |
+| конфликт ресурсов | — этап 2 (менеджер ресурсов) |
+| несколько событий, неоднозначное сопоставление, дедупликация | — этап 2 (система событий) |
+| остановка после ошибки | `ErrorHandlingTests.Failure_without_handler_stops_process_before_next_step`, `Retries_exhausted_stop_the_process`, `FileScenarioTests.Path_escape_stops_process_without_touching_files` |
+| сохранение состояния и восстановление | `RecoveryTests.Waiting_state_survives_restart_with_remaining_time`, `Process_paused_by_user_stays_paused_after_restart`, `HostLifecycleTests.Waiting_process_is_paused_after_restart_and_resumes_manually` |
+| сбой между внешним действием и сохранением результата | `RecoveryTests.Crash_between_action_and_saving_result_never_repeats_the_action`, `Crash_with_inconclusive_verification_requires_user_decision`, `Storage_failure_on_result_marks_process_for_attention_without_restart`, `FileScenarioTests.Crash_after_append_does_not_append_twice`, `Crash_before_write_reached_disk_writes_once_after_verification` |
+| отсутствие автозапуска после перезапуска | `RecoveryTests.After_restart_nothing_continues_automatically`, `Crash_before_action_started_replans_step_once_on_resume` |
+| отсутствие повтора подтверждённых действий | те же тесты восстановления + `ErrorHandlingTests.Unknown_result_is_never_retried_automatically`, `User_marks_unknown_step_as_done_and_it_is_not_repeated` |
+
+Дополнительно: обработка ошибок по ветке «Ошибка», повторы только подтверждённых ошибок, решения пользователя
+(проверить, повторить, считать выполненным, пропустить), пауза и остановка во время действия, лимит шагов,
+неизменность запущенного процесса при правке сценария, защита рабочей папки (`..`, абсолютные пути, ссылки,
+имена Windows), проверка результата каждого файлового действия, безопасность API (токен, Host), блокировка
+второго экземпляра, сохранность выбранной рабочей папки между запусками.
+
+Проверка самих тестов: намеренная поломка восстановления (не помечать прерванные шаги «неизвестно») и обработки
+неизвестного итога (считать его обычной ошибкой) роняет соответствующие тесты.
+
+## Как запустить
+
+```bash
+dotnet test Pepa.slnx            # все тесты .NET (~1 минута)
+cd ui && npm test                # модульные тесты интерфейса
+cd ui && npm run build && dotnet build ../src/Pepa.Server && npm run e2e   # сквозная проверка (нужен Playwright)
+```
+
+В CI (`.github/workflows/build.yml`) на каждый push: на Windows — все тесты и сборка приложения (артефакт
+`Pepa-win-x64`), на Linux — все тесты и сквозная проверка интерфейса со скриншотами (артефакт `e2e-screenshots`).
+
+## Что проверяется только вручную (на Windows)
+
+- Само окно WPF: запуск, WebView2, выбор папки, «открыть в проводнике», предупреждение при закрытии,
+  активация уже открытого окна при повторном запуске. В контейнере разработки окно только компилируется.

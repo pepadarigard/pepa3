@@ -34,15 +34,17 @@ public sealed class PepaHost : IAsyncDisposable
     private readonly InstanceLock? _lock;
     private int _stopped;
 
-    private PepaHost(WebApplication app, InstanceLock? instanceLock, Uri baseUrl, string token)
+    private PepaHost(WebApplication app, InstanceLock? instanceLock, Uri baseUrl, string token, string dataDirectory)
     {
         _app = app;
         _lock = instanceLock;
         BaseUrl = baseUrl;
         Token = token;
+        DataDirectory = dataDirectory;
     }
 
     public Uri BaseUrl { get; }
+    public string DataDirectory { get; }
     public string Token { get; }
 
     /// <summary>Адрес для открытия интерфейса: токен передаётся во фрагменте (#), который не уходит на сервер.</summary>
@@ -159,7 +161,7 @@ public sealed class PepaHost : IAsyncDisposable
         hostContext.Port = baseUrl.Port;
         logger.LogInformation("Pepa {Version} запущена: {Url}. Данные: {Data}. {Recovery}",
             HostContext.Version, baseUrl, dataDirectory, hostContext.Recovery);
-        return new PepaHost(app, instanceLock, baseUrl, token);
+        return new PepaHost(app, instanceLock, baseUrl, token, dataDirectory);
     }
 
     private static void MapInterface(WebApplication app, string uiDirectory)
