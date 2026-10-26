@@ -232,4 +232,7 @@ public sealed record TelegramCodeRequest(string? Value);
 
 public sealed record DesktopWindowDto(string Title, string Process);
 
+/// <summary>Шаблон сценария (из набора примеров): из него можно создать свой сценарий.</summary>
+public sealed record TemplateDto(string Name, string Description, IReadOnlyList<string> Blocks, ScenarioDefinition Definition);
+
 public sealed record AdsPowerProfileDto(string Id, string? Number, string Name, string? Group);

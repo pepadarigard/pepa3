@@ -1,10 +1,10 @@
-import { useMemo, useRef, useState } from "react";
-import { AlertTriangle, CalendarClock, CopyPlus, Download, Ellipsis, History, Pencil, Play, Plus, Search, Trash2, Upload, Workflow } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { AlertTriangle, CalendarClock, CopyPlus, Download, Ellipsis, History, LayoutTemplate, Pencil, Play, Plus, Search, Trash2, Upload, Workflow } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { useScenarios, useTriggers } from "../api/hooks";
-import type { ScenarioDefinition, ScenarioSummary, Trigger } from "../api/types";
-import { useFeedback } from "../components/feedback";
+import type { ScenarioDefinition, ScenarioSummary, ScenarioTemplate, Trigger } from "../api/types";
+import { Dialog, useFeedback } from "../components/feedback";
 import { ProcessStatusBadge } from "../components/process";
 import { useRunScenario } from "../components/RunDialog";
 import { useTriggersDialog } from "../components/triggers";
@@ -34,6 +34,7 @@ export function ScenariosPage() {
   const triggersDialog = useTriggersDialog();
   const triggers = useTriggers();
   const [query, setQuery] = useState("");
+  const [templatesOpen, setTemplatesOpen] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const filtered = useMemo(() => {
@@ -47,6 +48,18 @@ export function ScenariosPage() {
     try {
       const created = await api.createScenario(blankScenario());
       queryClient.invalidateQueries({ queryKey: ["scenarios"] });
+      navigate({ page: "editor", id: created.id });
+    } catch (e) {
+      feedback.error(e);
+    }
+  };
+
+  const createFromTemplate = async (template: ScenarioTemplate) => {
+    try {
+      const created = await api.createScenario({ ...template.definition, id: "" });
+      queryClient.invalidateQueries({ queryKey: ["scenarios"] });
+      setTemplatesOpen(false);
+      feedback.toast(`Сценарий «${created.name}» создан из шаблона`);
       navigate({ page: "editor", id: created.id });
     } catch (e) {
       feedback.error(e);
@@ -76,6 +89,7 @@ export function ScenariosPage() {
         </div>
         <div className="row">
           <Button icon={Upload} onClick={() => fileInput.current?.click()}>Импорт</Button>
+          <Button icon={LayoutTemplate} onClick={() => setTemplatesOpen(true)}>Из шаблона</Button>
           <Button variant="primary" icon={Plus} onClick={create}>Новый сценарий</Button>
           <input ref={fileInput} type="file" accept=".json,application/json" hidden
             onChange={(e) => { const f = e.target.files?.[0]; if (f) void importFile(f); e.target.value = ""; }} />
@@ -108,6 +122,7 @@ export function ScenariosPage() {
         </div>
       )}
       {runner.element}
+      {templatesOpen && <TemplatesDialog onPick={createFromTemplate} onClose={() => setTemplatesOpen(false)} />}
       {triggersDialog.element}
     </div>
   );
@@ -209,5 +224,38 @@ function ScenarioCard({ scenario: s, onRun, triggers, onTriggers }: { scenario: 
         </Button>
       </div>
     </article>
+  );
+}
+
+/** Выбор шаблона: создаётся свой сценарий — копия примера, которую можно менять. */
+function TemplatesDialog({ onPick, onClose }: { onPick: (template: ScenarioTemplate) => Promise<void>; onClose: () => void }) {
+  const [state, setState] = useState<{ templates: ScenarioTemplate[] | null; error: string | null }>({ templates: null, error: null });
+  const [busy, setBusy] = useState<string | null>(null);
+  useEffect(() => {
+    api.templates().then(
+      (templates) => setState({ templates, error: null }),
+      (e: unknown) => setState({ templates: null, error: e instanceof Error ? e.message : String(e) }),
+    );
+  }, []);
+  return (
+    <Dialog title="Новый сценарий из шаблона" onClose={onClose} width={720}
+      footer={<Button onClick={onClose}>Закрыть</Button>}>
+      {state.error && <p className="field-error">{state.error}</p>}
+      {!state.templates && !state.error && <Loading />}
+      <div className="template-list">
+        {state.templates?.map((t) => (
+          <button key={t.name} type="button" className="template-card" disabled={busy !== null}
+            onClick={async () => {
+              setBusy(t.name);
+              await onPick(t);
+              setBusy(null);
+            }}>
+            <strong>{t.name}</strong>
+            <span className="small muted">{t.description}</span>
+            <span className="small faint">{t.blocks.join(" · ")}</span>
+          </button>
+        ))}
+      </div>
+    </Dialog>
   );
 }

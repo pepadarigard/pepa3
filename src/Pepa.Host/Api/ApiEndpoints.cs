@@ -188,6 +188,15 @@ internal static class ApiEndpoints
         api.MapGet("/scenarios/{id}", async (string id, ScenarioService scenarios, CancellationToken ct) =>
             await scenarios.GetAsync(id, ct) is { } stored ? Results.Ok(ToDto(stored, scenarios)) : NotFound("Сценарий не найден."));
 
+        api.MapGet("/templates", (Core.Nodes.NodeRegistry registry) => Samples.SampleScenarios.All().Select(s =>
+        {
+            var name = System.Text.RegularExpressions.Regex.Replace(s.Name, @"^Пример \d+\.\s*", "");
+            var blocks = s.Nodes.Select(n => registry.FindDescriptor(n.Type))
+                .Where(d => d is { IsStart: false, IsEnd: false })
+                .Select(d => d!.Title).Distinct().ToList();
+            return new TemplateDto(name, s.Description, blocks, s with { Name = name });
+        }).ToList());
+
         api.MapPost("/scenarios", async (ScenarioDefinition definition, ScenarioService scenarios, EventHub events, CancellationToken ct) =>
         {
             var stored = await scenarios.CreateAsync(definition, ct);

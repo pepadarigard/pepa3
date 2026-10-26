@@ -406,6 +406,14 @@ export interface TelegramStatus {
   phone: string | null;
 }
 
+export interface ScenarioTemplate {
+  name: string;
+  description: string;
+  /** Названия блоков, из которых собран шаблон. */
+  blocks: string[];
+  definition: ScenarioDefinition;
+}
+
 export interface DesktopWindow {
   title: string;
   process: string;

@@ -993,7 +993,8 @@ table.table {
 .dialog {
   width: min(520px, 100%);
   max-height: calc(100vh - 32px);
-  overflow: auto;
+  /* Прокручивается содержимое, заголовок и кнопки остаются на месте. */
+  overflow: hidden;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
@@ -1011,6 +1012,9 @@ table.table {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  overflow: auto;
+  min-height: 0;
+  flex: 1 1 auto;
 }
 
 .dialog-footer {
@@ -1849,5 +1853,37 @@ pre.json {
   background: var(--accent);
   color: #fff;
   white-space: nowrap;
+}
+
+.template-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+@media (max-width: 760px) {
+  .template-list {
+    grid-template-columns: 1fr;
+  }
+}
+
+.template-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  text-align: left;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: inherit;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.template-card:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--surface-2);
 }
 

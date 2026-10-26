@@ -133,6 +133,16 @@ async function main() {
     if (!pastedPath.startsWith("e2e/итог-")) throw new Error(`Вставлен не тот блок: ${pastedPath}`);
     await page.screenshot({ path: path.join(shots, "14-editor-paste-search.png") });
 
+    step("Новый сценарий из шаблона");
+    await page.goto(`${base}/#/scenarios`);
+    await page.getByRole("button", { name: "Из шаблона" }).click();
+    await page.locator(".template-card", { hasText: "Telegram: спросить и дождаться ответа" }).waitFor();
+    await page.waitForTimeout(400);
+    await page.screenshot({ path: path.join(shots, "16-templates.png") });
+    await page.locator(".template-card", { hasText: "Цикл: несколько файлов" }).click();
+    await page.locator(".react-flow__node").nth(3).waitFor();
+    if (!(await page.locator(".editor-title").innerText()).startsWith("Цикл")) throw new Error("Шаблон не открылся в конструкторе");
+
     step("Отладка: пошаговый запуск");
     await page.goto(`${base}/#/editor/${saved.id}`);
     await page.getByRole("button", { name: "Пошагово" }).click();

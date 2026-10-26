@@ -1,6 +1,7 @@
 import type {
   AdsPowerProfile,
   DesktopWindow,
+  ScenarioTemplate,
   TelegramStatus,
   Info,
   NodeTypes,
@@ -151,6 +152,7 @@ export const api = {
   adsPowerProfiles: () => request<AdsPowerProfile[]>("GET", "/integrations/adspower/profiles"),
 
   desktopWindows: () => request<DesktopWindow[]>("GET", "/integrations/desktop/windows"),
+  templates: () => request<ScenarioTemplate[]>("GET", "/templates"),
 
   telegram: () => request<TelegramStatus>("GET", "/integrations/telegram"),
   telegramLogin: (login: { apiId: number; apiHash: string | null; phone: string }) =>
