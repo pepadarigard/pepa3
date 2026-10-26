@@ -51,6 +51,11 @@ public sealed class BrowserRecorder(BrowserSessions sessions) : IAsyncDisposable
     private RecorderStart? _start;
     private DateTime _lastUserAction = DateTime.MinValue;
 
+    // Действия записываются строго в порядке поступления: проверка перехода спрашивает браузер (асинхронно), и без
+    // очереди следующие нажатия могли бы записаться раньше перехода.
+    private readonly object _orderGate = new();
+    private Task _order = Task.CompletedTask;
+
     /// <summary>Записано новое действие или запись началась/закончилась.</summary>
     public event Action? Changed;
 
@@ -149,6 +154,7 @@ public sealed class BrowserRecorder(BrowserSessions sessions) : IAsyncDisposable
                 }
 
                 await Task.Delay(150, cancellationToken);
+                await Drained().WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
                 await sessions.CloseAsync(SessionOwner, SessionName, stopProfile: false, cancellationToken);
                 _session = null;
             }
@@ -165,7 +171,11 @@ public sealed class BrowserRecorder(BrowserSessions sessions) : IAsyncDisposable
     private void OnNewPage(IPage page)
     {
         Watch(page);
-        Add(new RecordedAction { Kind = "tab", Note = "открылась новая вкладка — дальше блоки работают в ней" });
+        InOrder(() =>
+        {
+            Add(new RecordedAction { Kind = "tab", Note = "открылась новая вкладка — дальше блоки работают в ней" });
+            return Task.CompletedTask;
+        });
     }
 
     private void Watch(IPage page) => page.FrameNavigated += (_, frame) =>
@@ -175,8 +185,25 @@ public sealed class BrowserRecorder(BrowserSessions sessions) : IAsyncDisposable
             return;
         }
 
-        _ = RecordNavigationAsync(page, frame.Url);
+        var url = frame.Url;
+        InOrder(() => RecordNavigationAsync(page, url));
     };
+
+    private void InOrder(Func<Task> work)
+    {
+        lock (_orderGate)
+        {
+            _order = _order.ContinueWith(_ => work(), CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
+        }
+    }
+
+    private Task Drained()
+    {
+        lock (_orderGate)
+        {
+            return _order.ContinueWith(_ => { }, TaskScheduler.Default);
+        }
+    }
 
     /// <summary>
     /// Переход записывается, только если адрес ввёл сам пользователь (или открыл закладку): переходы по ссылкам, отправка
@@ -259,7 +286,11 @@ public sealed class BrowserRecorder(BrowserSessions sessions) : IAsyncDisposable
         }
 
         _lastUserAction = DateTime.UtcNow;
-        Add(action);
+        InOrder(() =>
+        {
+            Add(action);
+            return Task.CompletedTask;
+        });
     }
 
     private void Add(RecordedAction action)

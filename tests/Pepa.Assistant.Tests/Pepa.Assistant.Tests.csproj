@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Pepa.Assistant\Pepa.Assistant.csproj" />
+    <ProjectReference Include="..\..\src\Pepa.Engine\Pepa.Engine.csproj" />
+  </ItemGroup>
+</Project>

@@ -3,6 +3,7 @@
        Не зависит ни от хранилища, ни от интерфейса. -->
   <ItemGroup>
     <PackageReference Include="Jint" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Pepa.Core.Tests" />

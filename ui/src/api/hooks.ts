@@ -5,6 +5,8 @@ import { useMemo } from "react";
 
 export const useInfo = () => useQuery({ queryKey: ["info"], queryFn: api.info, staleTime: 60_000 });
 
+export const useAssistant = () => useQuery({ queryKey: ["assistant"], queryFn: api.assistant, staleTime: 60_000 });
+
 export const useNodeTypes = () =>
   useQuery({ queryKey: ["node-types"], queryFn: api.nodeTypes, staleTime: Infinity });
 

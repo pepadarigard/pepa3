@@ -15,7 +15,7 @@ import {
   type NodeChange,
   type ReactFlowInstance,
 } from "@xyflow/react";
-import { ArrowLeft, Bug, CalendarClock, CircleDot, ClipboardPaste, Copy, LayoutGrid, Play, Plus, Redo2, Save, Search, Shapes, Undo2, Workflow } from "lucide-react";
+import { ArrowLeft, Bug, CalendarClock, CircleDot, ClipboardPaste, Copy, LayoutGrid, Play, Plus, Redo2, Save, Search, Shapes, Sparkles, Undo2, Workflow } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
 import { useNodeTypes, useScenario, useScenarios } from "../../api/hooks";
@@ -27,11 +27,12 @@ import { useTriggersDialog } from "../../components/triggers";
 import { Badge, Button, Card, Empty, ErrorState, Loading } from "../../components/ui";
 import { formatMoment } from "../../lib/format";
 import { copyBlocks, loadClipboard, pasteBlocks, saveClipboard, type BlockClipboard } from "../../lib/clipboard";
-import { autoLayout, connect, createNode, NODE_WIDTH, nodeSummary, type PepaEdge, type PepaNode } from "../../lib/graph";
+import { autoLayout, connect, createNode, newId, NODE_WIDTH, nodeSummary, toFlowEdge, type PepaEdge, type PepaNode } from "../../lib/graph";
 import { navigate, setLeaveGuard } from "../../router";
 import { blankScenario } from "../ScenariosPage";
 import { EdgeInspector, NodeInspector, ScenarioInspector } from "./Inspector";
 import { IssuesPanel } from "./IssuesPanel";
+import { AssistantDialog } from "./AssistantDialog";
 import { RecorderDialog } from "./RecorderDialog";
 import { FlowContext, nodeTypes } from "./NodeCard";
 import { DRAG_TYPE, Palette } from "./Palette";
@@ -257,8 +258,11 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
 
   // ───────────── Копирование и вставка ─────────────
 
-  /** Вставить блоки из буфера: новые идентификаторы, связи внутри группы и недостающие переменные. */
-  const insertBlocks = useCallback((data: BlockClipboard, at: { x: number; y: number }) => {
+  /**
+   * Вставить блоки из буфера: новые идентификаторы, связи внутри группы и недостающие переменные. С <paramref name="entryId"/>
+   * первый блок группы подключается к «Началу», если из «Начала» ещё ничего не выходит.
+   */
+  const insertBlocks = useCallback((data: BlockClipboard, at: { x: number; y: number }, entryId: string | null = null) => {
     let target = at;
     const first = data.nodes[0];
     const minX = Math.min(...data.nodes.map((n) => n.position?.x ?? 0));
@@ -267,15 +271,24 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
       Math.abs(n.position.x - (p.x + (first.position?.x ?? 0) - minX)) < 5 && Math.abs(n.position.y - (p.y + (first.position?.y ?? 0) - minY)) < 5);
     for (let i = 0; i < 20 && occupied(target); i++) target = { x: target.x + 40, y: target.y + 40 };
     const pasted = pasteBlocks(data, target, editor.state.meta.variables);
+    const entryIndex = entryId ? data.nodes.findIndex((n) => n.id === entryId) : -1;
+    const start = editor.state.nodes.find((n) => isStart(n.id));
+    const startOut = start ? editor.state.edges.filter((e) => e.source === start.id) : [];
+    // Новый сценарий — заготовка «Начало → Конец»: её заменяют вставленные блоки (отменить — Ctrl+Z).
+    const placeholder = editor.state.nodes.length === 2 && startOut.length === 1 &&
+      editor.state.nodes.find((n) => n.id === startOut[0].target)?.data.definition.type === "end" ? startOut[0].target : null;
+    const connect = entryIndex >= 0 && !!start && (startOut.length === 0 || placeholder !== null);
+    const startEdge = connect ? [toFlowEdge({ id: newId("e"), source: start.id, sourcePort: "out", target: pasted.nodes[entryIndex].id })] : [];
     editor.commit((s) => ({
       meta: pasted.variables.length > 0 ? { ...s.meta, variables: [...s.meta.variables, ...pasted.variables] } : s.meta,
-      nodes: [...s.nodes.map((n) => ({ ...n, selected: false })), ...pasted.nodes],
-      edges: [...s.edges.map((e) => ({ ...e, selected: false })), ...pasted.edges],
+      nodes: [...s.nodes.filter((n) => !connect || n.id !== placeholder).map((n) => ({ ...n, selected: false })), ...pasted.nodes],
+      edges: [...s.edges.filter((e) => !connect || e.target !== placeholder).map((e) => ({ ...e, selected: false })), ...pasted.edges, ...startEdge],
     }));
+    return connect;
     if (pasted.variables.length > 0) {
       feedback.toast(`Добавлены переменные: ${pasted.variables.map((v) => v.name).join(", ")}`, "info");
     }
-  }, [editor, feedback]);
+  }, [editor, feedback, isStart]);
 
   const groupOrigin = (data: BlockClipboard) => ({
     x: Math.min(...data.nodes.map((n) => n.position?.x ?? 0)),
@@ -283,12 +296,12 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
   });
 
   /** Вставить группу блоков в свободное место у центра видимой части холста. */
-  const insertAtView = useCallback((data: BlockClipboard) => {
+  const insertAtView = useCallback((data: BlockClipboard, entryId: string | null = null) => {
     const origin = groupOrigin(data);
     const rect = canvas.current?.getBoundingClientRect();
     const center = rect ? flow.screenToFlowPosition({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }) : { x: 0, y: 0 };
     const width = Math.max(...data.nodes.map((n) => n.position?.x ?? 0)) - origin.x + NODE_WIDTH;
-    insertBlocks(data, freeSpot(editor.state.nodes, { x: Math.round(center.x - Math.min(width, 900) / 2), y: Math.round(center.y - 60) }));
+    return insertBlocks(data, freeSpot(editor.state.nodes, { x: Math.round(center.x - Math.min(width, 900) / 2), y: Math.round(center.y - 60) }), entryId);
   }, [editor, flow, insertBlocks]);
 
   const copySelected = useCallback(() => {
@@ -321,6 +334,7 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
   }, [editor, feedback, insertAtView, insertBlocks]);
 
   const [recorderOpen, setRecorderOpen] = useState(false);
+  const [assistantOpen, setAssistantOpen] = useState(false);
 
   const duplicateSelected = useCallback(() => {
     const data = copyBlocks(editor.state.nodes, editor.state.edges, editor.state.meta.variables, descriptors, isStart);
@@ -419,6 +433,7 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
         <Button size="small" variant="ghost" iconOnly icon={Search} title="Найти блок (Ctrl+F)" onClick={() => setSearchOpen(true)} />
         <Button size="small" variant="ghost" iconOnly icon={Copy} title="Копировать выбранные блоки (Ctrl+C)" onClick={copySelected} />
         <Button size="small" variant="ghost" iconOnly icon={ClipboardPaste} title="Вставить блоки (Ctrl+V) — можно и в другой сценарий" onClick={pasteFromClipboard} />
+        <Button size="small" icon={Sparkles} title="Описать сценарий словами — помощник предложит блоки" onClick={() => setAssistantOpen(true)}>ИИ-помощник</Button>
         <Button size="small" icon={CircleDot} title="Записать действия в браузере и превратить их в блоки" onClick={() => setRecorderOpen(true)}>Записать</Button>
         <Button size="small" icon={LayoutGrid} title="Расставить блоки автоматически" onClick={layout}>Упорядочить</Button>
         <Button size="small" icon={CalendarClock} title="Запуск по расписанию и по событиям"
@@ -507,6 +522,16 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
       </div>
       {runner.element}
       {triggersDialog.element}
+      {assistantOpen && (
+        <AssistantDialog
+          variables={state.meta.variables}
+          onClose={() => setAssistantOpen(false)}
+          onInsert={(blocks, entryId) => {
+            const connected = insertAtView(blocks, entryId);
+            feedback.toast(`Добавлено блоков от помощника: ${blocks.nodes.length}.${connected ? " Первый подключён к «Началу»." : " Соедините их со схемой."} Проверьте их перед сохранением.`, "info");
+          }}
+        />
+      )}
       {recorderOpen && (
         <RecorderDialog
           onClose={() => setRecorderOpen(false)}

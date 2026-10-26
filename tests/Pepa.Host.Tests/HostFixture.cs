@@ -23,15 +23,17 @@ public sealed class HostFixture : IAsyncDisposable
     public PepaHost Host { get; private set; }
     public HttpClient Client { get; private set; }
 
-    public static async Task<HostFixture> StartAsync(bool seedSamples = true)
+    public static async Task<HostFixture> StartAsync(bool seedSamples = true, string? assistantUrl = null)
     {
         var root = Path.Combine(Path.GetTempPath(), "pepa-host-tests", Guid.NewGuid().ToString("N"));
-        var host = await PepaHost.StartAsync(Options(root, seedSamples));
+        var host = await PepaHost.StartAsync(Options(root, seedSamples) with { AssistantBaseUrl = assistantUrl ?? "http://127.0.0.1:1" });
         return new HostFixture(root, host);
     }
 
     public static PepaHostOptions Options(string root, bool seedSamples = true) => new()
     {
+        // Проверки никогда не обращаются к настоящему Claude API.
+        AssistantBaseUrl = "http://127.0.0.1:1",
         DataDirectory = Path.Combine(root, "data"),
         DefaultWorkspaceRoot = Path.Combine(root, "workspace"),
         Token = Token,

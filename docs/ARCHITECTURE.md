@@ -30,6 +30,7 @@ Windows-сервере без включённого ПК пользовател
 | `Pepa.Storage.Sqlite` | хранилище: схема, миграции, транзакции | Engine, Microsoft.Data.Sqlite |
 | `Pepa.Adapters.FileSystem` | файловые действия, рабочая папка | Core |
 | `Pepa.Adapters.Browser` | браузер через Playwright (Edge/Chrome), профили AdsPower через Local API и CDP | Core, FileSystem, Microsoft.Playwright |
+| `Pepa.Assistant` | ИИ-помощник: каталог блоков → указания модели, структурированный ответ → блоки, проверка и исправление | Core, Anthropic (официальный SDK) |
 | `Pepa.Host` | композиция, HTTP API, SSE, настройки, примеры, блокировка экземпляра, журнал | всё выше, ASP.NET Core |
 | `Pepa.Server` | консольный запуск | Host |
 | `Pepa.Desktop` | WPF + WebView2 | Host |
@@ -50,7 +51,7 @@ Windows-сервере без включённого ПК пользовател
 | Integration Adapters | `Pepa.Adapters.*` | файлы, браузер, AdsPower, Telegram, окна Windows (`Desktop` + `Desktop.Windows`) |
 | Permission System | рабочая папка (`Workspace`), запрет системных папок | начато |
 | Observability | шаги, журнал процесса, журнал платформы `logs/` | есть |
-| AI Provider Layer | — | этап 5 |
+| AI Provider Layer | `Pepa.Assistant` (Claude API), ключ — `Pepa.Host/Settings/AssistantKeyStore.cs` | составление блоков есть |
 | Extension System | `NodeRegistry` + `INodeExecutor` + описание блока | контракт есть |
 
 ## Сущности исполнения

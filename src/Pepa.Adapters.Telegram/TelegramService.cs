@@ -5,6 +5,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Pepa.Core;
+using Pepa.Core.Security;
 using TL;
 using MBoxState = WTelegram.UpdateManager.MBoxState;
 
@@ -1248,10 +1249,10 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
                 return null;
             }
 
-            return new TelegramCredentials(stored.ApiId, Secrets.Unprotect(stored.ApiHash), stored.Phone)
+            return new TelegramCredentials(stored.ApiId, Secrets.Unprotect(stored.ApiHash, SecretPurpose), stored.Phone)
             {
                 Authorized = stored.Authorized,
-                SessionKey = stored.SessionKey is { } key ? Secrets.Unprotect(key) : null,
+                SessionKey = stored.SessionKey is { } key ? Secrets.Unprotect(key, SecretPurpose) : null,
             };
         }
         catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException or CryptographicException or FormatException)
@@ -1264,8 +1265,8 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
     private void SaveCredentials(TelegramCredentials credentials)
     {
         Directory.CreateDirectory(_folder);
-        WriteAtomic(CredentialsPath, JsonSerializer.Serialize(new StoredCredentials(credentials.ApiId, Secrets.Protect(credentials.ApiHash),
-            credentials.Phone, credentials.Authorized, credentials.SessionKey is { } key ? Secrets.Protect(key) : null)));
+        WriteAtomic(CredentialsPath, JsonSerializer.Serialize(new StoredCredentials(credentials.ApiId, Secrets.Protect(credentials.ApiHash, SecretPurpose),
+            credentials.Phone, credentials.Authorized, credentials.SessionKey is { } key ? Secrets.Protect(key, SecretPurpose) : null)));
     }
 
     private void TrySaveCredentials(TelegramCredentials credentials)
@@ -1430,6 +1431,8 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
 
         public bool TakeDirty() => Interlocked.Exchange(ref _dirty, 0) == 1;
     }
+
+    private const string SecretPurpose = "Pepa.Telegram";
 
     private sealed record StoredCredentials(int ApiId, string ApiHash, string Phone, bool Authorized, string? SessionKey);
 

@@ -15,6 +15,41 @@ const port = Number(process.env.PEPA_E2E_PORT ?? 5199);
 const token = "e2e-token";
 const base = `http://127.0.0.1:${port}`;
 
+const assistantPort = port + 1;
+
+// Имитация Claude API для ИИ-помощника: черновик из двух блоков и сведения о модели.
+function startFakeAnthropic() {
+  const http = require("node:http");
+  const draft = {
+    summary: "Пишет приветствие в журнал и заканчивается.",
+    questions: ["Кого приветствовать?"],
+    variables: [{ name: "guest", type: "text", description: "Кого приветствовать", isInput: true, default: "мир" }],
+    blocks: [
+      { id: "hello", type: "log", label: "Поздороваться", note: "", settings: [{ field: "message", value: "Привет, {{ vars.guest }}!" }] },
+      { id: "done", type: "end", label: "", note: "", settings: [{ field: "message", value: "Готово" }] },
+    ],
+    links: [{ from: "hello", port: "out", to: "done" }],
+  };
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.setHeader("content-type", "application/json");
+      if (req.url.startsWith("/v1/models/")) {
+        res.end(JSON.stringify({ type: "model", id: "claude-opus-5-5", display_name: "Claude Opus 5.5", created_at: "2026-09-01T00:00:00Z" }));
+        return;
+      }
+      res.end(JSON.stringify({
+        id: "msg_e2e", type: "message", role: "assistant", model: "claude-opus-5-5",
+        content: [{ type: "text", text: JSON.stringify(draft) }],
+        stop_reason: "end_turn", stop_sequence: null,
+        usage: { input_tokens: 1500, output_tokens: 700, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+      }));
+    });
+  });
+  server.listen(assistantPort, "127.0.0.1");
+  return server;
+}
+
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pepa-e2e-"));
 const workspace = path.join(temp, "workspace");
 fs.mkdirSync(shots, { recursive: true });
@@ -37,7 +72,9 @@ async function waitForServer() {
 }
 
 async function main() {
-  const server = spawn("dotnet", [serverDll, "--data-dir", path.join(temp, "data"), "--workspace", workspace, "--port", String(port), "--token", token, "--ui", ui], {
+  const anthropic = startFakeAnthropic();
+  const server = spawn("dotnet", [serverDll, "--data-dir", path.join(temp, "data"), "--workspace", workspace, "--port", String(port), "--token", token, "--ui", ui,
+    "--assistant-url", `http://127.0.0.1:${assistantPort}`], {
     stdio: ["ignore", "pipe", "pipe"],
   });
   let serverLog = "";
@@ -243,6 +280,28 @@ async function main() {
     errors.splice(before, errors.length - before, ...errors.slice(before).filter((e) => !e.includes("status of 400")));
     await page.screenshot({ path: path.join(shots, "13-integrations-telegram.png") });
 
+    step("ИИ-помощник: ключ и черновик блоков");
+    await page.goto(`${base}/#/settings`);
+    await page.getByPlaceholder("sk-ant-…").fill("sk-ant-e2e-0123456789abcdef");
+    await page.getByRole("button", { name: "Сохранить ключ" }).click();
+    await page.getByText("Подключён · ключ …cdef").waitFor();
+    await page.getByRole("button", { name: "Проверить", exact: true }).click();
+    await page.getByText("Ключ подходит").waitFor();
+    await page.goto(`${base}/#/scenarios`);
+    await page.getByRole("button", { name: "Новый сценарий" }).click();
+    await page.locator(".react-flow__node").first().waitFor();
+    await page.getByRole("button", { name: "ИИ-помощник" }).click();
+    const assistant = page.getByRole("dialog");
+    await assistant.locator("textarea").fill("Поздороваться в журнале и закончить.");
+    await assistant.getByRole("button", { name: "Составить блоки" }).click();
+    await assistant.getByText("Блоки (2)").waitFor();
+    await assistant.getByText("Кого приветствовать?").waitFor();
+    await page.screenshot({ path: path.join(shots, "13-assistant.png") });
+    await assistant.getByRole("button", { name: "Вставить в схему" }).click();
+    await page.getByText("Первый подключён к «Началу»").waitFor();
+    if ((await page.locator(".react-flow__node").count()) !== 3) throw new Error("Помощник: ожидалось 3 блока на схеме");
+    if ((await page.locator(".react-flow__edge").count()) !== 2) throw new Error("Помощник: ожидалось 2 связи на схеме");
+
     step("Тёмная тема");
     await page.goto(`${base}/#/settings`);
     await page.getByRole("button", { name: "Тёмная" }).click();
@@ -258,6 +317,7 @@ async function main() {
     process.exitCode = 1;
   } finally {
     await browser.close();
+    anthropic.close();
     server.kill("SIGTERM");
     await new Promise((r) => server.once("exit", r));
     fs.rmSync(temp, { recursive: true, force: true });

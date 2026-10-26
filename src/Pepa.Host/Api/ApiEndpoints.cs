@@ -228,6 +228,60 @@ internal static class ApiEndpoints
             return RecorderDto(recorder.State);
         });
 
+        // ИИ-помощник: ключ API и черновик блоков по описанию.
+        api.MapGet("/assistant", async (AssistantKeyStore keys, Assistant.ScenarioAssistant assistant, CancellationToken ct) =>
+            AssistantDto(await keys.GetAsync(ct), assistant));
+
+        api.MapPut("/assistant/key", async (AssistantKeyRequest request, AssistantKeyStore keys, Assistant.ScenarioAssistant assistant,
+            CancellationToken ct) =>
+        {
+            await keys.SetAsync(request.ApiKey ?? "", ct);
+            return AssistantDto(await keys.GetAsync(ct), assistant);
+        });
+
+        api.MapDelete("/assistant/key", async (AssistantKeyStore keys, Assistant.ScenarioAssistant assistant, CancellationToken ct) =>
+        {
+            await keys.ClearAsync(ct);
+            return AssistantDto(null, assistant);
+        });
+
+        api.MapPost("/assistant/check", async (AssistantKeyStore keys, Assistant.ScenarioAssistant assistant, CancellationToken ct) =>
+        {
+            try
+            {
+                var model = await assistant.CheckKeyAsync(await keys.GetAsync(ct) ?? "", ct);
+                return new CheckResultDto(true, $"Ключ подходит, модель «{model}» доступна.");
+            }
+            catch (Assistant.AssistantException ex)
+            {
+                return new CheckResultDto(false, ex.Message);
+            }
+        });
+
+        api.MapPost("/assistant/draft", async (AssistantDraftRequest request, AssistantKeyStore keys, Assistant.ScenarioAssistant assistant,
+            CancellationToken ct) =>
+        {
+            try
+            {
+                var draft = await assistant.DraftAsync(await keys.GetAsync(ct) ?? "", new Assistant.AssistantRequest
+                {
+                    Description = request.Description ?? "",
+                    ExistingVariables = request.Variables ?? [],
+                }, ct);
+                return Results.Json(new AssistantDraftDto(draft.Summary, draft.Questions, draft.Variables, draft.Nodes, draft.Edges,
+                    draft.EntryNodeId, draft.Problems, draft.Requests, draft.Usage), Core.Serialization.PepaJson.Options);
+            }
+            catch (Assistant.AssistantException ex)
+            {
+                return Results.Json(new ErrorDto(ex.Message), Core.Serialization.PepaJson.Options, statusCode: ex.Kind switch
+                {
+                    Assistant.AssistantErrorKind.Input => StatusCodes.Status400BadRequest,
+                    Assistant.AssistantErrorKind.Key => StatusCodes.Status409Conflict,
+                    _ => StatusCodes.Status502BadGateway,
+                });
+            }
+        });
+
         api.MapGet("/templates", (Core.Nodes.NodeRegistry registry) => Samples.SampleScenarios.All().Select(s =>
         {
             var name = System.Text.RegularExpressions.Regex.Replace(s.Name, @"^Пример \d+\.\s*", "");
@@ -481,6 +535,9 @@ internal static class ApiEndpoints
         return new TelegramStatusDto(JsonNamingPolicy.CamelCase.ConvertName(status.State.ToString()), status.Account, status.Message,
             saved?.ApiId, saved?.Phone);
     }
+
+    private static AssistantStatusDto AssistantDto(string? key, Assistant.ScenarioAssistant assistant) =>
+        new(key is not null, key is null ? null : AssistantKeyStore.Hint(key), assistant.Model);
 
     private static SettingsDto ToDto(SettingsService settings)
     {

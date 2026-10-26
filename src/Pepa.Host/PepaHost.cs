@@ -162,6 +162,13 @@ public sealed class PepaHost : IAsyncDisposable
             TimeProvider.System,
             sp.GetRequiredService<ILogger<ProcessEngine>>()));
         builder.Services.AddSingleton(sp => new ScenarioService(store, sp.GetRequiredService<ProcessEngine>().Validator));
+        builder.Services.AddSingleton(new AssistantKeyStore(store));
+        // Помощнику — каталог блоков из того же реестра и два примера сценариев (как образец формата и стиля).
+        builder.Services.AddSingleton(sp => new Assistant.ScenarioAssistant(registry, sp.GetRequiredService<ProcessEngine>().Validator,
+            [SampleScenarios.TelegramReply(), SampleScenarios.AdsPowerTelegram()])
+        {
+            BaseUrl = options.AssistantBaseUrl,
+        });
         builder.Services.AddSingleton<ProcessMapper>();
 
         var app = builder.Build();

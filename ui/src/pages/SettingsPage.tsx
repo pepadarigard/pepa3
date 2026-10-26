@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { Fingerprint, FolderOpen, Monitor, Moon, PlugZap, Save, Sparkles, Sun } from "lucide-react";
+import { Fingerprint, FolderOpen, Monitor, Moon, PlugZap, Save, Sun } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { useInfo, useSettings } from "../api/hooks";
 import type { Settings } from "../api/types";
+import { AssistantCard } from "../components/AssistantCard";
 import { useFeedback } from "../components/feedback";
 import { Badge, Button, Callout, Card, ErrorState, Loading } from "../components/ui";
 import { native } from "../lib/native";
@@ -171,15 +172,7 @@ export function SettingsPage() {
         </div>
       </Card>
 
-      <Card title={<h2 className="row"><Sparkles size={16} /> ИИ-помощник</h2>}>
-        <div className="card-body stack">
-          <div className="row"><Badge tone="neutral">Не подключён</Badge><span className="small muted">Запланирован на этап 5.</span></div>
-          <p className="small muted">
-            Помощник будет предлагать сценарии по описанию обычными словами и объяснять существующие. Он необязателен: все
-            сценарии работают без него, а предложенный сценарий проходит ту же проверку и остаётся редактируемым.
-          </p>
-        </div>
-      </Card>
+      <AssistantCard />
 
       {info.data && (
         <Card title="О программе">

@@ -1,0 +1,293 @@
+using System.Globalization;
+using System.Text.Json.Nodes;
+using Pepa.Core.Model;
+using Pepa.Core.Nodes;
+using Pepa.Core.Validation;
+
+namespace Pepa.Assistant;
+
+/// <summary>Результат разбора черновика: блоки Pepa и список ошибок (для исправления моделью или пользователем).</summary>
+internal sealed record ConvertedDraft(
+    IReadOnlyList<VariableDefinition> Variables,
+    IReadOnlyList<NodeDefinition> Nodes,
+    IReadOnlyList<EdgeDefinition> Edges,
+    string? EntryNodeId,
+    IReadOnlyList<string> Problems);
+
+/// <summary>
+/// Ответ модели → блоки, связи и переменные Pepa. Значения полей приводятся к виду поля (число, да/нет), остальные поля
+/// блока получают значения по умолчанию (как у блока, добавленного вручную). Затем черновик проверяется тем же
+/// <see cref="ScenarioValidator"/>, что и сценарий в конструкторе, — как если бы он уже был вставлен после «Начала».
+/// </summary>
+internal sealed class DraftConverter(NodeRegistry registry, ScenarioValidator validator)
+{
+    private const string StartId = "__start";
+    private const double ColumnWidth = 280;
+    private const double RowHeight = 150;
+
+    public ConvertedDraft Convert(DraftJson draft, IReadOnlyList<VariableDefinition> existing)
+    {
+        var problems = new List<string>();
+
+        // Переменные: новые (уже существующие не дублируются).
+        var known = existing.Select(v => v.Name).ToHashSet(StringComparer.Ordinal);
+        var variables = new List<VariableDefinition>();
+        foreach (var v in draft.Variables)
+        {
+            var name = v.Name.Trim();
+            if (known.Contains(name) || variables.Any(x => x.Name == name))
+            {
+                continue;
+            }
+
+            var type = Enum.TryParse<VariableType>(v.Type, ignoreCase: true, out var parsed) ? parsed : VariableType.Any;
+            variables.Add(new VariableDefinition
+            {
+                Name = name,
+                Type = type,
+                Description = v.Description.Trim(),
+                IsInput = v.IsInput,
+                Default = DefaultValue(type, v.Default),
+            });
+        }
+
+        // Блоки.
+        var nodes = new List<NodeDefinition>();
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var block in draft.Blocks)
+        {
+            var id = block.Id.Trim();
+            var label = block.Label.Trim();
+            var name = label.Length > 0 ? $"«{label}» ({id})" : id;
+            if (id.Length == 0 || !ids.Add(id))
+            {
+                problems.Add(id.Length == 0 ? "У блока нет id." : $"id блока «{id}» повторяется — у каждого блока должен быть свой id.");
+                continue;
+            }
+
+            var descriptor = registry.FindDescriptor(block.Type);
+            if (descriptor is null || descriptor.IsStart)
+            {
+                problems.Add($"Блок {name}: тип «{block.Type}» нельзя использовать (нет в каталоге).");
+                continue;
+            }
+
+            var config = new JsonObject();
+            foreach (var field in descriptor.Fields)
+            {
+                if (field.Default is { } value)
+                {
+                    config[field.Name] = value.DeepClone();
+                }
+            }
+
+            foreach (var setting in block.Settings)
+            {
+                var field = descriptor.Fields.FirstOrDefault(f => f.Name == setting.Field.Trim());
+                if (field is null)
+                {
+                    problems.Add($"Блок {name} ({descriptor.Type}): поля «{setting.Field}» нет. Поля этого блока: " +
+                                 $"{string.Join(", ", descriptor.Fields.Select(f => f.Name))}.");
+                    continue;
+                }
+
+                if (setting.Value.Length == 0)
+                {
+                    continue;
+                }
+
+                if (FieldValue(field, setting.Value) is { } converted)
+                {
+                    config[field.Name] = converted;
+                }
+                else
+                {
+                    problems.Add($"Блок {name}, поле «{field.Name}»: значение «{setting.Value}» не подходит (нужно {Expected(field)}).");
+                }
+            }
+
+            nodes.Add(new NodeDefinition
+            {
+                Id = id,
+                Type = descriptor.Type,
+                Label = label.Length > 0 ? label : null,
+                Note = block.Note.Trim() is { Length: > 0 } note ? note : null,
+                Config = config,
+            });
+        }
+
+        // Связи.
+        var edges = new List<EdgeDefinition>();
+        foreach (var link in draft.Links)
+        {
+            var from = nodes.FirstOrDefault(n => n.Id == link.From.Trim());
+            var to = nodes.FirstOrDefault(n => n.Id == link.To.Trim());
+            if (from is null || to is null)
+            {
+                problems.Add($"Связь {link.From} → {link.To}: блока «{(from is null ? link.From : link.To)}» нет в черновике.");
+                continue;
+            }
+
+            var port = link.Port.Trim();
+            var descriptor = registry.FindDescriptor(from.Type)!;
+            if (descriptor.FindOutput(port) is null)
+            {
+                problems.Add($"Связь {link.From} → {link.To}: у блока {from.Id} ({from.Type}) нет выхода «{port}». Выходы: " +
+                             $"{string.Join(", ", descriptor.Outputs.Select(p => p.Id))}.");
+                continue;
+            }
+
+            if (edges.Any(e => e.Source == from.Id && e.SourcePort == port))
+            {
+                problems.Add($"Из выхода «{port}» блока {from.Id} выходит несколько связей — из выхода может идти только одна.");
+                continue;
+            }
+
+            edges.Add(new EdgeDefinition { Id = $"{from.Id}-{port}-{to.Id}", Source = from.Id, SourcePort = port, Target = to.Id });
+        }
+
+        // Первый блок — без входящих связей (к нему подключится «Начало»).
+        var targets = edges.Select(e => e.Target).ToHashSet(StringComparer.Ordinal);
+        var entries = nodes.Where(n => !targets.Contains(n.Id)).ToList();
+        var entry = entries.FirstOrDefault()?.Id;
+        if (nodes.Count == 0)
+        {
+            problems.Add("В черновике нет ни одного блока.");
+        }
+        else if (entry is null)
+        {
+            problems.Add("У всех блоков есть входящие связи — непонятно, с какого блока начинать. Первый блок не должен иметь входящих связей.");
+        }
+        else if (entries.Count > 1)
+        {
+            problems.Add($"Без входящих связей несколько блоков ({string.Join(", ", entries.Select(n => n.Id))}): начинать можно только с одного, " +
+                         "остальные должны быть к чему-то подключены.");
+        }
+
+        // Проверка как в конструкторе: черновик сразу после «Начала» (и при ошибках разбора — чтобы модель исправила всё
+        // за один раз).
+        if (entry is not null)
+        {
+            problems.AddRange(Validate(existing, variables, nodes, edges, entry).Where(p => !problems.Contains(p)));
+        }
+
+        return new ConvertedDraft(variables, Layout(nodes, edges, entry), edges, entry, problems);
+    }
+
+    private IEnumerable<string> Validate(IReadOnlyList<VariableDefinition> existing, List<VariableDefinition> variables,
+        List<NodeDefinition> nodes, List<EdgeDefinition> edges, string entry)
+    {
+        var start = registry.Descriptors.First(d => d.IsStart);
+        var scenario = new ScenarioDefinition
+        {
+            Name = "Черновик помощника",
+            Variables = [.. existing, .. variables],
+            Nodes = [new NodeDefinition { Id = StartId, Type = start.Type }, .. nodes],
+            Edges = [new EdgeDefinition { Id = "__start-out", Source = StartId, SourcePort = start.Outputs[0].Id, Target = entry }, .. edges],
+        };
+        return validator.Validate(scenario).Issues
+            .Where(i => i.Severity == IssueSeverity.Error && i.NodeId != StartId)
+            .Select(i => i.Message)
+            .Distinct(StringComparer.Ordinal);
+    }
+
+    /// <summary>Расстановка слева направо по шагам от первого блока; ветви — одна под другой.</summary>
+    private static List<NodeDefinition> Layout(List<NodeDefinition> nodes, List<EdgeDefinition> edges, string? entry)
+    {
+        var depth = new Dictionary<string, int>(StringComparer.Ordinal);
+        var queue = new Queue<string>();
+        if (entry is not null)
+        {
+            depth[entry] = 0;
+            queue.Enqueue(entry);
+        }
+
+        while (queue.Count > 0)
+        {
+            var id = queue.Dequeue();
+            foreach (var edge in edges.Where(e => e.Source == id))
+            {
+                if (!depth.ContainsKey(edge.Target))
+                {
+                    depth[edge.Target] = depth[id] + 1;
+                    queue.Enqueue(edge.Target);
+                }
+            }
+        }
+
+        var lastColumn = depth.Count == 0 ? -1 : depth.Values.Max();
+        var rows = new Dictionary<int, int>();
+        var result = new List<NodeDefinition>();
+        foreach (var node in nodes)
+        {
+            var column = depth.TryGetValue(node.Id, out var d) ? d : ++lastColumn;
+            var row = rows.GetValueOrDefault(column);
+            rows[column] = row + 1;
+            result.Add(node with { Position = new NodePosition(column * ColumnWidth, row * RowHeight) });
+        }
+
+        return result;
+    }
+
+    private static JsonNode? FieldValue(FieldDescriptor field, string value)
+    {
+        switch (field.Kind)
+        {
+            case FieldKind.Number or FieldKind.Seconds:
+                if (!double.TryParse(value.Trim().Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out var number))
+                {
+                    return null;
+                }
+
+                return number % 1 == 0 && Math.Abs(number) < int.MaxValue ? JsonValue.Create((int)number) : JsonValue.Create(number);
+            case FieldKind.Boolean:
+                return value.Trim().ToLowerInvariant() switch
+                {
+                    "true" or "да" or "1" => JsonValue.Create(true),
+                    "false" or "нет" or "0" => JsonValue.Create(false),
+                    _ => null,
+                };
+            case FieldKind.Select when field.Options is { Count: > 0 } options:
+                return options.FirstOrDefault(o => o.Value == value.Trim()) is { } option ? JsonValue.Create(option.Value) : null;
+            default:
+                return JsonValue.Create(value);
+        }
+    }
+
+    private static string Expected(FieldDescriptor field) => field.Kind switch
+    {
+        FieldKind.Number or FieldKind.Seconds => "число",
+        FieldKind.Boolean => "true или false",
+        FieldKind.Select => $"одно из: {string.Join(", ", field.Options!.Select(o => o.Value))}",
+        _ => "текст",
+    };
+
+    private static JsonNode? DefaultValue(VariableType type, string value)
+    {
+        var text = value.Trim();
+        if (text.Length == 0)
+        {
+            return type == VariableType.Text ? JsonValue.Create("") : null;
+        }
+
+        return type switch
+        {
+            VariableType.Number when double.TryParse(text.Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out var n) => JsonValue.Create(n),
+            VariableType.Boolean when bool.TryParse(text, out var b) => JsonValue.Create(b),
+            VariableType.List or VariableType.Object => TryParseJson(text),
+            _ => JsonValue.Create(text),
+        };
+    }
+
+    private static JsonNode? TryParseJson(string text)
+    {
+        try
+        {
+            return JsonNode.Parse(text);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return null;
+        }
+    }
+}

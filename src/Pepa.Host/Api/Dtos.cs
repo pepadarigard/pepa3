@@ -242,3 +242,22 @@ public sealed record RecorderStateDto(bool Recording, string? Browser, string? P
 public sealed record TemplateDto(string Name, string Description, IReadOnlyList<string> Blocks, ScenarioDefinition Definition);
 
 public sealed record AdsPowerProfileDto(string Id, string? Number, string Name, string? Group);
+
+/// <summary>ИИ-помощник: задан ли ключ (сам ключ наружу не отдаётся — только последние символы).</summary>
+public sealed record AssistantStatusDto(bool Configured, string? KeyHint, string Model);
+
+public sealed record AssistantKeyRequest(string? ApiKey);
+
+public sealed record AssistantDraftRequest(string? Description, IReadOnlyList<VariableDefinition>? Variables);
+
+/// <summary>Черновик блоков для вставки в схему (в том же виде, что скопированные блоки).</summary>
+public sealed record AssistantDraftDto(
+    string Summary,
+    IReadOnlyList<string> Questions,
+    IReadOnlyList<VariableDefinition> Variables,
+    IReadOnlyList<NodeDefinition> Nodes,
+    IReadOnlyList<EdgeDefinition> Edges,
+    string? EntryNodeId,
+    IReadOnlyList<string> Problems,
+    int Requests,
+    Assistant.AssistantUsage Usage);

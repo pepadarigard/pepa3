@@ -35,6 +35,9 @@ public sealed record PepaHostOptions
     /// <summary>Адрес сервера Telegram «ip:порт» вместо основного (проверки: чтобы не обращаться к настоящему Telegram).</summary>
     public string? TelegramServerAddress { get; init; }
 
+    /// <summary>Адрес Claude API вместо настоящего (проверки: имитация сервера).</summary>
+    public string? AssistantBaseUrl { get; init; }
+
     /// <summary>Сколько ждать ответа Telegram при подключении и входе.</summary>
     public TimeSpan TelegramConnectTimeout { get; init; } = TimeSpan.FromSeconds(45);
 

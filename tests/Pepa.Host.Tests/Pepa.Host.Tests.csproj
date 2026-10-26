@@ -2,4 +2,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Pepa.Host\Pepa.Host.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\Pepa.Assistant.Tests\FakeAnthropic.cs" Link="FakeAnthropic.cs" />
+  </ItemGroup>
 </Project>

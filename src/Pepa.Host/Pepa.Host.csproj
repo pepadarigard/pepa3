@@ -11,6 +11,7 @@
     <ProjectReference Include="..\Pepa.Adapters.Browser\Pepa.Adapters.Browser.csproj" />
     <ProjectReference Include="..\Pepa.Adapters.Telegram\Pepa.Adapters.Telegram.csproj" />
     <ProjectReference Include="..\Pepa.Adapters.Desktop\Pepa.Adapters.Desktop.csproj" />
+    <ProjectReference Include="..\Pepa.Assistant\Pepa.Assistant.csproj" />
   </ItemGroup>
   <ItemGroup>
     <!-- Собранный интерфейс (ui/ → npm run build) копируется рядом с приложением. -->

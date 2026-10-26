@@ -434,3 +434,24 @@ export interface AdsPowerProfile {
   name: string;
   group: string | null;
 }
+
+export interface AssistantStatus {
+  configured: boolean;
+  /** Последние символы ключа (сам ключ не отдаётся). */
+  keyHint: string | null;
+  model: string;
+}
+
+/** Черновик помощника: блоки для вставки в схему. */
+export interface AssistantDraft {
+  summary: string;
+  questions: string[];
+  variables: VariableDefinition[];
+  nodes: NodeDefinition[];
+  edges: EdgeDefinition[];
+  entryNodeId: string | null;
+  /** Ошибки проверки, которые помощник не исправил: черновик можно вставить и поправить. */
+  problems: string[];
+  requests: number;
+  usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number };
+}

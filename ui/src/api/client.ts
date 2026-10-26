@@ -1,5 +1,8 @@
 import type {
   AdsPowerProfile,
+  AssistantDraft,
+  AssistantStatus,
+  VariableDefinition,
   DesktopWindow,
   ScenarioTemplate,
   RecorderState,
@@ -154,6 +157,12 @@ export const api = {
 
   desktopWindows: () => request<DesktopWindow[]>("GET", "/integrations/desktop/windows"),
   templates: () => request<ScenarioTemplate[]>("GET", "/templates"),
+  assistant: () => request<AssistantStatus>("GET", "/assistant"),
+  assistantSetKey: (apiKey: string) => request<AssistantStatus>("PUT", "/assistant/key", { apiKey }),
+  assistantClearKey: () => request<AssistantStatus>("DELETE", "/assistant/key"),
+  assistantCheck: () => request<{ ok: boolean; message: string }>("POST", "/assistant/check"),
+  assistantDraft: (description: string, variables: VariableDefinition[]) =>
+    request<AssistantDraft>("POST", "/assistant/draft", { description, variables }),
   recorder: () => request<RecorderState>("GET", "/recorder"),
   recorderStart: (start: { browser: "pepa" | "adspower"; profileId: string | null; url: string | null }) =>
     request<RecorderState>("POST", "/recorder/start", start),

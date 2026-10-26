@@ -11,6 +11,7 @@
     <PackageVersion Include="WTelegramClient" Version="4.4.9" />
     <PackageVersion Include="FlaUI.UIA3" Version="5.0.0" />
     <PackageVersion Include="System.Security.Cryptography.ProtectedData" Version="10.0.13" />
+    <PackageVersion Include="Anthropic" Version="13.3.0" />
     <!-- Тесты -->
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.10.1" />
     <PackageVersion Include="xunit.v3" Version="3.2.2" />
