@@ -63,7 +63,7 @@ public sealed class EngineHarness : IAsyncDisposable
         return _extraNodes?.Invoke(registry) ?? registry;
     }
 
-    private async Task StartEngineAsync(bool withFaults)
+    private async Task StartEngineAsync(bool withFaults, Action<ProcessEngine>? beforeStart = null)
     {
         IPepaStore store = withFaults ? Faults : Store;
         var registry = CreateRegistry();
@@ -71,6 +71,7 @@ public sealed class EngineHarness : IAsyncDisposable
         Engine = new ProcessEngine(store, registry, expressions, Options, Time);
         Scenarios = new ScenarioService(store, Engine.Validator, Time);
         _engines.Add(Engine);
+        beforeStart?.Invoke(Engine);
         LastRecovery = await Engine.StartAsync();
     }
 
@@ -78,11 +79,12 @@ public sealed class EngineHarness : IAsyncDisposable
 
     /// <summary>Закрыть приложение (мягко) и открыть снова над тем же файлом базы.</summary>
     /// <param name="whileClosed">Что происходит, пока приложение закрыто (например, проходит время).</param>
-    public async Task RestartAsync(bool withFaults = false, Action? whileClosed = null)
+    /// <param name="beforeStart">Настройка нового движка до запуска (например, источник событий ещё догружает пропущенное).</param>
+    public async Task RestartAsync(bool withFaults = false, Action? whileClosed = null, Action<ProcessEngine>? beforeStart = null)
     {
         await Engine.StopAsync();
         whileClosed?.Invoke();
-        await StartEngineAsync(withFaults);
+        await StartEngineAsync(withFaults, beforeStart);
     }
 
     /// <summary>Аварийно бросить текущий движок (без ожидания) и открыть новый над тем же файлом базы.</summary>

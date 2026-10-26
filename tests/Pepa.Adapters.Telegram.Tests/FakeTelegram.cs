@@ -33,6 +33,15 @@ internal sealed class FakeTelegram : ITelegramGateway
     /// <summary>Ключи от повторов, с которыми отправлялись сообщения.</summary>
     public ConcurrentQueue<long> RandomIds { get; } = new();
 
+    /// <summary>
+    /// Связь оборвалась, а запрос остался в библиотеке: сообщение дойдёт позже (при следующем обращении к Telegram),
+    /// а сейчас в истории его нет.
+    /// </summary>
+    public bool DeliverLater { get; set; }
+
+    private readonly ConcurrentQueue<(TelegramPeer Chat, TelegramHistoryMessage Message)> _late = new();
+    private readonly ConcurrentDictionary<long, bool> _usedRandomIds = new();
+
     public int NextId => Volatile.Read(ref _nextId);
 
     /// <summary>Чужое сообщение в истории чата (например, ответ собеседника или то же сообщение, отправленное с телефона).</summary>
@@ -78,9 +87,28 @@ internal sealed class FakeTelegram : ITelegramGateway
             throw new IOException("Нет связи — сообщение не ушло.");
         }
 
+        // Запрос, застрявший после обрыва, библиотека отправляет при восстановлении связи.
+        while (_late.TryDequeue(out var late))
+        {
+            Sent.Enqueue(late);
+            History.Enqueue(late);
+        }
+
+        // Как Telegram: второе сообщение с тем же ключом не принимается.
+        if (!_usedRandomIds.TryAdd(randomId, true))
+        {
+            throw new TelegramAlreadySentException();
+        }
+
         RandomIds.Enqueue(randomId);
         // Как Telegram: края текста обрезаются.
         var message = new TelegramHistoryMessage(Interlocked.Increment(ref _nextId), true, TelegramEvents.NormalizeText(text), DateTimeOffset.UtcNow);
+        if (DeliverLater)
+        {
+            _late.Enqueue((chat, message));
+            throw new IOException("Связь оборвалась; запрос остался в очереди библиотеки.");
+        }
+
         Sent.Enqueue((chat, message));
         History.Enqueue((chat, message));
         if (LoseConfirmation)

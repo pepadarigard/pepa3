@@ -27,6 +27,7 @@ public sealed class HookStore(IPepaStore inner) : IPepaStore
     public Task<IReadOnlyList<TokenRecord>> GetTokensAsync(IReadOnlyCollection<string> p, CancellationToken c = default) => inner.GetTokensAsync(p, c);
     public Task<IReadOnlyList<StepRecord>> GetStepsAsync(string p, CancellationToken c = default) => inner.GetStepsAsync(p, c);
     public Task<StepRecord?> GetStepAsync(long s, CancellationToken c = default) => inner.GetStepAsync(s, c);
+    public Task<StepRecord?> GetLastStepAsync(string p, string t, string n, CancellationToken c = default) => inner.GetLastStepAsync(p, t, n, c);
     public Task<IReadOnlyList<StepRecord>> GetOpenStepsAsync(string p, CancellationToken c = default) => inner.GetOpenStepsAsync(p, c);
     public Task<IReadOnlyList<JournalEntry>> GetJournalAsync(string p, CancellationToken c = default) => inner.GetJournalAsync(p, c);
     public Task<IReadOnlyList<string>> GetRunnableProcessIdsAsync(DateTimeOffset n, CancellationToken c = default) => inner.GetRunnableProcessIdsAsync(n, c);

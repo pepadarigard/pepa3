@@ -124,13 +124,33 @@ public static class DesktopNodes
     }
 
     /// <summary>Дождаться ровно одного подходящего окна. Несколько окон — ошибка: какое из них нужно, Pepa не угадывает.</summary>
-    /// <remarks>Ждёт по настоящим часам: окна живут в реальном времени, а не во времени процесса.</remarks>
-    internal static async Task<DesktopWindow?> WaitWindowAsync(IDesktop desktop, WindowQuery query, TimeSpan wait, CancellationToken cancellationToken)
+    /// <remarks>
+    /// Ждёт по настоящим часам: окна живут в реальном времени, а не во времени процесса. Сбой Windows при переборе окон
+    /// (окно закрылось посреди перебора) — «пока не нашли», а не ошибка; ошибка — только если так и не удалось к сроку.
+    /// </remarks>
+    /// <param name="filter">Дополнительное условие (например, «окно новое, его не было до запуска программы»).</param>
+    internal static async Task<DesktopWindow?> WaitWindowAsync(IDesktop desktop, WindowQuery query, TimeSpan wait, CancellationToken cancellationToken,
+        Func<DesktopWindow, bool>? filter = null)
     {
         var deadline = DateTime.UtcNow + wait;
         while (true)
         {
-            var windows = await desktop.FindWindowsAsync(query, cancellationToken);
+            IReadOnlyList<DesktopWindow> windows;
+            try
+            {
+                windows = await desktop.FindWindowsAsync(query, cancellationToken);
+            }
+            catch (DesktopException) when (DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken);
+                continue;
+            }
+
+            if (filter is not null)
+            {
+                windows = windows.Where(filter).ToList();
+            }
+
             if (windows.Count == 1)
             {
                 return windows[0];
@@ -158,7 +178,18 @@ public static class DesktopNodes
         var deadline = DateTime.UtcNow + wait;
         while (true)
         {
-            var elements = await desktop.FindElementsAsync(window, query, cancellationToken);
+            IReadOnlyList<DesktopElement> elements;
+            try
+            {
+                elements = await desktop.FindElementsAsync(window, query, cancellationToken);
+            }
+            catch (DesktopException) when (DateTime.UtcNow < deadline)
+            {
+                // Окно перерисовывается или занято — попробовать ещё раз.
+                await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken);
+                continue;
+            }
+
             if (elements.Count == 1 || (elements.Count > 1 && match is "first" or "last"))
             {
                 return match == "last" ? elements[^1] : elements[0];
@@ -231,6 +262,15 @@ public static class DesktopNodes
         try
         {
             return await action(window, element);
+        }
+        catch (DesktopInputBlockedException ex) when (!ex.Partial)
+        {
+            // Проверка перед вводом не пропустила его: ничего не нажато и не напечатано.
+            return NodeResult.Fail($"{ex.Message} Действие «{what}» не выполнялось.");
+        }
+        catch (DesktopInputBlockedException ex)
+        {
+            return new NodeResult.Unknown($"Ввод прерван на середине: {ex.Message}");
         }
         catch (DesktopException ex)
         {

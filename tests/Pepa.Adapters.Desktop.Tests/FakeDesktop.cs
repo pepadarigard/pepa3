@@ -16,6 +16,18 @@ internal sealed class FakeDesktop : IDesktop
     /// <summary>Действие с элементом выполняется, но Windows сообщает об ошибке (итог неизвестен).</summary>
     public bool FailAfterAction { get; set; }
 
+    /// <summary>Windows не даёт вывести окно на передний план (пользователь работает в другом окне).</summary>
+    public bool ForegroundRefused { get; set; }
+
+    /// <summary>После стольких напечатанных символов окно теряет передний план (пользователь переключился).</summary>
+    public int? ForegroundLostAfterChars { get; set; }
+
+    /// <summary>Нажатие без мыши «зависает»: программа открыла диалог и не отвечает.</summary>
+    public bool InvokeHangs { get; set; }
+
+    /// <summary>Сколько раз перебор окон ещё упадёт (окно закрылось посреди перебора).</summary>
+    public int ListFailures { get; set; }
+
     public FakeWindow AddWindow(string title, string process = "app", int x = 100, int y = 200, int width = 800, int height = 600)
     {
         var window = new FakeWindow(new WindowInfo(_windows.Count + 1, title, process, 1000 + _windows.Count, new DesktopRect(x, y, width, height)));
@@ -49,6 +61,12 @@ internal sealed class FakeDesktop : IDesktop
         Available();
         lock (_gate)
         {
+            if (ListFailures > 0)
+            {
+                ListFailures--;
+                throw new DesktopException("элемент недоступен (окно закрылось)");
+            }
+
             return Task.FromResult<IReadOnlyList<DesktopWindow>>(_windows
                 .Where(w => (query.TitleContains is null || w.Info.Title.Contains(query.TitleContains, StringComparison.CurrentCultureIgnoreCase)) &&
                             (query.ProcessName is null || string.Equals(w.Info.ProcessName, query.ProcessName, StringComparison.OrdinalIgnoreCase)))
@@ -74,28 +92,42 @@ internal sealed class FakeDesktop : IDesktop
 
     public Task<bool> IsOpenAsync(DesktopWindow window, CancellationToken cancellationToken) => Task.FromResult(((FakeWindow)window).Open);
 
-    public Task ActivateAsync(DesktopWindow window, CancellationToken cancellationToken)
+    public Task<WindowInfo> ActivateAsync(DesktopWindow window, CancellationToken cancellationToken)
     {
+        if (ForegroundRefused)
+        {
+            throw new DesktopInputBlockedException($"Окно «{window.Info.Title}» не на переднем плане.");
+        }
+
+        var fake = (FakeWindow)window;
         Actions.Enqueue($"activate {window.Info.Title}");
-        return Task.CompletedTask;
+        fake.Foreground = true;
+        return Task.FromResult(fake.Info with { Bounds = fake.RestoredBounds ?? fake.Info.Bounds });
     }
 
-    public Task<bool> InvokeAsync(DesktopElement element, CancellationToken cancellationToken)
+    public async Task<InvokeOutcome> InvokeAsync(DesktopElement element, CancellationToken cancellationToken)
     {
         var fake = (FakeElement)element;
         if (!fake.CanInvoke)
         {
-            return Task.FromResult(false);
+            return InvokeOutcome.NotSupported;
         }
 
         Actions.Enqueue($"invoke {fake.Info.Name}");
         fake.Clicks++;
-        return AfterAction(true);
+        await AfterAction(true);
+        return InvokeHangs ? InvokeOutcome.Pending : InvokeOutcome.Done;
     }
 
-    public Task ClickAsync(DesktopElement element, MouseButtonKind button, bool doubleClick, CancellationToken cancellationToken)
+    public Task ClickAsync(DesktopWindow window, DesktopElement element, MouseButtonKind button, bool doubleClick, CancellationToken cancellationToken)
     {
         var fake = (FakeElement)element;
+        RequireForeground(window);
+        if (fake.Covered)
+        {
+            throw new DesktopInputBlockedException($"В точке элемента «{fake.Info.Name}» сейчас другое окно.");
+        }
+
         Actions.Enqueue($"{(doubleClick ? "double" : button == MouseButtonKind.Right ? "right" : "click")} {fake.Info.Name}");
         fake.Clicks++;
         return AfterAction(true);
@@ -114,8 +146,9 @@ internal sealed class FakeDesktop : IDesktop
         return AfterAction(true);
     }
 
-    public Task FocusAsync(DesktopElement element, CancellationToken cancellationToken)
+    public Task FocusAsync(DesktopWindow window, DesktopElement element, CancellationToken cancellationToken)
     {
+        RequireForeground(window);
         Actions.Enqueue($"focus {element.Info.Name}");
         return Task.CompletedTask;
     }
@@ -131,25 +164,46 @@ internal sealed class FakeDesktop : IDesktop
         });
     }
 
-    public Task MouseClickAsync(int x, int y, MouseButtonKind button, bool doubleClick, CancellationToken cancellationToken)
+    public Task MouseClickAsync(DesktopWindow window, int x, int y, MouseButtonKind button, bool doubleClick, CancellationToken cancellationToken)
     {
+        RequireForeground(window);
         Actions.Enqueue($"mouse {x},{y}{(doubleClick ? " double" : "")}{(button == MouseButtonKind.Right ? " right" : "")}");
         return AfterAction(true);
     }
 
-    public Task TypeTextAsync(string text, int delayMs, CancellationToken cancellationToken)
+    public Task TypeTextAsync(DesktopWindow window, string text, int delayMs, CancellationToken cancellationToken)
     {
+        RequireForeground(window);
+        if (ForegroundLostAfterChars is { } lost && lost < text.Length)
+        {
+            Actions.Enqueue($"type {text[..lost]}");
+            throw new DesktopInputBlockedException("Окно ушло с переднего плана.", partial: lost > 0);
+        }
+
         Actions.Enqueue($"type {text}");
         return AfterAction(true);
     }
 
-    public Task PressKeysAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken)
+    public Task PressKeysAsync(DesktopWindow window, IReadOnlyList<string> keys, CancellationToken cancellationToken)
     {
+        RequireForeground(window);
         Actions.Enqueue($"keys {string.Join("+", keys)}");
         return Task.CompletedTask;
     }
 
+    /// <summary>Как настоящая реализация: ввод только в окно, выведенное на передний план.</summary>
+    private static void RequireForeground(DesktopWindow window)
+    {
+        if (!((FakeWindow)window).Foreground)
+        {
+            throw new DesktopInputBlockedException($"Окно «{window.Info.Title}» не на переднем плане.");
+        }
+    }
+
     public List<string> Started { get; } = [];
+
+    /// <summary>Какое окно открывает программа при запуске (путь → заголовок).</summary>
+    public Dictionary<string, string> OpensWindow { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     public Task<int> StartProgramAsync(string path, string? arguments, CancellationToken cancellationToken)
     {
@@ -159,6 +213,11 @@ internal sealed class FakeDesktop : IDesktop
         }
 
         Started.Add(path);
+        if (OpensWindow.TryGetValue(path, out var title))
+        {
+            AddWindow(title, path);
+        }
+
         return Task.FromResult(4242);
     }
 
@@ -193,6 +252,12 @@ internal sealed class FakeWindow(WindowInfo info) : DesktopWindow
     public bool Open { get; set; } = true;
     public bool RefusesToClose { get; set; }
 
+    /// <summary>Выведено на передний план (после «активировать»).</summary>
+    public bool Foreground { get; set; }
+
+    /// <summary>Положение после вывода на передний план (у свёрнутого окна оно другое).</summary>
+    public DesktopRect? RestoredBounds { get; set; }
+
     public FakeElement Add(string name, string type = "Button", string id = "", bool enabled = true, bool canInvoke = true, bool hasValue = false)
     {
         var element = new FakeElement(new ElementInfo(name, type, id, new DesktopRect(Info.Bounds.X + 10, Info.Bounds.Y + 10, 80, 30), enabled))
@@ -216,4 +281,7 @@ internal sealed class FakeElement(ElementInfo info) : DesktopElement
     public bool HasValue { get; init; }
     public string? Value { get; set; }
     public int Clicks { get; set; }
+
+    /// <summary>Элемент перекрыт другим окном или за краем экрана.</summary>
+    public bool Covered { get; set; }
 }

@@ -178,6 +178,13 @@ public sealed class PepaHost : IAsyncDisposable
         // Процесс завершился — закрыть его браузеры (и профили AdsPower, если так настроено в блоке).
         engine.ProcessFinished += processId => _ = browsers.ReleaseProcessAsync(processId);
 
+        // Пока Telegram после запуска догружает пропущенные сообщения, тайм-ауты ожиданий ответа не наступают.
+        if (telegram.WillCatchUp)
+        {
+            engine.SourceCatchingUp(TelegramEvents.Source);
+            telegram.CaughtUp += () => engine.SourceCaughtUp(TelegramEvents.Source);
+        }
+
         hostContext.Recovery = await engine.StartAsync(cancellationToken);
         var unfinished = await store.ListProcessesAsync(new ProcessQuery
         {
@@ -317,8 +324,9 @@ public sealed class PepaHost : IAsyncDisposable
         }
         finally
         {
-            await telegram.DisposeAsync();
+            // Сначала движок: он дожидается выполняющихся шагов (отправка в Telegram должна успеть завершиться), потом Telegram.
             await engine.StopAsync();
+            await telegram.DisposeAsync();
             await Services.GetRequiredService<BrowserRecorder>().DisposeAsync();
             await Services.GetRequiredService<BrowserSessions>().DisposeAsync();
             Services.GetRequiredService<AdsPowerClient>().Dispose();

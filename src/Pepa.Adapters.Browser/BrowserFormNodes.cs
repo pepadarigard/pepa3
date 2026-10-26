@@ -150,7 +150,17 @@ public sealed class CheckNode(BrowserSessions sessions) : INodeExecutor
             }
             catch (PlaywrightException ex) when (ex.Message.Contains("did not change its state", StringComparison.OrdinalIgnoreCase))
             {
-                return new NodeResult.Unknown($"После нажатия на «{selector}» отметка не изменилась — возможно, сайт обрабатывает нажатие иначе.");
+                // Нажатие было. Сайт может менять отметку не сразу (после ответа сервера) — подождать, а не нажимать снова.
+                if (await SettledAsync(locator, check))
+                {
+                    return NodeResult.Ok(Ports.Out, check ? $"Отмечено: «{selector}» (сайт поставил отметку не сразу)." : $"Отметка снята: «{selector}» (не сразу).");
+                }
+
+                return new NodeResult.Unknown($"Pepa нажала на «{selector}», но отметка не изменилась — возможно, сайт обрабатывает нажатие иначе. " +
+                                              "Ещё одно нажатие могло бы вернуть всё назад, поэтому Pepa не повторяет его сама — посмотрите на страницу.")
+                {
+                    AlreadyChecked = true,
+                };
             }
 
             return NodeResult.Ok(Ports.Out, check ? $"Отмечено: «{selector}»." : $"Отметка снята: «{selector}».");
@@ -166,14 +176,34 @@ public sealed class CheckNode(BrowserSessions sessions) : INodeExecutor
 
         try
         {
-            var isChecked = await BrowserNodes.Locate(page, context).IsCheckedAsync(new LocatorIsCheckedOptions { Timeout = 5_000 });
-            return isChecked == (context.GetString("state") != "uncheck")
+            var check = context.GetString("state") != "uncheck";
+            return await SettledAsync(BrowserNodes.Locate(page, context), check)
                 ? VerificationResult.Done("отметка уже как нужно")
                 : VerificationResult.NotDone("отметка не та — можно поставить заново");
         }
         catch (PlaywrightException ex)
         {
             return VerificationResult.Inconclusive($"не удалось проверить отметку: {BrowserSessions.FirstLine(ex.Message)}");
+        }
+    }
+
+    /// <summary>Отметка стала нужной в течение пары секунд (сайт может ставить её после ответа сервера).</summary>
+    private static async Task<bool> SettledAsync(ILocator locator, bool check)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(3);
+        while (true)
+        {
+            if (await locator.IsCheckedAsync(new LocatorIsCheckedOptions { Timeout = 5_000 }) == check)
+            {
+                return true;
+            }
+
+            if (DateTime.UtcNow >= deadline)
+            {
+                return false;
+            }
+
+            await Task.Delay(200);
         }
     }
 }
@@ -281,7 +311,13 @@ public sealed class UploadFileNode(BrowserSessions sessions, IWorkspace workspac
             var names = await locator.EvaluateAsync<string[]>(FileNames);
             if (!names.Contains(Path.GetFileName(full), StringComparer.Ordinal))
             {
-                return new NodeResult.Unknown($"Браузер не показал файл «{relative}» в поле «{selector}» после выбора — проверьте страницу.");
+                // Пустое поле после выбора: файл не принят — или сайт сразу забрал его (так делают многие сайты). Различить нельзя,
+                // а повтор мог бы загрузить файл дважды.
+                return new NodeResult.Unknown($"Файл «{relative}» выбран, но в поле «{selector}» его не видно: возможно, сайт сразу забрал его " +
+                                              "(тогда всё в порядке), а возможно, не принял. Посмотрите на страницу и решите, как продолжить.")
+                {
+                    AlreadyChecked = true,
+                };
             }
 
             return NodeResult.Ok(Ports.Out, new Dictionary<string, JsonNode?>(), new JsonObject { ["path"] = relative },
@@ -301,9 +337,10 @@ public sealed class UploadFileNode(BrowserSessions sessions, IWorkspace workspac
         {
             var name = Path.GetFileName(workspace.Resolve(context.RequireString("path")));
             var names = await BrowserNodes.Locate(page, context).EvaluateAsync<string[]>(FileNames);
+            // Пустое поле ничего не доказывает: сайт мог уже забрать файл. «Не выполнено» сказать нельзя.
             return names.Contains(name, StringComparer.Ordinal)
                 ? VerificationResult.Done("файл уже выбран в поле")
-                : VerificationResult.NotDone("файл в поле не выбран — можно выбрать заново");
+                : VerificationResult.Inconclusive("в поле файла нет: либо он не выбирался, либо сайт уже забрал его — посмотрите на страницу");
         }
         catch (PlaywrightException ex)
         {
@@ -441,7 +478,7 @@ public sealed class EvaluateNode(BrowserSessions sessions) : INodeExecutor
         Category = BrowserNodes.Category.Id,
         Title = "Выполнить JavaScript",
         Description = "Выполняет код JavaScript на странице и сохраняет результат. Для опытных: код может изменить страницу, " +
-                      "поэтому после сбоя он сам не повторяется.",
+                      "поэтому после сбоя он сам не повторяется. Переменные процесса доступны коду как vars.имя.",
         Icon = "code",
         Effect = NodeEffect.External,
         SupportsVerification = false,
@@ -451,20 +488,68 @@ public sealed class EvaluateNode(BrowserSessions sessions) : INodeExecutor
         [
             new FieldDescriptor
             {
-                Name = "script", Label = "Код", Kind = FieldKind.MultilineTemplate, Required = true,
+                Name = "script", Label = "Код", Kind = FieldKind.Code, Required = true,
                 Placeholder = "document.querySelectorAll('.item').length",
-                Help = "Выражение или функция () => { … return значение; }. {{ … }} подставляется в код как текст.",
+                Help = "Выражение или функция () => { … return значение; }. Переменные процесса — vars.имя (например, vars.code). " +
+                       "Подстановки {{ … }} здесь не работают: текст из переменной не должен становиться кодом.",
             },
             new FieldDescriptor { Name = "saveTo", Label = "Сохранить результат в", Kind = FieldKind.Variable },
             BrowserNodes.SessionField,
         ],
     };
 
+    public IEnumerable<NodeConfigIssue> Validate(NodeDefinition node)
+    {
+        if (node.Config.GetString("script") is { } script && script.Contains("{{", StringComparison.Ordinal))
+        {
+            yield return new NodeConfigIssue("В коде есть {{ … }}: подстановки в код не делаются. Используйте переменные напрямую: vars.имя.", "script");
+        }
+    }
+
+    /// <summary>
+    /// Код пользователя — выражение или функция; переменные передаются аргументом (vars), а не вклеиваются в текст кода.
+    /// </summary>
+    /// <summary>Странице передаются только переменные, которые код упоминает (vars.имя); при обращении к vars целиком — все.</summary>
+    public static JsonObject UsedVariables(string script, JsonObject variables)
+    {
+        if (System.Text.RegularExpressions.Regex.IsMatch(script, @"\bvars\b(?!\s*\.)"))
+        {
+            return variables;
+        }
+
+        var used = new JsonObject();
+        foreach (System.Text.RegularExpressions.Match match in System.Text.RegularExpressions.Regex.Matches(script, @"\bvars\s*\.\s*([\p{L}_$][\p{L}\p{N}_$]*)"))
+        {
+            var name = match.Groups[1].Value;
+            if (!used.ContainsKey(name) && variables.TryGetPropertyValue(name, out var value))
+            {
+                used[name] = value?.DeepClone();
+            }
+        }
+
+        return used;
+    }
+
+    /// <summary>JSON → обычные значения .NET (так их передаёт Playwright).</summary>
+    private static object? Plain(JsonNode? node) => node switch
+    {
+        null => null,
+        JsonObject o => o.ToDictionary(p => p.Key, p => Plain(p.Value)),
+        JsonArray a => a.Select(Plain).ToList(),
+        JsonValue v when v.TryGetValue<bool>(out var b) => b,
+        JsonValue v when v.TryGetValue<string>(out var t) => t,
+        JsonValue v when v.TryGetValue<double>(out var d) => d,
+        _ => node.ToJsonString(),
+    };
+
+    internal static string Wrap(string script) =>
+        $"(vars) => {{ const __pepa = (\n{script}\n); return typeof __pepa === 'function' ? __pepa(vars) : __pepa; }}";
+
     public ValueTask<NodeResult> ExecuteAsync(NodeExecutionContext context, CancellationToken cancellationToken) =>
         BrowserNodes.Run(context, sessions, cancellationToken, async (_, page) =>
         {
             var script = context.RequireString("script");
-            var result = await page.EvaluateAsync<JsonElement?>(script);
+            var result = await page.EvaluateAsync<JsonElement?>(Wrap(script), Plain(UsedVariables(script, context.Variables)));
             var value = result is { } element ? JsonSerializer.SerializeToNode(element) : null;
             var updates = new Dictionary<string, JsonNode?>();
             if (context.GetString("saveTo") is { Length: > 0 } saveTo)

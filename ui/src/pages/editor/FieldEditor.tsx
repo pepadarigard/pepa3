@@ -74,6 +74,20 @@ export function FieldEditor({ field, value, onChange, variables, onCreateVariabl
         </WithInserts>
       );
       break;
+    case "code":
+      control = (
+        <WithInserts field={field} variables={variables} onInsert={(snippet) => onChange(text ? `${text} ${snippet}` : snippet)}>
+          <textarea
+            className={`textarea mono${invalid}`}
+            style={{ minHeight: 90 }}
+            value={text}
+            spellCheck={false}
+            placeholder={field.placeholder ?? undefined}
+            onChange={(e) => onChange(e.target.value)}
+          />
+        </WithInserts>
+      );
+      break;
     case "expression":
     case "condition":
     case "matchCondition":
@@ -122,7 +136,7 @@ export function FieldEditor({ field, value, onChange, variables, onCreateVariabl
 
 /** Подсказки-вставки переменных для шаблонов и выражений. */
 function WithInserts({ field, variables, onInsert, children }: { field: FieldDescriptor; variables: VariableDefinition[]; onInsert: (snippet: string) => void; children: React.ReactNode }) {
-  const isExpression = field.kind === "expression" || field.kind === "condition" || field.kind === "matchCondition";
+  const isExpression = field.kind === "expression" || field.kind === "condition" || field.kind === "matchCondition" || field.kind === "code";
   const isTemplate = field.kind === "template" || field.kind === "multilineTemplate" || field.kind === "path";
   const eventChips = field.kind === "matchCondition" ? ["event.payload", "event.correlationKey", "event.type"] : [];
   if ((!isExpression && !isTemplate) || (variables.length === 0 && eventChips.length === 0)) return <>{children}</>;

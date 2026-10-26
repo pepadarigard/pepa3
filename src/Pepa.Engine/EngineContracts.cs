@@ -31,6 +31,11 @@ public sealed record EngineOptions
     /// </summary>
     public TimeSpan CatchUpGrace { get; init; } = TimeSpan.FromMinutes(1);
 
+    /// <summary>
+    /// Дольше этого после запуска тайм-ауты не ждут источник, который ещё догружает события (например, нет связи с Telegram).
+    /// </summary>
+    public TimeSpan MaxCatchUpWait { get; init; } = TimeSpan.FromMinutes(10);
+
     /// <summary>Сколько ждать завершения выполняющихся шагов при закрытии приложения.</summary>
     public TimeSpan ShutdownGracePeriod { get; init; } = TimeSpan.FromSeconds(15);
 }

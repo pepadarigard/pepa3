@@ -76,6 +76,12 @@ public enum FieldKind
 
     /// <summary>Длительность в секундах.</summary>
     Seconds,
+
+    /// <summary>
+    /// Код (например, JavaScript для страницы) — как есть, без подстановок: значения переменных передаются коду отдельно,
+    /// а не вклеиваются в текст (иначе текст из сообщения мог бы стать кодом).
+    /// </summary>
+    Code,
 }
 
 public sealed record SelectOption(string Value, string Label);

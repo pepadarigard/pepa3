@@ -79,6 +79,37 @@ public sealed class FindInTextTests
             .Variables["found"]!.GetValue<string>());
     }
 
+    [Theory]
+    [InlineData("Сумма 1,000,000 руб.", 1000000)]
+    [InlineData("Сумма 1 234,56 ₽", 1234.56)]
+    [InlineData("Сумма 1\u00A0234\u00A0567 ₽", 1234567)]
+    [InlineData("Total: 1,234.56 USD", 1234.56)]
+    [InlineData("Summe 1.234,56 €", 1234.56)]
+    [InlineData("Скидка 12,5%", 12.5)]
+    [InlineData("Баланс: -40.25", -40.25)]
+    [InlineData("с 10-20 мая", 10)]
+    public async Task Numbers_with_group_separators(string text, double expected) =>
+        Assert.Equal(expected, (await RunAsync(Find(text, new { what = "number" }))).Variables["found"]!.GetValue<double>());
+
+    [Fact]
+    public async Task Only_ordinary_digits_count_and_soft_hyphen_does_not_shift_the_result()
+    {
+        // Арабские и полноширинные цифры — не «код» (и не роняют разбор чисел).
+        Assert.Equal("нет", (await RunAsync(Find("Код: ٤٨٢١ или ４８２１", new { what = "code" }))).StatusMessage);
+        Assert.Equal("нет", (await RunAsync(Find("Сумма ٤٨٢١", new { what = "number" }))).StatusMessage);
+        // Мягкий перенос в тексте: найденное — ровно то, что после метки.
+        Assert.Equal("4821", (await RunAsync(Find("Ко\u00ADд: 4821", new { what = "between", after = "Ко\u00ADд:" })))
+            .Variables["found"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Pattern_with_an_empty_optional_group_is_not_a_find()
+    {
+        Assert.Equal("нет", (await RunAsync(Find("Заказ принят", new { what = "pattern", pattern = @"заказ\s*(\d+)?" }))).StatusMessage);
+        Assert.Equal("15", (await RunAsync(Find("Заказ принят. Заказ 15", new { what = "pattern", pattern = @"заказ\s*(\d+)?" })))
+            .Variables["found"]!.GetValue<string>());
+    }
+
     [Fact]
     public async Task Pattern_uses_first_group_and_reports_bad_pattern()
     {

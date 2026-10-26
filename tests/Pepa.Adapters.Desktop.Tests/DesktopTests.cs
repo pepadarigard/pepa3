@@ -197,37 +197,128 @@ public sealed class DesktopTests
     }
 
     [Fact]
-    public async Task Start_program_waits_for_window_and_is_verified_by_it()
+    public async Task Start_program_waits_for_its_new_window_and_is_verified_by_it()
     {
         var (h, d) = await SetupAsync();
         await using var _ = h;
-        d.AddWindow("Калькулятор", "calc");
+        d.OpensWindow["calc"] = "Калькулятор";
         var id = await h.RunAsync(One("desktop.start", new { path = "calc", window = "Калькулятор" }));
         await h.WaitForStatusAsync(id, ProcessStatus.Completed);
         Assert.Equal(["calc"], d.Started);
+        var started = (await h.StepsAsync(id)).Single(s => s.NodeId == "act");
+        Assert.Empty(started.Checkpoint!["before"]!.AsArray());
 
         var missing = await h.RunAsync(One("desktop.start", new { path = @"C:\нет\такой.exe" }));
         Assert.Contains("файл не найден", (await FailedAsync(h, missing)).StatusMessage);
 
+        // Проверка после сбоя: новое окно есть — запущено; только окно, открытое ещё до запуска, — решать пользователю.
         var node = new StartProgramNode(d);
-        var context = Context(new() { ["path"] = "calc", ["window"] = "Калькулятор" });
-        Assert.Equal(VerificationOutcome.Done, (await node.VerifyAsync(context, default)).Outcome);
+        var input = new System.Text.Json.Nodes.JsonObject { ["path"] = "calc", ["window"] = "Калькулятор" };
+        var noneBefore = new System.Text.Json.Nodes.JsonObject { ["before"] = new System.Text.Json.Nodes.JsonArray() };
+        Assert.Equal(VerificationOutcome.Done, (await node.VerifyAsync(Context(input) with { Checkpoint = noneBefore }, default)).Outcome);
+        var onlyOld = new System.Text.Json.Nodes.JsonObject
+        {
+            ["before"] = new System.Text.Json.Nodes.JsonArray((await d.FindWindowsAsync(new WindowQuery("Калькулятор", null), default))
+                .Select(w => (System.Text.Json.Nodes.JsonNode)w.Info.Handle).ToArray()),
+        };
+        Assert.Equal(VerificationOutcome.Inconclusive, (await node.VerifyAsync(Context(input) with { Checkpoint = onlyOld }, default)).Outcome);
     }
 
     [Fact]
-    public async Task Close_window_is_idempotent_and_reports_a_window_that_refuses()
+    public async Task Program_that_was_already_running_is_reported_honestly()
+    {
+        var (h, d) = await SetupAsync();
+        await using var _ = h;
+        // Программа уже открыта и второго окна не открывает (как Telegram): процесс идёт дальше, но с пометкой.
+        d.AddWindow("Telegram", "telegram");
+        var id = await h.RunAsync(One("desktop.start", new { path = "telegram", window = "Telegram", waitSeconds = 1 }));
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        var journal = await h.Store.GetJournalAsync(id);
+        Assert.Contains(journal, j => j.Message.Contains("нового окна", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Close_window_reports_a_missing_window_and_one_that_refuses()
     {
         var (h, d) = await SetupAsync();
         await using var _ = h;
         d.AddWindow("Готово");
         await h.WaitForStatusAsync(await h.RunAsync(One("desktop.close", new { window = "Готово" })), ProcessStatus.Completed);
-        // Окна уже нет — блок ничего не делает и не считает это ошибкой.
-        await h.WaitForStatusAsync(await h.RunAsync(One("desktop.close", new { window = "Готово" })), ProcessStatus.Completed);
+        // Окна нет с самого начала (например, опечатка в заголовке) — это не «успешно закрыто».
+        var again = await h.RunAsync(One("desktop.close", new { window = "Готово" }));
+        Assert.Contains("не найдено", (await FailedAsync(h, again)).StatusMessage);
         Assert.Single(d.Actions, a => a == "close Готово");
 
         d.AddWindow("Несохранённый документ").RefusesToClose = true;
         var refused = await h.RunAsync(One("desktop.close", new { window = "Несохранённый", waitSeconds = 1 }));
-        Assert.Contains("не закрылось", (await FailedAsync(h, refused)).StatusMessage);
+        Assert.Contains("осталось открытым", (await FailedAsync(h, refused)).StatusMessage);
+    }
+
+    [Fact]
+    public async Task Nothing_is_typed_or_clicked_when_the_window_cannot_be_brought_to_the_front()
+    {
+        var (h, d) = await SetupAsync();
+        await using var _ = h;
+        var window = d.AddWindow("Редактор");
+        var button = window.Add("Сохранить", canInvoke: false);
+        window.Add("Текст", type: "Edit");
+        d.ForegroundRefused = true;
+
+        var keys = await h.RunAsync(One("desktop.keys", new { window = "Редактор", mode = "type", text = "пароль" }));
+        var process = await FailedAsync(h, keys);
+        Assert.Equal(AttentionKind.StepFailed, process.Attention);
+        Assert.Contains("не выполнялось", process.StatusMessage);
+        var click = await h.RunAsync(One("desktop.click", new { window = "Редактор", name = "Сохранить" }));
+        Assert.Equal(AttentionKind.StepFailed, (await FailedAsync(h, click)).Attention);
+        var fill = await h.RunAsync(One("desktop.fill", new { window = "Редактор", name = "Текст", text = "привет" }));
+        Assert.Equal(AttentionKind.StepFailed, (await FailedAsync(h, fill)).Attention);
+        Assert.DoesNotContain(d.Actions, a => a.StartsWith("type", StringComparison.Ordinal) || a.StartsWith("keys", StringComparison.Ordinal));
+        Assert.Equal(0, button.Clicks);
+
+        // Окно ушло с переднего плана посреди набора — часть текста уже ушла: итог неизвестен, сам не повторяется.
+        d.ForegroundRefused = false;
+        d.ForegroundLostAfterChars = 3;
+        var half = await h.RunAsync(One("desktop.keys", new { window = "Редактор", mode = "type", text = "пароль" }));
+        Assert.Equal(AttentionKind.UnknownStep, (await FailedAsync(h, half)).Attention);
+        Assert.Contains("type пар", d.Actions);
+    }
+
+    [Fact]
+    public async Task Covered_element_and_multiline_keyboard_fill_are_refused_and_hung_invoke_is_reported()
+    {
+        var (h, d) = await SetupAsync();
+        await using var _ = h;
+        var window = d.AddWindow("Чат");
+        window.Add("Отправить", canInvoke: false).Covered = true;
+        window.Add("Сообщение", type: "Edit");
+        window.Add("Настройки");
+
+        var click = await h.RunAsync(One("desktop.click", new { window = "Чат", name = "Отправить" }));
+        Assert.Contains("другое окно", (await FailedAsync(h, click)).StatusMessage);
+
+        // Поле без ввода «напрямую»: многострочный текст клавиатурой не печатается (Enter отправил бы сообщение).
+        var fill = await h.RunAsync(One("desktop.fill", new { window = "Чат", name = "Сообщение", text = "строка 1\nстрока 2" }));
+        Assert.Contains("перевод строки", (await FailedAsync(h, fill)).StatusMessage);
+        Assert.DoesNotContain(d.Actions, a => a.StartsWith("type", StringComparison.Ordinal));
+
+        d.InvokeHangs = true;
+        var dialog = await h.RunAsync(One("desktop.click", new { window = "Чат", name = "Настройки" }));
+        await h.WaitForStatusAsync(dialog, ProcessStatus.Completed);
+        Assert.Contains(await h.Store.GetJournalAsync(dialog), j => j.Message.Contains("диалог", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Mouse_point_is_taken_from_the_window_after_it_is_restored_and_listing_survives_a_closing_window()
+    {
+        var (h, d) = await SetupAsync();
+        await using var _ = h;
+        // Свёрнутое окно «стоит» за краем экрана; после разворачивания — на своём месте.
+        var window = d.AddWindow("Свёрнутое", x: -32000, y: -32000, width: 160, height: 28);
+        window.RestoredBounds = new DesktopRect(50, 60, 800, 600);
+        d.ListFailures = 2;
+        var id = await h.RunAsync(One("desktop.mouse", new { window = "Свёрнутое", x = 300, y = 200 }));
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Contains("mouse 350,260", d.Actions);
     }
 
     [Fact]
@@ -252,6 +343,25 @@ public sealed class DesktopTests
         await Task.Delay(500);
         window.Add("Закрыть");
         Assert.Equal("появилась", (await h.WaitForStatusAsync(waiting, ProcessStatus.Completed)).StatusMessage);
+    }
+
+    [Fact]
+    public async Task Waiting_for_an_element_to_disappear_needs_the_window()
+    {
+        var (h, d) = await SetupAsync();
+        await using var _ = h;
+        // Опечатка в заголовке: окна нет вовсе — «элемент исчез» было бы неправдой.
+        var typo = await h.RunAsync(One("desktop.waitFor", new { window = "Копирвание", name = "Отмена", state = "disappear", waitSeconds = 1 }));
+        Assert.Contains("не найдено", (await FailedAsync(h, typo)).StatusMessage);
+
+        // Окно было и закрылось — элемент исчез вместе с ним, и об этом сказано прямо.
+        var window = d.AddWindow("Копирование");
+        window.Add("Отмена");
+        var id = await h.RunAsync(One("desktop.waitFor", new { window = "Копирование", name = "Отмена", state = "disappear", waitSeconds = 10 }));
+        await Task.Delay(500, TestContext.Current.CancellationToken);
+        d.Close(window);
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Contains(await h.Store.GetJournalAsync(id), j => j.Message.Contains("закрылось", StringComparison.Ordinal));
     }
 
     [Fact]

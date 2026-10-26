@@ -55,6 +55,8 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
     private TelegramCredentials? _credentials;
     private TelegramStatus _status;
     private string? _stateWarning;
+    private string? _clockWarning;
+    private volatile bool _caughtUpReported;
     private int _reconnectFailures;
     private volatile bool _disposed;
     private int _shuttingDown;
@@ -81,6 +83,14 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
     }
 
     public TelegramStatus Status => Volatile.Read(ref _status);
+
+    /// <summary>
+    /// Первая догрузка после запуска закончена (сообщения, пришедшие, пока Pepa была закрыта, получены). Вызывается один раз.
+    /// </summary>
+    public event Action? CaughtUp;
+
+    /// <summary>Есть сохранённый вход: после запуска Pepa подключится и догрузит пропущенные сообщения.</summary>
+    public bool WillCatchUp => HasSession;
 
     /// <summary>Журнал (задаётся после сборки хоста: сервис создаётся раньше системы журналов).</summary>
     public ILogger Logger { get; set; } = NullLogger.Instance;
@@ -383,7 +393,7 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
         connection.LoggedIn = true;
         _reconnectFailures = 0;
         var name = user is null ? "аккаунт" : $"{user}{(user.MainUsername is { Length: > 0 } un ? $" (@{un})" : "")}";
-        SetStatus(TelegramState.Connected, name, _stateWarning);
+        SetStatus(TelegramState.Connected, name, Warning);
         Logger.LogInformation("Telegram подключён: {Account}.", name);
 
         // Чаты из списка диалогов — чтобы находить их по ключу user:/chat:/channel: без поиска по имени. Загрузка в фоне:
@@ -402,6 +412,10 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
                 {
                     Remember(chat);
                 }
+
+                // Каналы и супергруппы, из которых ещё не было обновлений, получают позицию: после перезапуска библиотека
+                // догрузит и их сообщения, пришедшие, пока Pepa была закрыта.
+                await connection.Manager.LoadDialogs(dialogs).WaitAsync(connection.Life.Token);
             }
             catch (Exception) when (connection.Life.IsCancellationRequested)
             {
@@ -456,6 +470,9 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
         }
     }
 
+    /// <summary>Для проверок: часы «сервера Telegram» вместо запроса к нему.</summary>
+    internal Func<Task<DateTime>>? ServerClockForTests { get; init; }
+
     /// <summary>
     /// Для проверок: подключение «как после входа» без сети — чтобы подавать обновления в настоящий менеджер обновлений
     /// библиотеки и проверять приём сообщений и сохранение состояния.
@@ -469,7 +486,7 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
             SaveCredentials(_credentials);
             var connection = _connection = await CreateConnectionAsync(_credentials, interactive: false);
             connection.LoggedIn = true;
-            SetStatus(TelegramState.Connected, "тест", _stateWarning);
+            SetStatus(TelegramState.Connected, "тест", Warning);
             return connection.Manager;
         }
         finally
@@ -515,6 +532,7 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
             client.FloodRetryThreshold = 10;
             connection.Client = client;
             connection.Manager = client.WithUpdateManager(update => OnUpdateAsync(connection, update), LoadState());
+            connection.Manager.Log = (level, message) => OnManagerLog(connection, level, message);
             client.OnOther += item => OnOtherAsync(connection, item);
             connection.Saver = Task.Run(() => SaveLoopAsync(connection));
             return connection;
@@ -642,6 +660,7 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
         var from = message.from_id is null ? chat : PeerOf(connection, message.from_id);
         var incoming = new TelegramIncomingMessage
         {
+            ClockOffset = await ClockOffsetAsync(connection),
             AccountId = connection.Client.UserId,
             Chat = chat,
             From = from,
@@ -667,7 +686,7 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
                 connection.MarkDirty();
                 if (attempt > 1 && _connection == connection && Status.State == TelegramState.Connected)
                 {
-                    SetStatus(TelegramState.Connected, Status.Account, _stateWarning);
+                    SetStatus(TelegramState.Connected, Status.Account, Warning);
                 }
 
                 return;
@@ -682,7 +701,7 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
                     _stateWarning = $"Сообщение Telegram не удалось принять ({ex.Message}). Оно и следующие придут снова после перезапуска Pepa.";
                     if (_connection == connection)
                     {
-                        SetStatus(Status.State, Status.Account, _stateWarning);
+                        SetStatus(Status.State, Status.Account, Warning);
                     }
 
                     return;
@@ -718,6 +737,11 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
             await Task.Delay(TimeSpan.FromSeconds(10), token);
             while (!token.IsCancellationRequested)
             {
+                if (connection.LoggedIn && !_caughtUpReported)
+                {
+                    await ReportCaughtUpAsync(connection, token);
+                }
+
                 if (connection.LoggedIn && (connection.TakeDirty() || DateTime.UtcNow - lastSave > TimeSpan.FromMinutes(5)))
                 {
                     await SaveStateAsync(connection, TimeSpan.FromMinutes(2), token);
@@ -735,6 +759,128 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
             Logger.LogWarning(ex, "Сохранение состояния обновлений Telegram остановилось.");
         }
     }
+
+    /// <summary>
+    /// Догрузка после подключения закончена: библиотека получает пропущенные сообщения под своей блокировкой, и чтение
+    /// состояния ждёт её конца. Тогда движок может засчитывать тайм-ауты ожиданий, истёкшие, пока Pepa была закрыта.
+    /// </summary>
+    private async Task ReportCaughtUpAsync(Connection connection, CancellationToken cancellationToken)
+    {
+        try
+        {
+            // Список чатов догружает и каналы — дождаться его (без ошибки, если он не загрузился).
+            await connection.Dialogs.ContinueWith(_ => { }, TaskScheduler.Default).WaitAsync(TimeSpan.FromMinutes(2), cancellationToken);
+            await Task.Run(() => connection.Manager.State, CancellationToken.None).WaitAsync(TimeSpan.FromMinutes(2), cancellationToken);
+        }
+        catch (TimeoutException)
+        {
+            return;
+        }
+
+        _caughtUpReported = true;
+        try
+        {
+            CaughtUp?.Invoke();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Обработчик окончания догрузки Telegram завершился с ошибкой.");
+        }
+    }
+
+    /// <summary>
+    /// Разница часов компьютера и Telegram: время сообщения сравнивается с часами компьютера (пришло ли сообщение, пока
+    /// Pepa была закрыта, успел ли ответ до тайм-аута). Если часы компьютера спешат или отстают, без поправки свежий ответ
+    /// можно принять за старый — и наоборот.
+    /// </summary>
+    private Task<TimeSpan> ClockOffsetAsync(Connection connection)
+    {
+        lock (connection)
+        {
+            return connection.ClockOffset ??= MeasureClockOffsetAsync(connection);
+        }
+    }
+
+    private async Task<TimeSpan> MeasureClockOffsetAsync(Connection connection)
+    {
+        try
+        {
+            var before = DateTimeOffset.UtcNow;
+            var serverTime = ServerClockForTests is { } clock
+                ? await clock()
+                : (await connection.Client.Updates_GetState().WaitAsync(TimeSpan.FromSeconds(15), connection.Life.Token)).date;
+            var after = DateTimeOffset.UtcNow;
+            var server = new DateTimeOffset(DateTime.SpecifyKind(serverTime, DateTimeKind.Utc));
+            var offset = before + (after - before) / 2 - server;
+            if (after - before > TimeSpan.FromSeconds(5) || offset.Duration() < TimeSpan.FromSeconds(3))
+            {
+                // Ответ шёл долго (поправка неточна) или часы почти совпадают (Telegram даёт время с точностью до секунды).
+                return TimeSpan.Zero;
+            }
+
+            Logger.LogWarning("Часы компьютера отличаются от часов Telegram на {Seconds:0} с — время сообщений поправлено.", offset.TotalSeconds);
+            if (offset.Duration() > TimeSpan.FromMinutes(2))
+            {
+                _clockWarning = $"Часы компьютера {(offset > TimeSpan.Zero ? "спешат" : "отстают")} на {FormatOffset(offset)}. " +
+                                "Pepa учитывает это для сообщений Telegram, но лучше включить синхронизацию времени в Windows.";
+                SetStatus(Status.State, Status.Account, Warning);
+            }
+
+            return offset;
+        }
+        catch (Exception ex)
+        {
+            // Без поправки сообщение всё равно принимается: лучше неточное время, чем потерянное сообщение.
+            Logger.LogDebug(ex, "Не удалось сверить часы с Telegram.");
+            return TimeSpan.Zero;
+        }
+    }
+
+    private static string FormatOffset(TimeSpan offset)
+    {
+        var d = offset.Duration();
+        return d >= TimeSpan.FromHours(1) ? $"{d.TotalHours:0.#} ч" : $"{d.TotalMinutes:0} мин";
+    }
+
+    /// <summary>
+    /// Журнал библиотеки обновлений. Некоторые её записи значат, что часть обновлений пропущена: запрос пропущенного
+    /// упал, Telegram ответил «пропущено слишком много» или разрыв не удалось заполнить. Pepa не скрывает этого: сообщает
+    /// в состоянии подключения и не сохраняет сдвинутое состояние — после перезапуска библиотека попробует догрузить снова.
+    /// </summary>
+    private void OnManagerLog(Connection connection, int level, string message)
+    {
+        if (level >= 3 && !_disposed)
+        {
+            Logger.LogWarning("Telegram (обновления): {Message}", message);
+        }
+
+        var transient = (level >= 4 && message.StartsWith("GetDifference(", StringComparison.Ordinal) && message.Contains(" raised ", StringComparison.Ordinal)) ||
+                        message.Contains("forcibly removed", StringComparison.Ordinal) ||
+                        message.Contains("No access_hash to recover", StringComparison.Ordinal);
+        var permanent = message.StartsWith("DifferenceTooLong", StringComparison.Ordinal) || message.StartsWith("ChannelDifferenceTooLong", StringComparison.Ordinal);
+        if (!transient && !permanent || connection.Life.IsCancellationRequested)
+        {
+            return;
+        }
+
+        if (transient)
+        {
+            connection.Tainted = true;
+        }
+
+        _stateWarning = transient
+            ? "Telegram не отдал часть пропущенных обновлений: некоторые сообщения могли не дойти до Pepa. После перезапуска Pepa попробует " +
+              "догрузить их снова; если предупреждение повторится — проверьте нужные чаты вручную."
+            : "Пока Pepa была отключена, сообщений накопилось слишком много, и Telegram отдал не все: некоторые могли не дойти до Pepa. " +
+              "Проверьте нужные чаты вручную.";
+        if (_connection == connection)
+        {
+            SetStatus(Status.State, Status.Account, Warning);
+        }
+    }
+
+    /// <summary>Предупреждения подключения: о пропущенных сообщениях и о часах компьютера.</summary>
+    private string? Warning => _stateWarning is null ? _clockWarning : _clockWarning is null ? _stateWarning : $"{_stateWarning} {_clockWarning}";
 
     private async Task SaveStateAsync(Connection connection, TimeSpan wait, CancellationToken cancellationToken)
     {
@@ -959,6 +1105,11 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
             OnSessionRevoked(connection);
             throw new TelegramSendRejectedException(SessionExpiredHint, retryable: false);
         }
+        catch (RpcException ex) when (ex.Message.Contains("RANDOM_ID_DUPLICATE", StringComparison.Ordinal))
+        {
+            // С этим ключом сообщение уже отправлялось (прошлой попыткой) — оно есть, второго не будет.
+            throw new TelegramAlreadySentException();
+        }
         catch (RpcException ex) when (ex.Code == 420 || ex.Message.Contains("FLOOD", StringComparison.Ordinal))
         {
             throw new TelegramSendRejectedException($"Telegram просит подождать перед отправкой ({ex.Message}) — сообщение не отправлено.", retryable: true);
@@ -1133,7 +1284,13 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
     private static void WriteAtomic(string path, string content)
     {
         var temp = path + ".tmp";
-        File.WriteAllText(temp, content);
+        using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            stream.Write(System.Text.Encoding.UTF8.GetBytes(content));
+            // На диск до переименования: иначе после отключения питания файл может оказаться пустым.
+            stream.Flush(flushToDisk: true);
+        }
+
         File.Move(temp, path, overwrite: true);
     }
 
@@ -1262,6 +1419,12 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
 
         /// <summary>Какое-то сообщение не принято движком: состояние обновлений больше не сохранять.</summary>
         public volatile bool Tainted;
+
+        /// <summary>
+        /// Насколько часы компьютера отличаются от часов Telegram (прибавить к времени Telegram). Измеряется один раз на
+        /// подключение, до первого принятого сообщения.
+        /// </summary>
+        public Task<TimeSpan>? ClockOffset;
 
         public void MarkDirty() => Interlocked.Exchange(ref _dirty, 1);
 

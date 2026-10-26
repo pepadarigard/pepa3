@@ -177,6 +177,45 @@ public sealed class TelegramServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Skipped_updates_reported_by_the_library_are_shown_and_state_is_not_advanced()
+    {
+        Directory.CreateDirectory(Path.Combine(_data, "telegram"));
+        WriteState(5);
+        var service = new TelegramService(_data, _ => Task.CompletedTask) { ServerAddress = "127.0.0.1:1" };
+        var manager = await service.ConnectForTestsAsync(Account);
+
+        // Так библиотека сообщает, что запрос пропущенных обновлений упал, — и всё равно сдвигает позицию.
+        manager.Log(4, "GetDifference(0, 5->9) raised WTelegram.RpcException: FLOOD_WAIT_X");
+        Assert.Contains("могли не дойти", service.Status.Message);
+        await InjectAsync(manager, 6, 300, "после пропуска").WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        await service.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        // Позиция не сохранена: после перезапуска библиотека запросит пропущенное снова.
+        Assert.Equal(5, SavedPts());
+    }
+
+    [Fact]
+    public async Task Event_time_is_corrected_for_a_computer_clock_that_runs_fast()
+    {
+        var events = new ConcurrentQueue<EventInput>();
+        var service = new TelegramService(_data, e => { events.Enqueue(e); return Task.CompletedTask; })
+        {
+            ServerAddress = "127.0.0.1:1",
+            // Часы компьютера спешат на 10 минут.
+            ServerClockForTests = () => Task.FromResult(DateTime.UtcNow.AddMinutes(-10)),
+        };
+        var manager = await service.ConnectForTestsAsync(Account);
+        var before = DateTimeOffset.UtcNow;
+        await InjectAsync(manager, 1, 400, "время").WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        var occurred = events.Single().OccurredAt!.Value;
+        // Время сообщения (по Telegram — «сейчас») переведено на часы компьютера: +10 минут.
+        Assert.InRange(occurred - before, TimeSpan.FromMinutes(9.9), TimeSpan.FromMinutes(10.1));
+        Assert.Contains("спешат на 10 мин", service.Status.Message);
+        await service.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
     public async Task Message_that_could_not_be_accepted_keeps_the_old_state_so_it_comes_again()
     {
         Directory.CreateDirectory(Path.Combine(_data, "telegram"));

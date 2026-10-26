@@ -226,6 +226,9 @@ public sealed partial class ProcessEngine
         DateTimeOffset plannedAt)
     {
         var descriptor = executor.Descriptor;
+        var previousCheckpoint = token.Attempt > 1 && await _store.GetLastStepAsync(process.Id, token.Id, node.Id) is { Checkpoint: { } previous }
+            ? (JsonObject)previous.DeepClone()
+            : null;
 
         // 1. Запланирован.
         var step = NewStep(process, token, node, descriptor, context.Input, StepState.Planned, plannedAt);
@@ -246,11 +249,23 @@ public sealed partial class ProcessEngine
 
         Notify(process.Id);
 
-        // 2. Снимок состояния до действия (только чтение).
+        // 2. Снимок состояния до действия (только чтение). При повторе блок видит снимок прошлой попытки.
+        if (previousCheckpoint is not null)
+        {
+            context = context with { PreviousCheckpoint = previousCheckpoint };
+        }
+
         JsonObject? checkpoint;
         try
         {
-            checkpoint = await executor.PrepareAsync(context, CancellationToken.None);
+            using var prepareTimeout = new CancellationTokenSource(_options.DefaultActionTimeout, _time);
+            checkpoint = await executor.PrepareAsync(context, prepareTimeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            await ApplyResultAsync(process, graph, token, node, descriptor, step,
+                NodeResult.Fail($"Не удалось подготовить действие за {FormatDuration(_options.DefaultActionTimeout)} — действие не выполнялось."), null);
+            return;
         }
         catch (Exception ex)
         {
@@ -318,7 +333,7 @@ public sealed partial class ProcessEngine
 
         // 5. Неизвестный итог — сверка с внешней системой (это проверка, а не повтор действия).
         string? resolution = null;
-        if (result is NodeResult.Unknown unknown && descriptor.SupportsVerification)
+        if (result is NodeResult.Unknown { AlreadyChecked: false } unknown && descriptor.SupportsVerification)
         {
             var verification = await SafeVerifyAsync(executor, execution);
             switch (verification.Outcome)

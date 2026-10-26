@@ -39,6 +39,29 @@ public sealed class StartProgramNode(IDesktop desktop) : INodeExecutor
 
     public TimeSpan? ExpectedDuration(JsonObject input) => DesktopNodes.WaitSpan(input);
 
+    /// <summary>До запуска: какие окна с этим заголовком уже открыты — чтобы ждать и проверять именно новое окно.</summary>
+    public async ValueTask<JsonObject?> PrepareAsync(NodeExecutionContext context, CancellationToken cancellationToken)
+    {
+        if (context.GetString("window") is not { Length: > 0 } title || desktop.UnavailableReason is not null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var windows = await desktop.FindWindowsAsync(new WindowQuery(title.Trim(), null), cancellationToken);
+            return new JsonObject { ["before"] = new JsonArray(windows.Select(w => (JsonNode)w.Info.Handle).ToArray()) };
+        }
+        catch (DesktopException)
+        {
+            // Список окон не получен — новое окно от старого не отличить; блок ждёт любое подходящее.
+            return null;
+        }
+    }
+
+    private static HashSet<long>? WindowsBefore(NodeExecutionContext context) =>
+        context.Checkpoint?["before"] is JsonArray before ? before.Select(n => n!.GetValue<long>()).ToHashSet() : null;
+
     public async ValueTask<NodeResult> ExecuteAsync(NodeExecutionContext context, CancellationToken cancellationToken)
     {
         if (desktop.UnavailableReason is { } reason)
@@ -64,19 +87,36 @@ public sealed class StartProgramNode(IDesktop desktop) : INodeExecutor
             return NodeResult.Ok(Ports.Out, new Dictionary<string, JsonNode?>(), output, $"Запущена программа «{path}».");
         }
 
+        var before = WindowsBefore(context);
+        var query = new WindowQuery(title.Trim(), null);
         DesktopWindow? window;
         try
         {
-            window = await DesktopNodes.WaitWindowAsync(desktop, new WindowQuery(title.Trim(), null), DesktopNodes.WaitSpan(context.Input), cancellationToken);
+            window = await DesktopNodes.WaitWindowAsync(desktop, query, DesktopNodes.WaitSpan(context.Input), cancellationToken,
+                before is null ? null : w => !before.Contains(w.Info.Handle));
         }
         catch (DesktopAmbiguousException)
         {
-            // Окон с таким заголовком несколько — программа запущена, а окно точно есть.
+            // Новых окон с таким заголовком несколько — программа запущена, а окно точно есть.
             return NodeResult.Ok(Ports.Out, new Dictionary<string, JsonNode?>(), output, $"Запущена «{path}»; окон «{title}» несколько.");
+        }
+        catch (DesktopException ex)
+        {
+            // Программа запущена; не получилось только проверить окна.
+            return NodeResult.Ok(Ports.Timeout, new Dictionary<string, JsonNode?>(), output,
+                $"Программа «{path}» запущена, но проверить её окно не удалось: {ex.Message}");
         }
 
         if (window is null)
         {
+            if (before is { Count: > 0 })
+            {
+                // Программа, видимо, уже была запущена: второе окно она не открыла, а показала прежнее.
+                return new NodeResult.Success(Ports.Out, new Dictionary<string, JsonNode?>(), output,
+                    $"Программа «{path}» запущена, но нового окна «{title}» нет — открыто прежнее (программа, видимо, уже работала).",
+                    MessageLevel.Warning);
+            }
+
             return NodeResult.Ok(Ports.Timeout, new Dictionary<string, JsonNode?>(), output, $"Программа «{path}» запущена, но окно «{title}» не появилось.");
         }
 
@@ -94,8 +134,15 @@ public sealed class StartProgramNode(IDesktop desktop) : INodeExecutor
         try
         {
             var windows = await desktop.FindWindowsAsync(new WindowQuery(title.Trim(), null), cancellationToken);
+            var before = WindowsBefore(context);
+            var fresh = windows.Where(w => before is null || !before.Contains(w.Info.Handle)).ToList();
+            if (fresh.Count > 0)
+            {
+                return VerificationResult.Done($"окно «{fresh[0].Info.Title}» открыто");
+            }
+
             return windows.Count > 0
-                ? VerificationResult.Done($"окно «{windows[0].Info.Title}» открыто")
+                ? VerificationResult.Inconclusive($"окно «{windows[0].Info.Title}» было открыто и до запуска — запустилась ли программа ещё раз, не видно; решите сами")
                 : VerificationResult.Inconclusive($"окна «{title}» нет — но программа могла запуститься без окна; решите сами");
         }
         catch (DesktopException ex)
@@ -164,19 +211,20 @@ public sealed class FindWindowNode(IDesktop desktop) : INodeExecutor
             return NodeResult.Ok(Ports.Timeout, $"Окно ({query}) не найдено.");
         }
 
+        var current = window.Info;
         try
         {
             if (context.GetBoolean("activate", true))
             {
-                await desktop.ActivateAsync(window, cancellationToken);
+                current = await desktop.ActivateAsync(window, cancellationToken);
             }
         }
-        catch (DesktopException ex)
+        catch (Exception ex) when (ex is DesktopException or DesktopInputBlockedException)
         {
             return NodeResult.Fail($"Окно «{window.Info.Title}» найдено, но не вышло на передний план: {ex.Message}");
         }
 
-        var info = Describe(window.Info);
+        var info = Describe(current);
         var updates = new Dictionary<string, JsonNode?>();
         if (context.GetString("saveTo") is { Length: > 0 } saveTo)
         {
@@ -245,13 +293,19 @@ public sealed class ClickElementNode(IDesktop desktop) : INodeExecutor
         {
             var how = context.GetString("how") ?? "auto";
             var label = Label(element!);
-            if (how == "auto" && await desktop.InvokeAsync(element!, cancellationToken))
+            var invoked = how == "auto" ? await desktop.InvokeAsync(element!, cancellationToken) : InvokeOutcome.NotSupported;
+            switch (invoked)
             {
-                return NodeResult.Ok(Ports.Out, $"Нажато (без мыши): {label} в «{window.Info.Title}».");
+                case InvokeOutcome.Done:
+                    return NodeResult.Ok(Ports.Out, $"Нажато (без мыши): {label} в «{window.Info.Title}».");
+                case InvokeOutcome.Pending:
+                    return new NodeResult.Success(Ports.Out, new Dictionary<string, JsonNode?>(), null,
+                        $"Нажато (без мыши): {label} в «{window.Info.Title}». Программа ещё не ответила — обычно это значит, что открылось окно-диалог.",
+                        MessageLevel.Warning);
             }
 
             await desktop.ActivateAsync(window, cancellationToken);
-            await desktop.ClickAsync(element!, how == "right" ? MouseButtonKind.Right : MouseButtonKind.Left, how == "double", cancellationToken);
+            await desktop.ClickAsync(window, element!, how == "right" ? MouseButtonKind.Right : MouseButtonKind.Left, how == "double", cancellationToken);
             return NodeResult.Ok(Ports.Out, $"Нажато мышью: {label} в «{window.Info.Title}».");
         }, cancellationToken);
 
@@ -270,8 +324,9 @@ public sealed class FillElementNode(IDesktop desktop) : INodeExecutor
         Type = TypeName,
         Category = DesktopNodes.Category.Id,
         Title = "Ввести в окне",
-        Description = "Записывает текст в поле окна программы (прежний текст заменяется). Повтор безопасен; после сбоя Pepa " +
-                      "проверит, какой текст в поле.",
+        Description = "Записывает текст в поле окна программы (прежний текст заменяется). После сбоя Pepa проверит, какой текст " +
+                      "в поле. Если поле не принимает текст напрямую, Pepa печатает его клавиатурой — многострочный текст так не вводится " +
+                      "(Enter мог бы отправить форму).",
         Icon = "text-cursor-input",
         Effect = NodeEffect.External,
         SupportsVerification = true,
@@ -312,16 +367,24 @@ public sealed class FillElementNode(IDesktop desktop) : INodeExecutor
                 return NodeResult.Ok(Ports.Out, $"Записано в {label}: {Preview(text)}");
             }
 
+            if (text.Contains('\n') || text.Contains('\r') || text.Contains('\t'))
+            {
+                return NodeResult.Fail(
+                    $"Поле {label} не принимает текст напрямую, а печатать перевод строки или табуляцию клавиатурой опасно: Enter может " +
+                    "отправить форму или сообщение, Tab — перейти к другому полю. Уберите переводы строк из текста или введите его блоком " +
+                    "«Клавиатура» (там Enter нажимается осознанно).", retryable: false);
+            }
+
             await desktop.ActivateAsync(window, cancellationToken);
-            await desktop.FocusAsync(element!, cancellationToken);
-            await desktop.PressKeysAsync(["Ctrl", "A"], cancellationToken);
+            await desktop.FocusAsync(window, element!, cancellationToken);
+            await desktop.PressKeysAsync(window, ["Ctrl", "A"], cancellationToken);
             if (text.Length == 0)
             {
-                await desktop.PressKeysAsync(["Delete"], cancellationToken);
+                await desktop.PressKeysAsync(window, ["Delete"], cancellationToken);
             }
             else
             {
-                await desktop.TypeTextAsync(text, 20, cancellationToken);
+                await desktop.TypeTextAsync(window, text, 20, cancellationToken);
             }
 
             return NodeResult.Ok(Ports.Out, $"Напечатано в {label}: {Preview(text)}");
@@ -350,8 +413,15 @@ public sealed class FillElementNode(IDesktop desktop) : INodeExecutor
             }
 
             var value = await desktop.ReadAsync(element, "value", cancellationToken);
-            return value == (context.GetString("text") ?? "")
-                ? VerificationResult.Done("в поле уже нужный текст")
+            var expected = context.GetString("text") ?? "";
+            if (value is not null && value.ReplaceLineEndings("\n") == expected.ReplaceLineEndings("\n"))
+            {
+                return VerificationResult.Done("в поле уже нужный текст");
+            }
+
+            // Многострочный текст поле может хранить по-своему: «другой текст» не доказывает, что ввода не было.
+            return expected.Contains('\n') || expected.Contains('\r')
+                ? VerificationResult.Inconclusive("текст в поле не совпадает с нужным, но многострочный текст поле могло изменить — посмотрите сами")
                 : VerificationResult.NotDone("в поле другой текст — можно ввести заново");
         }
         catch (Exception ex) when (ex is DesktopException or DesktopAmbiguousException)
@@ -476,19 +546,35 @@ public sealed class WaitElementNode(IDesktop desktop) : INodeExecutor
         var wait = DesktopNodes.WaitSpan(context.Input);
         var disappear = context.GetString("state") == "disappear";
         var deadline = DateTime.UtcNow + wait;
+        var windowSeen = false;
         try
         {
             while (true)
             {
                 var window = await DesktopNodes.WaitWindowAsync(desktop, windowQuery, TimeSpan.Zero, cancellationToken);
+                windowSeen |= window is not null;
+                if (disappear && window is null && windowSeen)
+                {
+                    // Окно было и закрылось — элемента нет вместе с ним. Сказать об этом прямо: окно могло и упасть.
+                    return new NodeResult.Success(Ports.Out, new Dictionary<string, JsonNode?>(), null,
+                        $"Окно ({windowQuery}) закрылось — вместе с ним исчез и элемент ({elementQuery}).", MessageLevel.Warning);
+                }
+
                 var present = window is not null && (await desktop.FindElementsAsync(window, elementQuery, cancellationToken)).Count > 0;
-                if (present != disappear)
+                // «Исчез» засчитывается, только если окно на месте: иначе (ошибка в заголовке) «исчезновение» было бы мнимым.
+                if (present != disappear && (!disappear || window is not null))
                 {
                     return NodeResult.Ok(Ports.Out, disappear ? $"Элемент ({elementQuery}) исчез." : $"Элемент ({elementQuery}) появился.");
                 }
 
                 if (DateTime.UtcNow >= deadline)
                 {
+                    if (disappear && !windowSeen)
+                    {
+                        return NodeResult.Fail($"Окно ({windowQuery}) не найдено — проверить, исчез ли элемент, нельзя. Проверьте заголовок окна.",
+                            retryable: false);
+                    }
+
                     return NodeResult.Ok(Ports.Timeout, $"Не дождались за {wait.TotalSeconds:0} с: элемент ({elementQuery}) {(disappear ? "не исчез" : "не появился")}.");
                 }
 
@@ -544,6 +630,7 @@ public sealed class KeyboardNode(IDesktop desktop) : INodeExecutor
             {
                 Name = "text", Label = "Текст", Kind = FieldKind.MultilineTemplate, Required = true,
                 VisibleWhen = new FieldCondition("mode", ["type"]),
+                Help = "Перевод строки нажимает Enter, табуляция — Tab (как при обычном наборе).",
             },
             DesktopNodes.WaitField(10) with { Label = "Ждать окно, секунд" },
         ],
@@ -585,11 +672,11 @@ public sealed class KeyboardNode(IDesktop desktop) : INodeExecutor
             if (type)
             {
                 var text = context.GetString("text") ?? "";
-                await desktop.TypeTextAsync(text, 20, cancellationToken);
+                await desktop.TypeTextAsync(window, text, 20, cancellationToken);
                 return NodeResult.Ok(Ports.Out, $"Напечатано в «{window.Info.Title}»: {(text.Length > 40 ? text[..40] + "…" : text)}");
             }
 
-            await desktop.PressKeysAsync(keys!, cancellationToken);
+            await desktop.PressKeysAsync(window, keys!, cancellationToken);
             return NodeResult.Ok(Ports.Out, $"Нажато {string.Join("+", keys!)} в «{window.Info.Title}».");
         }, cancellationToken);
     }
@@ -638,21 +725,21 @@ public sealed class MouseNode(IDesktop desktop) : INodeExecutor
         var y = (int)(context.GetNumber("y") ?? throw new NodeInputException("Не задана координата Y."));
         return DesktopNodes.RunAsync(desktop, context, needElement: false, "нажать мышью", async (window, _) =>
         {
-            var bounds = window.Info.Bounds;
+            // Размер и положение — после вывода на передний план: свёрнутое окно до этого «стоит» далеко за краем экрана.
+            var bounds = (await desktop.ActivateAsync(window, cancellationToken)).Bounds;
             if (x >= bounds.Width || y >= bounds.Height)
             {
                 return NodeResult.Fail($"Точка ({x}, {y}) за пределами окна «{window.Info.Title}» размером {bounds.Width}×{bounds.Height} — ничего не нажато.",
                     retryable: false);
             }
 
-            await desktop.ActivateAsync(window, cancellationToken);
             var button = context.GetString("button") switch
             {
                 "right" => MouseButtonKind.Right,
                 "middle" => MouseButtonKind.Middle,
                 _ => MouseButtonKind.Left,
             };
-            await desktop.MouseClickAsync(bounds.X + x, bounds.Y + y, button, context.GetBoolean("double"), cancellationToken);
+            await desktop.MouseClickAsync(window, bounds.X + x, bounds.Y + y, button, context.GetBoolean("double"), cancellationToken);
             return NodeResult.Ok(Ports.Out, $"Нажато мышью в ({x}, {y}) окна «{window.Info.Title}».");
         }, cancellationToken);
     }
@@ -709,7 +796,8 @@ public sealed class CloseWindowNode(IDesktop desktop) : INodeExecutor
 
         if (window is null)
         {
-            return NodeResult.Ok(Ports.Out, $"Окна ({query}) уже нет.");
+            // Окна нет с самого начала: возможно, ошибка в заголовке. Успехом это не считается.
+            return NodeResult.Fail($"Окно ({query}) не найдено — закрывать нечего. Проверьте заголовок (или окно уже было закрыто).", retryable: false);
         }
 
         try
@@ -720,7 +808,8 @@ public sealed class CloseWindowNode(IDesktop desktop) : INodeExecutor
             {
                 if (DateTime.UtcNow >= deadline)
                 {
-                    return NodeResult.Fail($"Окно «{window.Info.Title}» не закрылось — возможно, программа ждёт ответа (например, «Сохранить?»).",
+                    return NodeResult.Fail($"Pepa попросила окно «{window.Info.Title}» закрыться, но оно осталось открытым — вероятно, программа " +
+                                           "спрашивает «Сохранить?». Ответьте на вопрос сами (или добавьте блок «Нажать в окне»), затем решите, как продолжить.",
                         retryable: false);
                 }
 

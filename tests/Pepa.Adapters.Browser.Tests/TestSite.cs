@@ -74,6 +74,22 @@ internal sealed class TestSite : IDisposable
                            <div><span class="opaque"><b>Без опознавательных знаков</b></span><span class="opaque"><b>Без опознавательных знаков</b></span></div>
                            <a id="popup" href="/second?from=popup" target="_blank">Открыть во вкладке</a>
                            <button id="later" onclick="setTimeout(() => location.href = '/second?step=done', 700)">Перейти позже</button>
+                           <label><input type="checkbox" id="slow"> Отметка после ответа сервера</label>
+                           <input type="file" id="consume">
+                           <script>
+                             window.slowClicks = 0;
+                             document.getElementById('slow').addEventListener('click', (e) => {
+                               e.preventDefault();
+                               const box = e.target;
+                               window.slowClicks++;
+                               setTimeout(() => { box.checked = !box.checked; }, 800);
+                             });
+                             // Сайт забирает файл сразу (отправляет его) и очищает поле.
+                             document.getElementById('consume').addEventListener('change', (e) => {
+                               fetch('/submit?u=' + encodeURIComponent(e.target.files[0].name));
+                               e.target.value = '';
+                             });
+                           </script>
                            </body></html>
                            """,
                 "/submit" => $"Принято: {context.Request.QueryString["u"]}",

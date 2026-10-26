@@ -21,6 +21,9 @@ public interface IPepaStore
     Task<IReadOnlyList<StepRecord>> GetStepsAsync(string processId, CancellationToken cancellationToken = default);
     Task<StepRecord?> GetStepAsync(long stepId, CancellationToken cancellationToken = default);
 
+    /// <summary>Последний шаг маркера в блоке (для повторной попытки — снимок предыдущей).</summary>
+    Task<StepRecord?> GetLastStepAsync(string processId, string tokenId, string nodeId, CancellationToken cancellationToken = default);
+
     /// <summary>Незавершённые шаги: «запланирован», «выполняется», «ожидает».</summary>
     Task<IReadOnlyList<StepRecord>> GetOpenStepsAsync(string processId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<JournalEntry>> GetJournalAsync(string processId, CancellationToken cancellationToken = default);

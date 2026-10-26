@@ -127,6 +127,31 @@ public sealed class TelegramTests
     }
 
     [Fact]
+    public async Task Retry_after_a_send_that_arrives_late_does_not_send_a_second_message()
+    {
+        var (h, t) = await SetupAsync();
+        await using var _ = h;
+        // Первая попытка: обрыв, сообщение застряло в очереди библиотеки, проверка его не видит — шаг повторяется.
+        // Вторая попытка идёт с тем же ключом: застрявшее сообщение доходит, а второе Telegram не принимает.
+        t.DeliverLater = true;
+        var id = await h.RunAsync(new ScenarioBuilder("Повтор")
+            .Variable("sent", VariableType.Any)
+            .Node("start", "start")
+            .Node("send", "telegram.send", new { chat = "@ivan", text = "Один раз", saveTo = "sent" },
+                new NodeSettings { RetryCount = 1, RetryDelaySeconds = 0 })
+            .Node("end", "end")
+            .Chain("start", "send", "end").Build());
+        var done = await h.WaitForStatusAsync(id, ProcessStatus.Completed, advance: TimeSpan.FromSeconds(1));
+
+        Assert.Single(t.Sent);
+        var attempts = (await h.StepsAsync(id)).Where(s => s.NodeId == "send").ToList();
+        Assert.Equal(2, attempts.Count);
+        Assert.Equal(attempts[0].Checkpoint!["randomId"]!.GetValue<string>(), attempts[1].Checkpoint!["randomId"]!.GetValue<string>());
+        Assert.Equal(StepState.Succeeded, attempts[1].State);
+        Assert.Equal(t.Sent.Single().Message.MessageId, done.Variables["sent"]!["messageId"]!.GetValue<int>());
+    }
+
+    [Fact]
     public async Task Verification_ignores_identical_message_sent_before_and_trailing_whitespace()
     {
         var (h, t) = await SetupAsync();
@@ -192,6 +217,56 @@ public sealed class TelegramTests
         Assert.Equal(ProcessStatus.Waiting, (await h.ProcessAsync(late)).Status);
         var timedOut = await h.WaitForStatusAsync(late, ProcessStatus.Failed, advance: TimeSpan.FromSeconds(5));
         Assert.Equal("Ответа нет", timedOut.StatusMessage);
+    }
+
+    [Fact]
+    public async Task Timeout_shortly_after_start_waits_for_catch_up_of_a_reply_that_came_while_closed()
+    {
+        var (h, _) = await SetupAsync();
+        await using var __ = h;
+        // Ждём 10 минут; Pepa закрыта 9 минут 30 секунд, ответ пришёл на 5-й минуте. Срок истекает через 30 с после запуска,
+        // а Telegram ещё подключается: тайм-аут не наступает, пока Telegram не догрузит пропущенное.
+        var id = await h.RunAsync(AskAndWait(timeout: 600));
+        await h.WaitForStatusAsync(id, ProcessStatus.Waiting);
+        var askedAt = h.Time.GetUtcNow();
+        await h.RestartAsync(whileClosed: () => h.Time.Advance(TimeSpan.FromSeconds(570)),
+            beforeStart: engine => engine.SourceCatchingUp(TelegramEvents.Source));
+        await h.Engine.ResumeAsync(id, ResumeAction.Continue);
+        await h.IdleAsync(TimeSpan.FromMinutes(3));
+        Assert.Equal(ProcessStatus.Waiting, (await h.ProcessAsync(id)).Status);
+
+        await ReceiveAsync(h, FakeTelegram.Incoming(Ivan, "Да, готов", 70, askedAt.AddMinutes(-5)));
+        await ReceiveAsync(h, FakeTelegram.Incoming(Ivan, "Готов", 71, askedAt.AddMinutes(5)));
+        h.Engine.SourceCaughtUp(TelegramEvents.Source);
+        var done = await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Equal("Ответ: Готов", done.StatusMessage);
+    }
+
+    [Fact]
+    public async Task Source_that_never_catches_up_does_not_hold_timeouts_forever()
+    {
+        var (h, _) = await SetupAsync();
+        await using var __ = h;
+        var id = await h.RunAsync(AskAndWait(timeout: 60));
+        await h.WaitForStatusAsync(id, ProcessStatus.Waiting);
+        await h.RestartAsync(whileClosed: () => h.Time.Advance(TimeSpan.FromHours(1)),
+            beforeStart: engine => engine.SourceCatchingUp(TelegramEvents.Source));
+        await h.Engine.ResumeAsync(id, ResumeAction.Continue);
+        await h.IdleAsync(TimeSpan.FromMinutes(5));
+        Assert.Equal(ProcessStatus.Waiting, (await h.ProcessAsync(id)).Status);
+        var timedOut = await h.WaitForStatusAsync(id, ProcessStatus.Failed, advance: TimeSpan.FromSeconds(10));
+        Assert.Equal("Ответа нет", timedOut.StatusMessage);
+        Assert.True(h.Time.GetUtcNow() >= EngineHarness.StartTime + TimeSpan.FromHours(1) + h.Options.MaxCatchUpWait);
+    }
+
+    [Fact]
+    public void Clock_offset_shifts_the_event_time_to_the_computer_clock()
+    {
+        var date = new DateTimeOffset(2026, 1, 2, 3, 4, 5, TimeSpan.Zero);
+        var input = TelegramEvents.ToEvent(FakeTelegram.Incoming(Ivan, "Привет", 55, date) with { ClockOffset = TimeSpan.FromMinutes(7) });
+        Assert.Equal(date.AddMinutes(7), input.OccurredAt);
+        // В самом сообщении — время Telegram.
+        Assert.Equal(date.ToString("O"), input.Payload!["date"]!.GetValue<string>());
     }
 
     [Fact]

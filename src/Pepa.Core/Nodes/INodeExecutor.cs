@@ -59,6 +59,12 @@ public sealed record NodeExecutionContext
     /// <summary>Снимок, полученный в <see cref="INodeExecutor.PrepareAsync"/>, если был.</summary>
     public JsonObject? Checkpoint { get; init; }
 
+    /// <summary>
+    /// Снимок предыдущей попытки этого же шага (при повторе). Блок может взять из него то, что должно совпадать во всех
+    /// попытках, — например, ключ от повторной отправки сообщения.
+    /// </summary>
+    public JsonObject? PreviousCheckpoint { get; init; }
+
     /// <summary>Копия переменных процесса (изменения через результат шага, а не напрямую).</summary>
     public required JsonObject Variables { get; init; }
 
@@ -116,7 +122,14 @@ public abstract record NodeResult
     public sealed record Failure(string Error, bool Retryable = true) : NodeResult;
 
     /// <summary>Неизвестно, выполнилось ли действие. Автоматически не повторяется.</summary>
-    public sealed record Unknown(string Reason) : NodeResult;
+    public sealed record Unknown(string Reason) : NodeResult
+    {
+        /// <summary>
+        /// Блок уже сверился с внешней системой, и сразу проверять ещё раз бессмысленно (ответ был бы тем же «не видно»,
+        /// а повтор после него — опасен). Решение — за пользователем.
+        /// </summary>
+        public bool AlreadyChecked { get; init; }
+    }
 
     /// <summary>Ждать до указанного момента (не занимая поток), затем идти по порту «out».</summary>
     public sealed record Wait(DateTimeOffset Until, string? Message) : NodeResult;

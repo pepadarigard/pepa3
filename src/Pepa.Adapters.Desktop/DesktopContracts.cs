@@ -64,9 +64,26 @@ public enum MouseButtonKind
     Middle,
 }
 
+/// <summary>Как сработало нажатие без мыши.</summary>
+public enum InvokeOutcome
+{
+    /// <summary>Элемент так нажимать не умеет.</summary>
+    NotSupported,
+
+    /// <summary>Нажато, программа ответила.</summary>
+    Done,
+
+    /// <summary>
+    /// Нажатие передано, но программа ещё не ответила — обычно это значит, что открылось окно-диалог (программа ждёт его
+    /// закрытия, прежде чем «закончить» нажатие).
+    /// </summary>
+    Pending,
+}
+
 /// <summary>
 /// Окна, элементы, мышь и клавиатура Windows. Методы — одна попытка без ожидания (ждут блоки).
-/// Ошибки самого Windows — <see cref="DesktopException"/>.
+/// Ошибки самого Windows — <see cref="DesktopException"/>. Мышь и клавиатура работают только с окном на переднем плане:
+/// если оно не там (или в точке нажатия другое окно), ввод не выполняется — <see cref="DesktopInputBlockedException"/>.
 /// </summary>
 public interface IDesktop
 {
@@ -82,36 +99,57 @@ public interface IDesktop
     /// <summary>Окно ещё открыто.</summary>
     Task<bool> IsOpenAsync(DesktopWindow window, CancellationToken cancellationToken);
 
-    /// <summary>Вывести окно на передний план (развернуть, если свёрнуто).</summary>
-    Task ActivateAsync(DesktopWindow window, CancellationToken cancellationToken);
+    /// <summary>
+    /// Вывести окно на передний план (развернуть, если свёрнуто) и убедиться, что оно там. Не удалось (Windows не разрешил,
+    /// окно запущено от администратора) — <see cref="DesktopInputBlockedException"/>.
+    /// </summary>
+    /// <returns>Сведения об окне после активации (положение и размер могли измениться).</returns>
+    Task<WindowInfo> ActivateAsync(DesktopWindow window, CancellationToken cancellationToken);
 
-    /// <summary>Нажать элемент без мыши (UI Automation Invoke/Toggle/Select). false — элемент так не умеет.</summary>
-    Task<bool> InvokeAsync(DesktopElement element, CancellationToken cancellationToken);
+    /// <summary>Нажать элемент без мыши (UI Automation Invoke/Toggle/Select).</summary>
+    Task<InvokeOutcome> InvokeAsync(DesktopElement element, CancellationToken cancellationToken);
 
-    /// <summary>Нажать мышью в центр элемента.</summary>
-    Task ClickAsync(DesktopElement element, MouseButtonKind button, bool doubleClick, CancellationToken cancellationToken);
+    /// <summary>
+    /// Нажать мышью в элемент: точка берётся заново и проверяется, что в ней именно этот элемент (не перекрыт, не за краем).
+    /// </summary>
+    Task ClickAsync(DesktopWindow window, DesktopElement element, MouseButtonKind button, bool doubleClick, CancellationToken cancellationToken);
 
     /// <summary>Записать значение поля без клавиатуры (Value pattern). false — поле так не умеет.</summary>
     Task<bool> SetValueAsync(DesktopElement element, string text, CancellationToken cancellationToken);
 
-    Task FocusAsync(DesktopElement element, CancellationToken cancellationToken);
+    /// <summary>Поставить фокус ввода в элемент и убедиться, что он там (иначе — <see cref="DesktopInputBlockedException"/>).</summary>
+    Task FocusAsync(DesktopWindow window, DesktopElement element, CancellationToken cancellationToken);
 
     /// <summary>Прочитать: «name» — подпись, «value» — значение поля, «text» — текст (значение, иначе подпись).</summary>
     Task<string?> ReadAsync(DesktopElement element, string what, CancellationToken cancellationToken);
 
-    Task MouseClickAsync(int x, int y, MouseButtonKind button, bool doubleClick, CancellationToken cancellationToken);
+    /// <summary>Нажать мышью в точке экрана — только если в ней окно <paramref name="window"/>.</summary>
+    Task MouseClickAsync(DesktopWindow window, int x, int y, MouseButtonKind button, bool doubleClick, CancellationToken cancellationToken);
 
-    /// <summary>Напечатать текст клавиатурой (любые буквы, в том числе русские), с паузой между символами.</summary>
-    Task TypeTextAsync(string text, int delayMs, CancellationToken cancellationToken);
+    /// <summary>
+    /// Напечатать текст клавиатурой (любые буквы, в том числе русские), с паузой между символами. Перед каждым символом
+    /// проверяется, что окно всё ещё на переднем плане.
+    /// </summary>
+    Task TypeTextAsync(DesktopWindow window, string text, int delayMs, CancellationToken cancellationToken);
 
     /// <summary>Нажать сочетание: клавиши-модификаторы зажимаются, последняя нажимается (Ctrl+Shift+S, Enter, F5).</summary>
-    Task PressKeysAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken);
+    Task PressKeysAsync(DesktopWindow window, IReadOnlyList<string> keys, CancellationToken cancellationToken);
 
     /// <returns>Номер процесса.</returns>
     Task<int> StartProgramAsync(string path, string? arguments, CancellationToken cancellationToken);
 
     /// <summary>Попросить окно закрыться (как крестик).</summary>
     Task CloseWindowAsync(DesktopWindow window, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Ввод мышью или клавиатурой не выполнен (или прерван), потому что нужное окно не на переднем плане, в точке нажатия
+/// другое окно или Windows не пропускает ввод в это окно.
+/// </summary>
+public sealed class DesktopInputBlockedException(string message, bool partial = false) : Exception(message)
+{
+    /// <summary>Часть ввода уже ушла в окно (например, половина текста) — итог неизвестен.</summary>
+    public bool Partial { get; } = partial;
 }
 
 /// <summary>Windows не выполнил действие (элемент недоступен, окно закрылось и т.п.).</summary>
@@ -128,15 +166,15 @@ public sealed class UnavailableDesktop(string reason) : IDesktop
     public Task<IReadOnlyList<DesktopWindow>> FindWindowsAsync(WindowQuery query, CancellationToken cancellationToken) => Task.FromException<IReadOnlyList<DesktopWindow>>(Fail());
     public Task<IReadOnlyList<DesktopElement>> FindElementsAsync(DesktopWindow window, ElementQuery query, CancellationToken cancellationToken) => Task.FromException<IReadOnlyList<DesktopElement>>(Fail());
     public Task<bool> IsOpenAsync(DesktopWindow window, CancellationToken cancellationToken) => Task.FromException<bool>(Fail());
-    public Task ActivateAsync(DesktopWindow window, CancellationToken cancellationToken) => Task.FromException(Fail());
-    public Task<bool> InvokeAsync(DesktopElement element, CancellationToken cancellationToken) => Task.FromException<bool>(Fail());
-    public Task ClickAsync(DesktopElement element, MouseButtonKind button, bool doubleClick, CancellationToken cancellationToken) => Task.FromException(Fail());
+    public Task<WindowInfo> ActivateAsync(DesktopWindow window, CancellationToken cancellationToken) => Task.FromException<WindowInfo>(Fail());
+    public Task<InvokeOutcome> InvokeAsync(DesktopElement element, CancellationToken cancellationToken) => Task.FromException<InvokeOutcome>(Fail());
+    public Task ClickAsync(DesktopWindow window, DesktopElement element, MouseButtonKind button, bool doubleClick, CancellationToken cancellationToken) => Task.FromException(Fail());
     public Task<bool> SetValueAsync(DesktopElement element, string text, CancellationToken cancellationToken) => Task.FromException<bool>(Fail());
-    public Task FocusAsync(DesktopElement element, CancellationToken cancellationToken) => Task.FromException(Fail());
+    public Task FocusAsync(DesktopWindow window, DesktopElement element, CancellationToken cancellationToken) => Task.FromException(Fail());
     public Task<string?> ReadAsync(DesktopElement element, string what, CancellationToken cancellationToken) => Task.FromException<string?>(Fail());
-    public Task MouseClickAsync(int x, int y, MouseButtonKind button, bool doubleClick, CancellationToken cancellationToken) => Task.FromException(Fail());
-    public Task TypeTextAsync(string text, int delayMs, CancellationToken cancellationToken) => Task.FromException(Fail());
-    public Task PressKeysAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken) => Task.FromException(Fail());
+    public Task MouseClickAsync(DesktopWindow window, int x, int y, MouseButtonKind button, bool doubleClick, CancellationToken cancellationToken) => Task.FromException(Fail());
+    public Task TypeTextAsync(DesktopWindow window, string text, int delayMs, CancellationToken cancellationToken) => Task.FromException(Fail());
+    public Task PressKeysAsync(DesktopWindow window, IReadOnlyList<string> keys, CancellationToken cancellationToken) => Task.FromException(Fail());
     public Task<int> StartProgramAsync(string path, string? arguments, CancellationToken cancellationToken) => Task.FromException<int>(Fail());
     public Task CloseWindowAsync(DesktopWindow window, CancellationToken cancellationToken) => Task.FromException(Fail());
 }

@@ -82,7 +82,8 @@ export type FieldKind =
   | "time"
   | "matchCondition"
   | "scenario"
-  | "seconds";
+  | "seconds"
+  | "code";
 
 export interface PortDescriptor {
   id: string;

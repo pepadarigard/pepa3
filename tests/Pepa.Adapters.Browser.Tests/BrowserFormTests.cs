@@ -55,6 +55,64 @@ public sealed class BrowserFormTests
     }
 
     [Fact]
+    public async Task Slow_checkbox_is_awaited_and_consumed_upload_is_not_repeated()
+    {
+        TestBrowser.RequireBrowser();
+        await using var f = await BrowserFixture.CreateAsync();
+        await File.WriteAllTextAsync(Path.Combine(f.Workspace, "скан.txt"), "скан", TestContext.Current.CancellationToken);
+        var retry = new NodeSettings { RetryCount = 2, RetryDelaySeconds = 0 };
+        var id = await f.H.RunAsync(new ScenarioBuilder("Медленный сайт")
+            .Variable("clicks", VariableType.Any)
+            .Node("start", "start")
+            .Node("open", "browser.open", BrowserFixture.OpenConfig(f.Site.Url("/controls")))
+            .Node("check", "browser.check", new { selector = "#slow" }, retry)
+            .Node("clicks", "browser.evaluate", new { script = "window.slowClicks", saveTo = "clicks" })
+            .Node("upload", "browser.upload", new { selector = "#consume", path = "скан.txt" }, retry)
+            .Node("end", "end")
+            .Chain("start", "open", "check", "clicks", "upload", "end")
+            .Build());
+
+        // Флажок: одно нажатие, отметка появилась через 0,8 с — Pepa дождалась, а не нажала снова (что сняло бы отметку).
+        // Файл: сайт забрал его и очистил поле — Pepa не выбирает файл второй раз, а спрашивает.
+        var process = await f.H.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
+        Assert.Equal(AttentionKind.UnknownStep, process.Attention);
+        Assert.Equal(1, process.Variables["clicks"]!.GetValue<double>());
+        Assert.Contains("сайт сразу забрал", process.StatusMessage);
+        await Task.Delay(500, TestContext.Current.CancellationToken);
+        Assert.Equal(1, f.Site.Submits);
+        Assert.Single(await f.H.StepsAsync(id), s => s.NodeId == "upload");
+    }
+
+    [Fact]
+    public async Task Script_gets_variables_as_data_not_as_code()
+    {
+        TestBrowser.RequireBrowser();
+        await using var f = await BrowserFixture.CreateAsync();
+        // Текст из сообщения с кавычками и кодом остаётся текстом.
+        var id = await f.H.RunAsync(new ScenarioBuilder("Переменные в коде")
+            .Variable("message", VariableType.Text, JsonValue.Create("'); window.hacked = true; ('"))
+            .Variable("length", VariableType.Any).Variable("hacked", VariableType.Any)
+            .Node("start", "start")
+            .Node("open", "browser.open", BrowserFixture.OpenConfig(f.Site.Url("/controls")))
+            .Node("length", "browser.evaluate", new { script = "() => vars.message.length", saveTo = "length" })
+            .Node("hacked", "browser.evaluate", new { script = "window.hacked === true", saveTo = "hacked" })
+            .Node("end", "end")
+            .Chain("start", "open", "length", "hacked", "end")
+            .Build());
+        var done = await f.H.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Equal(28, done.Variables["length"]!.GetValue<double>());
+        Assert.False(done.Variables["hacked"]!.GetValue<bool>());
+
+        // Старый способ ({{ }} в коде) отклоняется проверкой сценария, а не выполняется.
+        Assert.Equal(["script"], new EvaluateNode(f.Sessions).Validate(new NodeDefinition
+        {
+            Id = "e", Type = EvaluateNode.TypeName, Config = new JsonObject { ["script"] = "'{{ vars.message }}'.length" },
+        }).Select(i => i.Field));
+        Assert.Equal(new JsonObject { ["a"] = 1 }.ToJsonString(),
+            EvaluateNode.UsedVariables("vars.a + 1", new JsonObject { ["a"] = 1, ["secret"] = "x" }).ToJsonString());
+    }
+
+    [Fact]
     public async Task Missing_option_and_wrong_element_are_reported_and_nothing_changes()
     {
         TestBrowser.RequireBrowser();

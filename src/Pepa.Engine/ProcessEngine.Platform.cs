@@ -363,7 +363,7 @@ public sealed partial class ProcessEngine
                 });
         }
 
-        if (subscription.State == SubscriptionState.Active && token.WakeAt is { } wakeAt && wakeAt <= now && TimeoutDue(wakeAt, now))
+        if (subscription.State == SubscriptionState.Active && token.WakeAt is { } wakeAt && wakeAt <= now && TimeoutDue(subscription, wakeAt, now))
         {
             var isChild = subscription.Purpose == SubscriptionPurpose.ChildProcess;
             var timeoutResult = isChild
@@ -387,11 +387,36 @@ public sealed partial class ProcessEngine
     }
 
     /// <summary>
-    /// Срок ожидания, истёкший, пока Pepa была закрыта, наступает не сразу после запуска, а через
-    /// <see cref="EngineOptions.CatchUpGrace"/>: источники (например, Telegram) успевают догрузить события, произошедшие вовремя.
+    /// Ожидание, начатое до запуска Pepa, завершается по тайм-ауту не раньше чем через <see cref="EngineOptions.CatchUpGrace"/>
+    /// после запуска и не раньше, чем источник (например, Telegram) сообщит, что догрузил пропущенное, — но не позже
+    /// <see cref="EngineOptions.MaxCatchUpWait"/>: событие, пришедшее вовремя, пока Pepa была закрыта, не должно проиграть тайм-ауту.
     /// </summary>
-    private bool TimeoutDue(DateTimeOffset wakeAt, DateTimeOffset now) =>
-        wakeAt >= _startedAt || now >= _startedAt + _options.CatchUpGrace;
+    private bool TimeoutDue(SubscriptionRecord subscription, DateTimeOffset wakeAt, DateTimeOffset now)
+    {
+        if (subscription.CreatedAt >= _startedAt)
+        {
+            return true;
+        }
+
+        if (now < _startedAt + _options.CatchUpGrace)
+        {
+            return false;
+        }
+
+        return !_catchingUp.ContainsKey(subscription.Source) || now >= _startedAt + _options.MaxCatchUpWait;
+    }
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _catchingUp = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Источник после запуска догружает события, пришедшие, пока Pepa была закрыта: тайм-ауты ожиданий его событий,
+    /// начатых до запуска, пока не наступают. Вызывать до <see cref="StartAsync"/>.
+    /// </summary>
+    public void SourceCatchingUp(string source) => _catchingUp[source] = true;
+
+    /// <summary>Источник догрузил пропущенное (см. <see cref="SourceCatchingUp"/>).</summary>
+    /// <remarks>Тайм-ауты проверяет таймер движка — отдельного сигнала не нужно.</remarks>
+    public void SourceCaughtUp(string source) => _catchingUp.TryRemove(source, out _);
 
     private async Task<bool> TryResolveResourceWaitAsync(ProcessRecord process, ScenarioGraph graph, TokenRecord token,
         NodeDefinition node, NodeTypeDescriptor descriptor, StepRecord step, DateTimeOffset now)

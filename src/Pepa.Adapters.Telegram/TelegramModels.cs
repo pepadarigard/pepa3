@@ -29,8 +29,12 @@ public sealed record TelegramIncomingMessage
     public TelegramPeer? From { get; init; }
     public required int MessageId { get; init; }
     public required string Text { get; init; }
+    /// <summary>Время отправки по часам Telegram.</summary>
     public required DateTimeOffset Date { get; init; }
     public int? ReplyToMessageId { get; init; }
+
+    /// <summary>Поправка на часы компьютера (их отличие от часов Telegram): время события сравнивается с часами компьютера.</summary>
+    public TimeSpan ClockOffset { get; init; }
 }
 
 /// <summary>Сообщение, отправленное процессом.</summary>
@@ -99,6 +103,9 @@ public sealed class TelegramSendRejectedException(string message, bool retryable
     public bool Retryable { get; } = retryable;
 }
 
+/// <summary>Сообщение с этим ключом от повторов уже отправлено раньше (прошлой попыткой шага): Telegram второе не принял.</summary>
+public sealed class TelegramAlreadySentException() : Exception("Telegram сообщает, что это сообщение уже отправлено прошлой попыткой.");
+
 /// <summary>Входящие сообщения — события Pepa с источником «telegram».</summary>
 public static class TelegramEvents
 {
@@ -111,7 +118,7 @@ public static class TelegramEvents
         Type = MessageType,
         ExternalId = $"{message.AccountId}:{message.Chat.Key}:{message.MessageId}",
         CorrelationKey = message.Chat.Key,
-        OccurredAt = message.Date,
+        OccurredAt = message.Date + message.ClockOffset,
         Payload = new JsonObject
         {
             ["text"] = message.Text,

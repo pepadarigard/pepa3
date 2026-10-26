@@ -64,15 +64,25 @@ public sealed class SendTelegramNode(ITelegramGateway telegram) : INodeExecutor
     /// До отправки (только чтение): номер последнего сообщения чата — после сбоя Pepa ищет своё сообщение среди более новых,
     /// не полагаясь на часы компьютера, — и ключ от повторов для Telegram.
     /// </summary>
+    /// <remarks>
+    /// При повторе шага ключ и отметка берутся из прошлой попытки: если её сообщение всё-таки дойдёт (библиотека
+    /// переотправляет запросы после обрыва), Telegram не примет второе с тем же ключом, а проверка найдёт первое.
+    /// </remarks>
     public async ValueTask<JsonObject?> PrepareAsync(NodeExecutionContext context, CancellationToken cancellationToken)
     {
+        var previous = context.PreviousCheckpoint;
         // Строкой: в числе JSON (double) 64-битный ключ потерял бы точность.
-        var checkpoint = new JsonObject { ["randomId"] = Random.Shared.NextInt64(1, long.MaxValue).ToString(CultureInfo.InvariantCulture) };
+        var randomId = previous?.GetString("randomId") is { Length: > 0 } kept
+            ? kept
+            : Random.Shared.NextInt64(1, long.MaxValue).ToString(CultureInfo.InvariantCulture);
+        var checkpoint = new JsonObject { ["randomId"] = randomId };
         try
         {
             var chat = await telegram.ResolveAsync(context.RequireString("chat"), cancellationToken);
             checkpoint["chat"] = chat.Key;
-            checkpoint["afterId"] = await telegram.LastMessageIdAsync(chat, cancellationToken);
+            checkpoint["afterId"] = previous?.GetString("chat") == chat.Key && previous.GetNumber("afterId") is { } earlier
+                ? earlier
+                : await telegram.LastMessageIdAsync(chat, cancellationToken);
         }
         catch (Exception ex) when (ex is TelegramUnavailableException or TelegramChatNotFoundException)
         {
@@ -118,6 +128,11 @@ public sealed class SendTelegramNode(ITelegramGateway telegram) : INodeExecutor
         catch (TelegramSendRejectedException ex)
         {
             return NodeResult.Fail(ex.Message, ex.Retryable);
+        }
+        catch (TelegramAlreadySentException ex)
+        {
+            // Проверка найдёт сообщение прошлой попытки в истории чата.
+            return new NodeResult.Unknown(ex.Message);
         }
 
         var output = Output(chat, sent.MessageId, sent.Date);

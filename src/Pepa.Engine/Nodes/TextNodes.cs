@@ -131,13 +131,12 @@ public sealed class FindInTextNode : INodeExecutor
                     throw new NodeInputException("Длина кода: «от» — не меньше 1, «до» — не меньше «от» и не больше 32.");
                 }
 
-                return Matches(text, $@"(?<!\d)\d{{{min},{max}}}(?!\d)", RegexOptions.None).Select(m => (JsonNode)JsonValue.Create(m)).ToList();
+                // Только цифры 0–9: «\d» в .NET находит и арабские, и полноширинные цифры.
+                return Matches(text, $@"(?<![0-9])[0-9]{{{min},{max}}}(?![0-9])", RegexOptions.None).Select(m => (JsonNode)JsonValue.Create(m)).ToList();
             }
 
             case "number":
-                return Matches(text, @"(?<![\d.,])-?\d+(?:[.,]\d+)?(?![\d])", RegexOptions.None)
-                    .Select(m => (JsonNode)JsonValue.Create(double.Parse(m.Replace(',', '.'), CultureInfo.InvariantCulture)))
-                    .ToList();
+                return Matches(text, NumberPattern, RegexOptions.None).Select(m => (JsonNode)JsonValue.Create(ParseNumber(m))).ToList();
 
             case "link":
                 return Matches(text, @"https?://[^\s<>""«»]+", RegexOptions.IgnoreCase)
@@ -167,8 +166,11 @@ public sealed class FindInTextNode : INodeExecutor
 
                 try
                 {
+                    // Со скобками — значение первой группы; совпадение, где группа пуста или не участвовала, не считается находкой.
                     return regex.Matches(text)
-                        .Select(m => (JsonNode)JsonValue.Create(m.Groups.Count > 1 ? m.Groups[1].Value : m.Value))
+                        .Select(m => m.Groups.Count > 1 ? m.Groups[1].Success ? m.Groups[1].Value : "" : m.Value)
+                        .Where(v => v.Length > 0)
+                        .Select(v => (JsonNode)JsonValue.Create(v))
                         .ToList();
                 }
                 catch (RegexMatchTimeoutException)
@@ -180,6 +182,46 @@ public sealed class FindInTextNode : INodeExecutor
             default:
                 throw new NodeInputException($"Неизвестный вид поиска «{what}».");
         }
+    }
+
+    /// <summary>
+    /// Число: с разделителями разрядов (1 234 567,89 · 1,000,000 · 1.234,56 · 1,234.56) или без (1234 · 12,5 · 12.5).
+    /// Одна запятая или одна точка — дробная часть: «1,234» — это 1,234 (так пишут по-русски).
+    /// </summary>
+    private const string NumberPattern =
+        @"(?<![0-9.,])-?(?:" +
+        @"[0-9]{1,3}(?:[ \u00A0\u202F\u2009][0-9]{3})+(?:[.,][0-9]+)?" +
+        @"|[0-9]{1,3}(?:,[0-9]{3}){2,}(?:\.[0-9]+)?" +
+        @"|[0-9]{1,3}(?:,[0-9]{3})+\.[0-9]+" +
+        @"|[0-9]{1,3}(?:\.[0-9]{3}){2,}(?:,[0-9]+)?" +
+        @"|[0-9]{1,3}(?:\.[0-9]{3})+,[0-9]+" +
+        @"|[0-9]+(?:[.,][0-9]+)?" +
+        @")(?![0-9])";
+
+    private static double ParseNumber(string match)
+    {
+        var s = match.Replace(" ", "").Replace("\u00A0", "").Replace("\u202F", "").Replace("\u2009", "");
+        var commas = s.Count(c => c == ',');
+        var dots = s.Count(c => c == '.');
+        if (commas > 0 && dots > 0)
+        {
+            // Есть и то и другое: последний знак — дробная часть, первый — разряды.
+            s = s.LastIndexOf(',') > s.LastIndexOf('.') ? s.Replace(".", "").Replace(',', '.') : s.Replace(",", "");
+        }
+        else if (commas > 1)
+        {
+            s = s.Replace(",", "");
+        }
+        else if (dots > 1)
+        {
+            s = s.Replace(".", "");
+        }
+        else
+        {
+            s = s.Replace(',', '.');
+        }
+
+        return double.Parse(s, NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture);
     }
 
     private static IEnumerable<string> Matches(string text, string pattern, RegexOptions options) =>
@@ -198,7 +240,9 @@ public sealed class FindInTextNode : INodeExecutor
             }
             else
             {
-                var index = text.IndexOf(after, position, StringComparison.CurrentCultureIgnoreCase);
+                // Без учёта культуры: «культурный» поиск пропускает мягкие переносы и подобные знаки, и позиция конца находки
+                // не совпадала бы с длиной искомого.
+                var index = text.IndexOf(after, position, StringComparison.OrdinalIgnoreCase);
                 if (index < 0)
                 {
                     yield break;
@@ -215,7 +259,7 @@ public sealed class FindInTextNode : INodeExecutor
             }
             else
             {
-                end = text.IndexOf(before, start, StringComparison.CurrentCultureIgnoreCase);
+                end = text.IndexOf(before, start, StringComparison.OrdinalIgnoreCase);
                 if (end < 0)
                 {
                     yield break;
