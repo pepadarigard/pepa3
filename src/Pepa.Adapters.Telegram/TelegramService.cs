@@ -54,6 +54,9 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
     private readonly Task _reconnectLoop;
     private Connection? _connection;
     private TelegramCredentials? _credentials;
+
+    /// <summary>null — файл настроек прокси не прочитался: напрямую не подключаемся (пользователь просил прокси).</summary>
+    private TelegramProxy? _proxy;
     private TelegramStatus _status;
     private string? _stateWarning;
     private string? _clockWarning;
@@ -77,6 +80,7 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
             }
         };
         _credentials = LoadCredentials();
+        _proxy = LoadProxy();
         _status = _credentials is null
             ? new TelegramStatus(TelegramState.NotConfigured, null, null)
             : new TelegramStatus(HasSession ? TelegramState.Disconnected : TelegramState.LoginRequired, null, null);
@@ -115,6 +119,11 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
     private bool HasSession => _credentials is { Authorized: true } && File.Exists(SessionPath);
     private string StatePath => Path.Combine(_folder, "updates.json");
     private string CredentialsPath => Path.Combine(_folder, "account.json");
+    private string ProxyPath => Path.Combine(_folder, "proxy.json");
+
+    private string NoConnection => _proxy is { Kind: not TelegramProxyKind.None } proxy
+        ? $"Telegram не ответил через прокси ({proxy.Describe()}). Проверьте прокси: «Интеграции» → Telegram → «Прокси» → «Проверить»."
+        : NoConnectionHint;
 
     // ───────────── Подключение ─────────────
 
@@ -168,7 +177,12 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
         {
             Logger.LogWarning(ex, "Не удалось подключиться к Telegram.");
             await DisposeConnectionAsync();
-            var reason = ex is TimeoutException ? NoConnectionHint : $"Нет связи с Telegram: {ex.Message}.";
+            var reason = ex switch
+            {
+                TimeoutException => NoConnection,
+                TelegramProxyException => ex.Message,
+                _ => $"Нет связи с Telegram: {ex.Message}.",
+            };
             SetStatus(TelegramState.Disconnected, null, $"{reason} Повторю попытку.");
             RequestReconnect();
             return false;
@@ -336,16 +350,24 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
         }
         catch (TimeoutException)
         {
-            throw await FailLoginAsync(NoConnectionHint);
+            throw await FailLoginAsync(NoConnection);
         }
         catch (OperationCanceledException) when (_disposed)
         {
             throw new TelegramLoginException("Pepa закрывается — вход прерван.");
         }
-        catch (Exception ex) when (ex is not (TelegramLoginException or OperationCanceledException))
+        catch (TelegramProxyException ex)
         {
+            throw await FailLoginAsync(ex.Message);
+        }
+        catch (Exception ex) when (ex is not TelegramLoginException)
+        {
+            // Отмена здесь — не закрытие Pepa, а оборванное библиотекой соединение: вход не состоялся, это надо сказать.
             Logger.LogWarning(ex, "Вход в Telegram не удался.");
-            throw await FailLoginAsync($"Не удалось связаться с Telegram: {ex.Message}");
+            throw await FailLoginAsync(ex is OperationCanceledException
+                ? "Связь с Telegram оборвалась во время входа" + (_proxy is { Kind: not TelegramProxyKind.None } proxy ? $" (прокси {proxy.Describe()})" : "") +
+                  ". Попробуйте ещё раз."
+                : $"Не удалось связаться с Telegram: {ex.Message}");
         }
 
         if (next is not null)
@@ -471,6 +493,185 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
         }
     }
 
+    // ───────────── Прокси ─────────────
+
+    private const string ProxyUnreadable =
+        "Настройки прокси Telegram не прочитались — Pepa не подключается к Telegram, пока прокси не задан заново («Интеграции» → Telegram → «Прокси»).";
+
+    /// <summary>Сохранённый прокси без пароля и секрета — для интерфейса.</summary>
+    public TelegramProxyInfo ProxyInfo => _proxy is { } proxy
+        ? new TelegramProxyInfo(proxy.Kind, proxy.Host, proxy.Port, proxy.Username, proxy.Password is not null, proxy.Secret is not null, null)
+        : new TelegramProxyInfo(TelegramProxyKind.None, "", 0, null, false, false, ProxyUnreadable);
+
+    /// <summary>
+    /// Сохранить прокси и переподключиться через него. Пароль или секрет null при том же прокси — оставить сохранённый.
+    /// Начатый вход прерывается: его нужно пройти заново уже через новый прокси.
+    /// </summary>
+    public async Task<TelegramStatus> SetProxyAsync(TelegramProxy proxy)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        await _lock.WaitAsync();
+        try
+        {
+            proxy = WithSavedSecrets(proxy).Validated();
+            Directory.CreateDirectory(_folder);
+            if (proxy.Kind == TelegramProxyKind.None)
+            {
+                DeleteFiles(throwOnError: true, ProxyPath);
+            }
+            else
+            {
+                WriteAtomic(ProxyPath, JsonSerializer.Serialize(new StoredProxy(proxy.Kind.ToString(), proxy.Host, proxy.Port, proxy.Username,
+                    proxy.Password is { } password ? Secrets.Protect(password, SecretPurpose) : null,
+                    proxy.Secret is { } secret ? Secrets.Protect(secret, SecretPurpose) : null)));
+            }
+
+            _proxy = proxy;
+            Logger.LogInformation("Прокси Telegram: {Proxy}.", proxy.Describe());
+            if (_connection is { LoggedIn: false })
+            {
+                _ = await FailLoginAsync("Прокси изменён — начните вход заново.");
+            }
+            else if (HasSession)
+            {
+                await DisposeConnectionAsync();
+                _reconnectFailures = 0;
+                SetStatus(TelegramState.Disconnected, Status.Account, $"Прокси изменён ({proxy.Describe()}) — подключаюсь заново…");
+                ReconnectNow();
+            }
+
+            return Status;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Проверить прокси (в том числе ещё не сохранённый): для SOCKS5 — соединение через него с сервером Telegram, для
+    /// MTProxy — что прокси отвечает (секрет Telegram проверит при подключении).
+    /// </summary>
+    public async Task<(bool Ok, string Message)> CheckProxyAsync(TelegramProxy proxy, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var candidate = WithSavedSecrets(proxy).Validated();
+            var timeout = ConnectTimeout < TimeSpan.FromSeconds(20) ? ConnectTimeout : TimeSpan.FromSeconds(20);
+            switch (candidate.Kind)
+            {
+                case TelegramProxyKind.None:
+                    return (true, "Прокси не задан — Pepa подключается к Telegram напрямую.");
+                case TelegramProxyKind.Socks5:
+                {
+                    var (host, port) = ProbeTarget();
+                    using var _ = await Socks5Connector.ConnectAsync(candidate, host, port, timeout, cancellationToken);
+                    return (true, $"Прокси работает: через {candidate.Describe()} есть соединение с сервером Telegram.");
+                }
+
+                default:
+                {
+                    using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    limit.CancelAfter(timeout);
+                    using var tcp = new System.Net.Sockets.TcpClient();
+                    try
+                    {
+                        await tcp.ConnectAsync(candidate.Host, candidate.Port, limit.Token);
+                    }
+                    catch (Exception ex) when (ex is System.Net.Sockets.SocketException || (ex is OperationCanceledException && !cancellationToken.IsCancellationRequested))
+                    {
+                        return (false, ex is System.Net.Sockets.SocketException socket
+                            ? $"Прокси {candidate.Address} недоступен ({socket.SocketErrorCode}). Проверьте адрес и порт."
+                            : $"Прокси {candidate.Address} не ответил за {timeout.TotalSeconds:0} с.");
+                    }
+
+                    return (true, $"Прокси {candidate.Address} отвечает. Секрет Telegram проверит при подключении.");
+                }
+            }
+        }
+        catch (TelegramProxyException ex)
+        {
+            return (false, ex.Message);
+        }
+    }
+
+    /// <summary>Сервер для проверки прокси: заданный для проверок или основной сервер Telegram.</summary>
+    private (string Host, int Port) ProbeTarget()
+    {
+        if (ServerAddress is { } address && address.LastIndexOf(':') is var colon and > 0 &&
+            int.TryParse(address[(colon + 1)..], NumberStyles.Integer, CultureInfo.InvariantCulture, out var port))
+        {
+            return (address[..colon], port);
+        }
+
+        return ("149.154.167.50", 443);
+    }
+
+    /// <summary>Пароль или секрет не введены заново (null) при том же прокси — взять сохранённые.</summary>
+    private TelegramProxy WithSavedSecrets(TelegramProxy proxy)
+    {
+        if (_proxy is not { } saved || proxy.Kind != saved.Kind || proxy.Port != saved.Port ||
+            !string.Equals(proxy.Host.Trim().Trim('[', ']'), saved.Host, StringComparison.OrdinalIgnoreCase))
+        {
+            return proxy;
+        }
+
+        return proxy.Kind switch
+        {
+            TelegramProxyKind.Socks5 when proxy.Password is null && (string.IsNullOrEmpty(proxy.Username) ? null : proxy.Username) == saved.Username =>
+                proxy with { Password = saved.Password },
+            TelegramProxyKind.MTProxy when proxy.Secret is null => proxy with { Secret = saved.Secret },
+            _ => proxy,
+        };
+    }
+
+    private TelegramProxy? LoadProxy()
+    {
+        try
+        {
+            if (!File.Exists(ProxyPath))
+            {
+                return TelegramProxy.None;
+            }
+
+            var stored = JsonSerializer.Deserialize<StoredProxy>(File.ReadAllText(ProxyPath)) ?? throw new JsonException("пустой файл");
+            return new TelegramProxy(Enum.Parse<TelegramProxyKind>(stored.Kind), stored.Host, stored.Port, stored.Username,
+                stored.Password is { } password ? Secrets.Unprotect(password, SecretPurpose) : null,
+                stored.Secret is { } secret ? Secrets.Unprotect(secret, SecretPurpose) : null).Validated();
+        }
+        catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException or CryptographicException or FormatException
+                                       or ArgumentException or TelegramProxyException)
+        {
+            // Журнал ещё не задан (сервис создаётся раньше него) — причина видна в «Интеграциях».
+            return null;
+        }
+    }
+
+    /// <summary>Подключиться сразу (после смены прокси), а не после паузы цикла переподключения.</summary>
+    private void ReconnectNow() => _ = Task.Run(async () =>
+    {
+        try
+        {
+            await _lock.WaitAsync(_shutdown.Token);
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException)
+        {
+            return;
+        }
+
+        try
+        {
+            if (!_disposed && _connection is null && Status.State == TelegramState.Disconnected && HasSession && !await ResumeAsync())
+            {
+                _reconnectFailures++;
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    });
+
     /// <summary>Для проверок: часы «сервера Telegram» вместо запроса к нему.</summary>
     internal Func<Task<DateTime>>? ServerClockForTests { get; init; }
 
@@ -505,6 +706,7 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
     private async Task<Connection> CreateConnectionAsync(TelegramCredentials credentials, bool interactive)
     {
         Directory.CreateDirectory(_folder);
+        var proxy = _proxy ?? throw new TelegramProxyException(ProxyUnreadable);
         var connection = new Connection(interactive);
         WTelegram.Client? client = null;
         try
@@ -528,6 +730,17 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
                     or "email_verification_code" or "bot_token" => connection.Interactive && !connection.Abandoned ? null : throw new LoginRequiredException(),
                 _ => null,
             });
+            switch (proxy.Kind)
+            {
+                case TelegramProxyKind.Socks5:
+                    // Все соединения библиотеки (и к другим серверам Telegram — за файлами) идут через прокси.
+                    client.TcpHandler = (address, port) => Socks5Connector.ConnectAsync(proxy, address, port, ConnectTimeout, connection.Life.Token);
+                    break;
+                case TelegramProxyKind.MTProxy:
+                    client.MTProxyUrl = proxy.MTProxyUrl;
+                    break;
+            }
+
             client.MaxAutoReconnects = 50;
             // Короткие «подождите N секунд» библиотека выжидает сама; длинные — понятная ошибка, а не зависание.
             client.FloodRetryThreshold = 10;
@@ -1658,6 +1871,8 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
     private const string SecretPurpose = "Pepa.Telegram";
 
     private sealed record StoredCredentials(int ApiId, string ApiHash, string Phone, bool Authorized, string? SessionKey);
+
+    private sealed record StoredProxy(string Kind, string Host, int Port, string? Username, string? Password, string? Secret);
 
     /// <summary>Библиотека попросила данные входа — значит, сессии нет или она недействительна.</summary>
     private sealed class LoginRequiredException : Exception;

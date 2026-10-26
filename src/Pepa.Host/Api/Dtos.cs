@@ -225,7 +225,16 @@ public sealed record CheckResultDto(bool Ok, string Message);
 
 /// <param name="ApiId">Сохранённый api_id (api_hash наружу не отдаётся).</param>
 /// <param name="Phone">Сохранённый номер — для повторного входа.</param>
-public sealed record TelegramStatusDto(string State, string? Account, string? Message, int? ApiId, string? Phone);
+public sealed record TelegramStatusDto(string State, string? Account, string? Message, int? ApiId, string? Phone, TelegramProxyDto Proxy);
+
+/// <param name="Kind">none, socks5 или mtproxy.</param>
+/// <param name="Problem">Настройки прокси не прочитались: подключения нет, пока прокси не задан заново.</param>
+public sealed record TelegramProxyDto(string Kind, string Host, int Port, string? Username, bool HasPassword, bool HasSecret, string? Problem);
+
+/// <summary>Прокси: ссылкой (tg://proxy, tg://socks, t.me/…, socks5://) или полями.</summary>
+/// <param name="Password">null — оставить сохранённый (при том же прокси), пустая строка — без пароля.</param>
+/// <param name="Secret">null — оставить сохранённый (при том же прокси).</param>
+public sealed record TelegramProxyRequest(string? Kind, string? Host, int? Port, string? Username, string? Password, string? Secret, string? Link);
 
 public sealed record TelegramLoginRequest(int ApiId, string? ApiHash, string? Phone);
 

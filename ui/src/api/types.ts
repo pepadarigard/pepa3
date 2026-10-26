@@ -407,6 +407,32 @@ export interface TelegramStatus {
   /** Сохранённые данные для повторного входа (api_hash не отдаётся). */
   apiId: number | null;
   phone: string | null;
+  proxy: TelegramProxy;
+}
+
+export type TelegramProxyKind = "none" | "socks5" | "mtproxy";
+
+/** Сохранённый прокси: пароль и секрет не отдаются, только признак, что они есть. */
+export interface TelegramProxy {
+  kind: TelegramProxyKind;
+  host: string;
+  port: number;
+  username: string | null;
+  hasPassword: boolean;
+  hasSecret: boolean;
+  /** Настройки не прочитались — подключения нет, пока прокси не задан заново. */
+  problem: string | null;
+}
+
+/** Прокси для сохранения или проверки: ссылкой или полями. Пароль/секрет null — оставить сохранённый. */
+export interface TelegramProxyRequest {
+  kind?: TelegramProxyKind;
+  host?: string;
+  port?: number;
+  username?: string | null;
+  password?: string | null;
+  secret?: string | null;
+  link?: string;
 }
 
 export interface RecorderState {

@@ -76,6 +76,48 @@ public sealed class TelegramApiTests
     }
 }
 
+/// <summary>Прокси Telegram через API: ссылка или поля, пароль и секрет не возвращаются.</summary>
+public sealed class TelegramProxyApiTests
+{
+    [Fact]
+    public async Task Proxy_is_set_by_link_or_fields_shown_without_secrets_and_checked()
+    {
+        await using var f = await HostFixture.StartAsync(seedSamples: false);
+        Assert.Equal("none", (await f.GetAsync("/api/integrations/telegram"))["proxy"]!["kind"]!.GetValue<string>());
+
+        var (status, error) = await f.SendAsync(HttpMethod.Put, "/api/integrations/telegram/proxy", new { link = "https://example.com/x" });
+        Assert.Equal(400, status);
+        Assert.Contains("не похожа", error!["error"]!.GetValue<string>());
+
+        const string secret = "dd0123456789abcdef0123456789abcdef";
+        var (ok, saved) = await f.SendAsync(HttpMethod.Put, "/api/integrations/telegram/proxy",
+            new { link = $"tg://proxy?server=127.0.0.1&port=1&secret={secret}" });
+        Assert.Equal(200, ok);
+        Assert.Equal("mtproxy", saved!["proxy"]!["kind"]!.GetValue<string>());
+        Assert.True(saved["proxy"]!["hasSecret"]!.GetValue<bool>());
+        Assert.DoesNotContain(secret, saved.ToJsonString());
+
+        (ok, saved) = await f.SendAsync(HttpMethod.Put, "/api/integrations/telegram/proxy",
+            new { kind = "socks5", host = "127.0.0.1", port = 1, username = "ivan", password = "очень-секретно" });
+        Assert.Equal(200, ok);
+        Assert.Equal("ivan", saved!["proxy"]!["username"]!.GetValue<string>());
+        Assert.True(saved["proxy"]!["hasPassword"]!.GetValue<bool>());
+        Assert.DoesNotContain("очень-секретно", saved.ToJsonString());
+        Assert.DoesNotContain("очень-секретно", (await f.GetAsync("/api/integrations/telegram")).ToJsonString());
+
+        // Проверка: на порту 1 прокси нет — понятный ответ, а не ошибка сервера.
+        var (checkStatus, check) = await f.SendAsync(HttpMethod.Post, "/api/integrations/telegram/proxy/check",
+            new { kind = "socks5", host = "127.0.0.1", port = 1, username = "ivan" });
+        Assert.Equal(200, checkStatus);
+        Assert.False(check!["ok"]!.GetValue<bool>());
+        Assert.Contains("недоступен", check["message"]!.GetValue<string>());
+
+        (ok, saved) = await f.SendAsync(HttpMethod.Put, "/api/integrations/telegram/proxy", new { kind = "none" });
+        Assert.Equal(200, ok);
+        Assert.Equal("none", saved!["proxy"]!["kind"]!.GetValue<string>());
+    }
+}
+
 /// <summary>Блоки окон Windows в сервере без окна: описаны для конструктора, но честно недоступны.</summary>
 public sealed class DesktopApiTests
 {

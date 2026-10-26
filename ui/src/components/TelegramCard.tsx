@@ -6,6 +6,7 @@ import { useTelegram } from "../api/hooks";
 import type { TelegramState, TelegramStatus } from "../api/types";
 import type { Tone } from "../lib/status";
 import { useFeedback } from "./feedback";
+import { TelegramProxySection } from "./TelegramProxySection";
 import { Badge, Button, Callout, Spinner } from "./ui";
 
 const stateBadge: Record<TelegramState, { tone: Tone; text: string; pulse?: boolean }> = {
@@ -144,6 +145,8 @@ export function TelegramCard() {
             <Button size="small" variant="ghost" icon={LogOut} busy={busy} onClick={logout}>Отключить</Button>
           </div>
         )}
+
+        {status && <TelegramProxySection status={status} />}
       </div>
     </div>
   );

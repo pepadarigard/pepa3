@@ -108,6 +108,37 @@ internal static class ApiEndpoints
             return TelegramDto(telegram);
         });
 
+        api.MapPut("/integrations/telegram/proxy", async (TelegramProxyRequest request, Adapters.Telegram.TelegramService telegram) =>
+        {
+            try
+            {
+                await telegram.SetProxyAsync(ToProxy(request));
+                return Results.Ok(TelegramDto(telegram));
+            }
+            catch (Adapters.Telegram.TelegramProxyException ex)
+            {
+                return Results.Json(new ErrorDto(ex.Message), Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status400BadRequest);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return Results.Json(new ErrorDto($"Не удалось сохранить настройки прокси: {ex.Message}"), Core.Serialization.PepaJson.Options,
+                    statusCode: StatusCodes.Status500InternalServerError);
+            }
+        });
+
+        api.MapPost("/integrations/telegram/proxy/check", async (TelegramProxyRequest request, Adapters.Telegram.TelegramService telegram, CancellationToken ct) =>
+        {
+            try
+            {
+                var (ok, message) = await telegram.CheckProxyAsync(ToProxy(request), ct);
+                return new CheckResultDto(ok, message);
+            }
+            catch (Adapters.Telegram.TelegramProxyException ex)
+            {
+                return new CheckResultDto(false, ex.Message);
+            }
+        });
+
         api.MapGet("/integrations/adspower/profiles", async (Adapters.Browser.AdsPowerClient adsPower, CancellationToken ct) =>
         {
             try
@@ -534,8 +565,29 @@ internal static class ApiEndpoints
     {
         var status = telegram.Status;
         var saved = telegram.SavedLogin;
+        var proxy = telegram.ProxyInfo;
         return new TelegramStatusDto(JsonNamingPolicy.CamelCase.ConvertName(status.State.ToString()), status.Account, status.Message,
-            saved?.ApiId, saved?.Phone);
+            saved?.ApiId, saved?.Phone,
+            new TelegramProxyDto(proxy.Kind.ToString().ToLowerInvariant(), proxy.Host, proxy.Port, proxy.Username,
+                proxy.HasPassword, proxy.HasSecret, proxy.Problem));
+    }
+
+    /// <summary>Прокси из формы или из ссылки (ссылка важнее полей).</summary>
+    private static Adapters.Telegram.TelegramProxy ToProxy(TelegramProxyRequest request)
+    {
+        if (request.Link is { } link && link.Trim().Length > 0)
+        {
+            return Adapters.Telegram.TelegramProxy.ParseLink(link);
+        }
+
+        var kind = (request.Kind ?? "none").ToLowerInvariant() switch
+        {
+            "none" or "" => Adapters.Telegram.TelegramProxyKind.None,
+            "socks5" => Adapters.Telegram.TelegramProxyKind.Socks5,
+            "mtproxy" => Adapters.Telegram.TelegramProxyKind.MTProxy,
+            var other => throw new Adapters.Telegram.TelegramProxyException($"Неизвестный вид прокси «{other}»."),
+        };
+        return new Adapters.Telegram.TelegramProxy(kind, request.Host ?? "", request.Port ?? 0, request.Username, request.Password, request.Secret);
     }
 
     private static AssistantStatusDto AssistantDto(string? key, Assistant.ScenarioAssistant assistant) =>

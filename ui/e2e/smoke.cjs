@@ -280,6 +280,19 @@ async function main() {
     errors.splice(before, errors.length - before, ...errors.slice(before).filter((e) => !e.includes("status of 400")));
     await page.screenshot({ path: path.join(shots, "13-integrations-telegram.png") });
 
+    step("Интеграции: Telegram — прокси");
+    const proxy = tg.getByTestId("telegram-proxy");
+    await proxy.getByRole("button", { name: "Настроить" }).click();
+    await proxy.getByRole("textbox", { name: "Ссылка на прокси" }).fill("socks5://ivan:pass@127.0.0.1:1");
+    await proxy.getByRole("button", { name: "Проверить" }).click();
+    await proxy.getByText("недоступен", { exact: false }).waitFor();
+    await proxy.getByRole("button", { name: "Сохранить и подключиться" }).click();
+    await proxy.getByTestId("telegram-proxy-summary").filter({ hasText: "SOCKS5 127.0.0.1:1 (логин ivan)" }).waitFor();
+    if ((await page.content()).includes("ivan:pass")) throw new Error("Пароль прокси остался на странице");
+    await page.screenshot({ path: path.join(shots, "13b-telegram-proxy.png") });
+    await proxy.getByRole("button", { name: "Без прокси" }).click();
+    await proxy.getByTestId("telegram-proxy-summary").filter({ hasText: "без прокси" }).waitFor();
+
     step("Параллельные ветви: пример 11");
     await page.goto(`${base}/#/scenarios`);
     const parallelCard = page.locator(".scenario-card", { hasText: "Пример 11. Параллельно" });

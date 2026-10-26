@@ -6,6 +6,7 @@ import type {
   DesktopWindow,
   ScenarioTemplate,
   RecorderState,
+  TelegramProxyRequest,
   TelegramStatus,
   Info,
   NodeTypes,
@@ -173,6 +174,9 @@ export const api = {
     request<TelegramStatus>("POST", "/integrations/telegram/login", login),
   telegramContinue: (value: string) => request<TelegramStatus>("POST", "/integrations/telegram/login/continue", { value }),
   telegramLogout: () => request<TelegramStatus>("POST", "/integrations/telegram/logout"),
+  telegramSetProxy: (proxy: TelegramProxyRequest) => request<TelegramStatus>("PUT", "/integrations/telegram/proxy", proxy),
+  telegramCheckProxy: (proxy: TelegramProxyRequest) =>
+    request<{ ok: boolean; message: string }>("POST", "/integrations/telegram/proxy/check", proxy),
 
   settings: () => request<Settings>("GET", "/settings"),
   saveSettings: (settings: Settings) => request<Settings>("PUT", "/settings", settings),
