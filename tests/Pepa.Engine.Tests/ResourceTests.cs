@@ -265,3 +265,97 @@ public sealed class ResourceTests
         Assert.Contains(journal, j => j.Message.Contains("освобождать нечего"));
     }
 }
+
+/// <summary>Ресурс, который блок занимает сам (профиль браузера): ждать очереди до действия, держать до освобождения.</summary>
+public sealed class BlockResourceTests
+{
+    private const string Action = TestActionNode.TypeName;
+
+    private static ScenarioDefinition UseProfile(string name, int holdSeconds = 0, bool releaseAfterSecond = false)
+    {
+        var builder = new ScenarioBuilder($"Профиль {name}")
+            .Node("start", "start")
+            .Node("open", Action, new { key = $"open-{name}", resource = "adspower:p1" })
+            .Node("end", "end");
+        if (holdSeconds > 0)
+        {
+            builder.Node("w", "wait", new { mode = "duration", amount = holdSeconds, unit = "seconds" })
+                .Node("again", Action, new { key = $"again-{name}", resource = "adspower:p1", release = releaseAfterSecond ? "adspower:p1" : null })
+                .Node("after", Action, new { key = $"after-{name}" })
+                .Chain("start", "open", "w", "again", "after", "end");
+        }
+        else
+        {
+            builder.Chain("start", "open", "end");
+        }
+
+        return builder.Build();
+    }
+
+    [Fact]
+    public async Task Block_waits_for_its_resource_before_acting_and_runs_once_it_is_free()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        h.World.Block("open-a");
+        var a = await h.RunAsync(UseProfile("a"));
+        await h.World.EnteredAsync("open-a");
+        var b = await h.RunAsync(UseProfile("b"));
+        await h.WaitForAsync(b, p => p.Status == ProcessStatus.Waiting);
+
+        await h.IdleAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal(0, h.World.Executions("open-b"));
+        var waiting = (await h.StepsAsync(b)).Single(s => s.NodeId == "open");
+        Assert.Equal(StepState.Waiting, waiting.State);
+
+        h.World.Release("open-a");
+        await h.WaitForStatusAsync(a, ProcessStatus.Completed);
+        await h.WaitForStatusAsync(b, ProcessStatus.Completed);
+        Assert.Equal(1, h.World.Executions("open-b"));
+        var steps = await h.StepsAsync(b);
+        Assert.Equal(StepState.Succeeded, steps.First(s => s.NodeId == "open").State);
+        Assert.Equal(1, steps.Count(s => s is { NodeId: "open", Effect: Pepa.Core.Nodes.NodeEffect.External }));
+    }
+
+    [Fact]
+    public async Task Resource_taken_by_block_stays_with_process_until_released()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        h.World.Block("after-a");
+        var a = await h.RunAsync(UseProfile("a", holdSeconds: 60, releaseAfterSecond: true));
+        await h.WaitForAsync(a, p => p.Status == ProcessStatus.Waiting && h.World.Executions("open-a") == 1);
+        var b = await h.RunAsync(UseProfile("b"));
+        await h.WaitForAsync(b, p => p.Status == ProcessStatus.Waiting);
+
+        // Пока первый ждёт, ресурс за ним; повторное обращение того же процесса не встаёт в очередь.
+        await h.IdleAsync(TimeSpan.FromSeconds(30));
+        Assert.Equal(0, h.World.Executions("open-b"));
+        await h.WaitForAsync(a, _ => h.World.Executions("again-a") == 1, advance: TimeSpan.FromSeconds(5));
+
+        // Шаг «again» освободил ресурс: второй процесс работает, пока первый ещё выполняет «after».
+        await h.WaitForStatusAsync(b, ProcessStatus.Completed);
+        Assert.Equal(1, h.World.Executions("open-b"));
+        Assert.Equal(ProcessStatus.Running, (await h.ProcessAsync(a)).Status);
+        h.World.Release("after-a");
+        await h.WaitForStatusAsync(a, ProcessStatus.Completed);
+    }
+
+    [Fact]
+    public async Task Queued_block_resumes_waiting_after_restart_and_acts_only_after_resume()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var a = await h.RunAsync(UseProfile("a", holdSeconds: 3600));
+        await h.WaitForAsync(a, p => p.Status == ProcessStatus.Waiting && h.World.Executions("open-a") == 1);
+        var b = await h.RunAsync(UseProfile("b"));
+        await h.WaitForAsync(b, p => p.Status == ProcessStatus.Waiting);
+
+        await h.RestartAsync();
+        await h.Engine.CancelAsync(a);
+        await h.IdleAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal(ProcessStatus.Paused, (await h.ProcessAsync(b)).Status);
+        Assert.Equal(0, h.World.Executions("open-b"));
+
+        await h.Engine.ResumeAsync(b, ResumeAction.Continue);
+        await h.WaitForStatusAsync(b, ProcessStatus.Completed);
+        Assert.Equal(1, h.World.Executions("open-b"));
+    }
+}

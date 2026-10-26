@@ -40,6 +40,7 @@
   --cat-logic: #6366f1;
   --cat-files: #0891b2;
   --cat-flow: #d97706;
+  --cat-browser: #059669;
   --cat-other: #a855f7;
 
   --radius-sm: 6px;
@@ -85,6 +86,7 @@
     --cat-logic: #818cf8;
     --cat-files: #22d3ee;
     --cat-flow: #fbbf24;
+    --cat-browser: #34d399;
     --cat-other: #c084fc;
     color-scheme: dark;
   }
@@ -125,6 +127,7 @@
   --cat-logic: #818cf8;
   --cat-files: #22d3ee;
   --cat-flow: #fbbf24;
+  --cat-browser: #34d399;
   --cat-other: #c084fc;
   color-scheme: dark;
 }

@@ -213,4 +213,12 @@ public sealed record SettingsDto(
     int MaxParallelProcesses,
     int StepBudget,
     int ActionTimeoutSeconds,
-    bool RestartRequired);
+    bool RestartRequired,
+    string? AdsPowerUrl = null,
+    /// <summary>При сохранении: null — не менять, пустая строка — удалить. В ответах не возвращается.</summary>
+    string? AdsPowerApiKey = null,
+    bool AdsPowerHasKey = false);
+
+public sealed record CheckResultDto(bool Ok, string Message);
+
+public sealed record AdsPowerProfileDto(string Id, string? Number, string Name, string? Group);

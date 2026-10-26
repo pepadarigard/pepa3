@@ -28,9 +28,24 @@ public interface INodeExecutor
     /// </summary>
     ValueTask<VerificationResult> VerifyAsync(NodeExecutionContext context, CancellationToken cancellationToken) =>
         ValueTask.FromResult(VerificationResult.NotSupported());
+
+    /// <summary>
+    /// Ресурс, который нужен блоку (например, профиль браузера). Движок занимает его до действия — сразу или
+    /// дождавшись очереди — и держит до освобождения или завершения процесса. null — блоку ресурс не нужен.
+    /// </summary>
+    ResourceRequirement? RequiredResource(JsonObject input) => null;
+
+    /// <summary>
+    /// Сколько может длиться действие по замыслу (например, «ждать элемент до 5 минут»). Если это больше общего
+    /// тайм-аута действия, движок даёт действию это время плюс запас. Явный тайм-аут блока важнее.
+    /// </summary>
+    TimeSpan? ExpectedDuration(JsonObject input) => null;
 }
 
 public sealed record NodeConfigIssue(string Message, string? Field = null);
+
+/// <summary>Ресурс, который занимает блок: ключ (одинаковый у всех, кто пользуется этим ресурсом) и понятное название.</summary>
+public sealed record ResourceRequirement(string Key, string Title);
 
 /// <summary>Всё, что нужно исполнителю для одного шага.</summary>
 public sealed record NodeExecutionContext
@@ -89,7 +104,13 @@ public abstract record NodeResult
         public JsonObject? Memory { get; init; }
 
         public bool ReplaceMemory { get; init; }
+
+        /// <summary>Ресурсы, которые процесс освобождает этим шагом (например, после закрытия профиля браузера).</summary>
+        public IReadOnlyList<string>? ReleaseResources { get; init; }
     }
+
+    /// <summary>Шаг сделал своё (например, получил нужный ресурс) — выполнить этот же блок снова, с первой попытки.</summary>
+    public sealed record RunAgain(string? Message) : NodeResult;
 
     /// <summary>Действие подтверждено НЕ выполненным. Повтор безопасен.</summary>
     public sealed record Failure(string Error, bool Retryable = true) : NodeResult;
@@ -109,7 +130,11 @@ public abstract record NodeResult
     public sealed record WaitForEvent(EventSubscriptionSpec Subscription, DateTimeOffset? TimeoutAt) : NodeResult;
 
     /// <summary>Занять ресурс: сразу, если свободен, иначе встать в очередь. Порты: «out» и «timeout».</summary>
-    public sealed record AcquireResource(string Key, string? Title, DateTimeOffset? TimeoutAt) : NodeResult;
+    public sealed record AcquireResource(string Key, string? Title, DateTimeOffset? TimeoutAt) : NodeResult
+    {
+        /// <summary>Получив ресурс, выполнить этот же блок снова (ресурс, который блок занимает сам).</summary>
+        public bool RepeatNode { get; init; }
+    }
 
     /// <summary>Освободить ресурс, если он занят этим процессом. Затем порт «out».</summary>
     public sealed record ReleaseResource(string Key) : NodeResult;

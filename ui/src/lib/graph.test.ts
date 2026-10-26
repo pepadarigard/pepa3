@@ -34,11 +34,12 @@ const waitDescriptor: NodeTypeDescriptor = {
   outputs: [{ id: "out", label: "Далее", kind: "normal", required: true }],
   summaryField: "amount",
   supportsRetry: false,
+  resourceHint: null,
   fields: [
-    { name: "mode", label: "Как", kind: "select", required: false, default: "duration", help: null, placeholder: null, min: null, max: null, visibleWhen: null, options: [{ value: "duration", label: "Время" }, { value: "untilTime", label: "До" }] },
-    { name: "amount", label: "Сколько", kind: "number", required: true, default: 10, help: null, placeholder: null, min: 0, max: null, options: null, visibleWhen: { field: "mode", values: ["duration"] } },
-    { name: "unit", label: "Ед.", kind: "select", required: false, default: "seconds", help: null, placeholder: null, min: null, max: null, visibleWhen: { field: "mode", values: ["duration"] }, options: [{ value: "seconds", label: "секунд" }, { value: "minutes", label: "минут" }] },
-    { name: "time", label: "Время", kind: "time", required: true, default: null, help: null, placeholder: null, min: null, max: null, options: null, visibleWhen: { field: "mode", values: ["untilTime"] } },
+    { name: "mode", label: "Как", kind: "select", required: false, default: "duration", help: null, placeholder: null, min: null, max: null, visibleWhen: null, lookup: null, options: [{ value: "duration", label: "Время" }, { value: "untilTime", label: "До" }] },
+    { name: "amount", label: "Сколько", kind: "number", required: true, default: 10, help: null, placeholder: null, min: 0, max: null, options: null, visibleWhen: { field: "mode", values: ["duration"] }, lookup: null },
+    { name: "unit", label: "Ед.", kind: "select", required: false, default: "seconds", help: null, placeholder: null, min: null, max: null, visibleWhen: { field: "mode", values: ["duration"] }, options: [{ value: "seconds", label: "секунд" }, { value: "minutes", label: "минут" }], lookup: null },
+    { name: "time", label: "Время", kind: "time", required: true, default: null, help: null, placeholder: null, min: null, max: null, options: null, visibleWhen: { field: "mode", values: ["untilTime"] }, lookup: null },
   ],
 };
 

@@ -107,8 +107,13 @@ public sealed class TestActionNode(ExternalWorld world) : INodeExecutor
         [
             new FieldDescriptor { Name = "key", Label = "Ключ", Kind = FieldKind.Template, Required = true },
             new FieldDescriptor { Name = "saveTo", Label = "Сохранить в", Kind = FieldKind.Variable },
+            new FieldDescriptor { Name = "resource", Label = "Ресурс блока", Kind = FieldKind.Template },
+            new FieldDescriptor { Name = "release", Label = "Освободить ресурс после", Kind = FieldKind.Template },
         ],
     };
+
+    public ResourceRequirement? RequiredResource(JsonObject input) =>
+        input.GetString("resource") is { Length: > 0 } key ? new ResourceRequirement(key, $"Тестовый ресурс {key}") : null;
 
     public ValueTask<JsonObject?> PrepareAsync(NodeExecutionContext context, CancellationToken cancellationToken)
     {
@@ -138,9 +143,10 @@ public sealed class TestActionNode(ExternalWorld world) : INodeExecutor
         }
 
         var saveTo = context.GetString("saveTo");
-        return string.IsNullOrEmpty(saveTo)
+        var result = string.IsNullOrEmpty(saveTo)
             ? NodeResult.Ok()
             : NodeResult.Ok(Ports.Out, new Dictionary<string, JsonNode?> { [saveTo] = key });
+        return context.GetString("release") is { Length: > 0 } release ? result with { ReleaseResources = [release] } : result;
     }
 
     public ValueTask<VerificationResult> VerifyAsync(NodeExecutionContext context, CancellationToken cancellationToken)

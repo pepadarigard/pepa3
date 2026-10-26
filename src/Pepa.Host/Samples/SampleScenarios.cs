@@ -9,13 +9,14 @@ public static class SampleScenarios
     public static IReadOnlyList<ScenarioDefinition> All() => [.. Versioned().Select(s => s.Scenario)];
 
     /// <summary>Текущая версия набора примеров: при обновлении Pepa добавляются только новые.</summary>
-    public const int CurrentVersion = 2;
+    public const int CurrentVersion = 3;
 
     /// <summary>Примеры с номером версии набора, в которой они появились.</summary>
     public static IReadOnlyList<(int Version, ScenarioDefinition Scenario)> Versioned() =>
     [
         (1, Hello()), (1, Loop()), (1, WaitAndErrors()), (1, SortFolder()),
         (2, WaitForReply()), (2, GreetEveryone()),
+        (3, BrowserPage()), (3, AdsPowerFlow()),
     ];
 
     private static NodeDefinition N(string id, string type, double x, double y, JsonObject? config = null,
@@ -247,5 +248,68 @@ public static class SampleScenarios
             N("end", "end", 540, 260, new JsonObject { ["outcome"] = "success", ["message"] = "Создано файлов: {{ vars.names.length }}" }),
         ],
         Edges = [E("start", "each"), E("each", "write", Ports.Item), E("write", "each"), E("each", "end", Ports.Done)],
+    };
+
+    public static ScenarioDefinition BrowserPage() => new()
+    {
+        Name = "Пример 7. Браузер: открыть страницу и сохранить заголовок",
+        Description = "Открывает Microsoft Edge, переходит по адресу, читает заголовок страницы, делает снимок и закрывает браузер.",
+        Variables =
+        [
+            new VariableDefinition { Name = "url", Type = VariableType.Text, Default = "https://example.com", IsInput = true, Description = "Адрес страницы" },
+            new VariableDefinition { Name = "title", Type = VariableType.Text, Description = "Заголовок страницы" },
+        ],
+        Nodes =
+        [
+            N("start", "start", 0, 100),
+            N("open", "browser.open", 260, 100, new JsonObject { ["browser"] = "msedge", ["url"] = "{{ vars.url }}", ["keepLogin"] = true, ["profile"] = "main" },
+                "Открыть Edge"),
+            N("title", "browser.read", 540, 100, new JsonObject { ["what"] = "title", ["saveTo"] = "title" }, "Прочитать заголовок"),
+            N("shot", "browser.screenshot", 820, 100, new JsonObject { ["path"] = "примеры/снимки/{{ process.id }}.png" }, "Снимок страницы"),
+            N("close", "browser.close", 1100, 100, new JsonObject(), "Закрыть браузер"),
+            N("end", "end", 1380, 100, new JsonObject { ["outcome"] = "success", ["message"] = "Заголовок: {{ vars.title }}" }),
+        ],
+        Edges = [E("start", "open"), E("open", "title"), E("title", "shot"), E("shot", "close"), E("close", "end")],
+    };
+
+    public static ScenarioDefinition AdsPowerFlow() => new()
+    {
+        Name = "Пример 8. AdsPower: профиль, сайт и ожидание ответа",
+        Description = "Открывает профиль AdsPower, переходит на сайт, делает снимок и ждёт ответ (событие) до 30 минут; затем закрывает профиль. " +
+                      "Профиль занят этим процессом — другой процесс с тем же профилем подождёт. Нужен запущенный AdsPower.",
+        Variables =
+        [
+            new VariableDefinition { Name = "profile", Type = VariableType.Text, Default = "", IsInput = true, Description = "ID профиля AdsPower" },
+            new VariableDefinition { Name = "url", Type = VariableType.Text, Default = "https://example.com", IsInput = true, Description = "Адрес сайта" },
+            new VariableDefinition { Name = "reply", Type = VariableType.Any, Description = "Полученный ответ" },
+        ],
+        Nodes =
+        [
+            N("start", "start", 0, 120),
+            N("open", "adspower.open", 260, 120, new JsonObject { ["profileId"] = "{{ vars.profile }}", ["url"] = "{{ vars.url }}", ["closeOnFinish"] = true },
+                "Открыть профиль"),
+            N("shot", "browser.screenshot", 540, 120, new JsonObject { ["path"] = "примеры/adspower/{{ vars.profile }}.png" }, "Снимок"),
+            N("hint", "log", 820, 120, new JsonObject
+            {
+                ["message"] = "Жду ответ: событие manual / reply с ключом {{ vars.profile }} (на странице «Выполнение» → «Отправить событие»).",
+                ["level"] = "info",
+            }, "Подсказка"),
+            N("wait", "event.wait", 1100, 120, new JsonObject
+            {
+                ["source"] = "manual",
+                ["eventType"] = "reply",
+                ["correlationKey"] = "{{ vars.profile }}",
+                ["timeoutSeconds"] = 1800,
+                ["saveTo"] = "reply",
+            }, "Ждать ответ"),
+            N("close", "browser.close", 1380, 40, new JsonObject { ["stopProfile"] = true }, "Закрыть профиль"),
+            N("done", "end", 1660, 40, new JsonObject { ["outcome"] = "success", ["message"] = "Ответ: {{ vars.reply.payload }}" }),
+            N("late", "end", 1380, 260, new JsonObject { ["outcome"] = "failure", ["message"] = "Ответ не пришёл за 30 минут. Профиль закроется сам." }, "Ответа нет"),
+        ],
+        Edges =
+        [
+            E("start", "open"), E("open", "shot"), E("shot", "hint"), E("hint", "wait"),
+            E("wait", "close", Ports.Event), E("wait", "late", Ports.Timeout), E("close", "done"),
+        ],
     };
 }

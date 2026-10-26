@@ -101,6 +101,7 @@ export interface FieldDescriptor {
   min: number | null;
   max: number | null;
   visibleWhen: { field: string; values: string[] } | null;
+  lookup: string | null;
 }
 
 export interface NodeTypeDescriptor {
@@ -117,6 +118,7 @@ export interface NodeTypeDescriptor {
   fields: FieldDescriptor[];
   summaryField: string | null;
   supportsRetry: boolean;
+  resourceHint: string | null;
 }
 
 export interface NodeCategory {
@@ -376,4 +378,15 @@ export interface Settings {
   stepBudget: number;
   actionTimeoutSeconds: number;
   restartRequired: boolean;
+  adsPowerUrl: string | null;
+  /** При сохранении: null — не менять, "" — удалить. */
+  adsPowerApiKey: string | null;
+  adsPowerHasKey: boolean;
+}
+
+export interface AdsPowerProfile {
+  id: string;
+  number: string | null;
+  name: string;
+  group: string | null;
 }

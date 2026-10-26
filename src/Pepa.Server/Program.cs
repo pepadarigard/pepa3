@@ -14,6 +14,7 @@ if (options is null)
                         --token <строка>      постоянный токен доступа (по умолчанию случайный)
                         --ui <папка>          папка собранного интерфейса
                         --no-samples          не создавать примеры сценариев
+                        --browser <файл>      свой браузер (Chromium) вместо Edge/Chrome для блоков браузера
                       """);
     return 1;
 }
@@ -45,7 +46,7 @@ return 0;
 
 static PepaHostOptions? ParseArguments(string[] args)
 {
-    string? dataDirectory = null, workspace = null, token = null, ui = null;
+    string? dataDirectory = null, workspace = null, token = null, ui = null, browser = null;
     var port = 0;
     var samples = true;
     for (var i = 0; i < args.Length; i++)
@@ -59,6 +60,7 @@ static PepaHostOptions? ParseArguments(string[] args)
             case "--token": token = Next(); break;
             case "--ui": ui = Next(); break;
             case "--no-samples": samples = false; break;
+            case "--browser": browser = Next(); break;
             default: return null;
         }
     }
@@ -72,5 +74,6 @@ static PepaHostOptions? ParseArguments(string[] args)
         UiDirectory = ui is null ? null : Path.GetFullPath(ui),
         SeedSamples = samples,
         ConsoleLogging = true,
+        BrowserExecutablePath = browser is null ? null : Path.GetFullPath(browser),
     };
 }

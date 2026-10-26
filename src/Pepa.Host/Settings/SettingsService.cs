@@ -13,6 +13,14 @@ public sealed record PlatformSettings
     public int StepBudget { get; init; } = 10_000;
     public int ActionTimeoutSeconds { get; init; } = 120;
 
+    /// <summary>Адрес Local API AdsPower (смотрите в AdsPower: Настройки → Local API).</summary>
+    public string AdsPowerUrl { get; init; } = DefaultAdsPowerUrl;
+
+    /// <summary>Ключ API AdsPower, если в AdsPower включена проверка ключа. Хранится в базе Pepa на этом компьютере.</summary>
+    public string? AdsPowerApiKey { get; init; }
+
+    public const string DefaultAdsPowerUrl = "http://127.0.0.1:50325";
+
     public EngineOptions ToEngineOptions() => new()
     {
         MaxParallelProcesses = MaxParallelProcesses,
@@ -147,6 +155,17 @@ public sealed class SettingsService
             throw new SettingsValidationException($"Не удалось создать рабочую папку: {ex.Message}");
         }
 
+        var adsUrl = string.IsNullOrWhiteSpace(settings.AdsPowerUrl) ? PlatformSettings.DefaultAdsPowerUrl : settings.AdsPowerUrl.Trim().TrimEnd('/');
+        if (!Uri.TryCreate(adsUrl, UriKind.Absolute, out var adsUri) || adsUri.Scheme is not ("http" or "https"))
+        {
+            throw new SettingsValidationException("Адрес AdsPower: укажите адрес вида http://127.0.0.1:50325 (его видно в AdsPower: Настройки → Local API).");
+        }
+
+        settings = settings with
+        {
+            AdsPowerUrl = adsUrl,
+            AdsPowerApiKey = string.IsNullOrWhiteSpace(settings.AdsPowerApiKey) ? null : settings.AdsPowerApiKey.Trim(),
+        };
         Check(settings.MaxParallelProcesses, 1, 32, "Одновременных процессов");
         Check(settings.StepBudget, 100, 10_000_000, "Лимит шагов");
         Check(settings.ActionTimeoutSeconds, 1, 86_400, "Тайм-аут действия");

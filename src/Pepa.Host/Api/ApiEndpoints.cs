@@ -33,14 +33,47 @@ internal static class ApiEndpoints
 
         api.MapPut("/settings", async (SettingsDto request, SettingsService settings) =>
         {
+            var current = settings.Current;
             await settings.SaveAsync(new PlatformSettings
             {
                 WorkspaceRoot = request.WorkspaceRoot,
                 MaxParallelProcesses = request.MaxParallelProcesses,
                 StepBudget = request.StepBudget,
                 ActionTimeoutSeconds = request.ActionTimeoutSeconds,
+                AdsPowerUrl = request.AdsPowerUrl ?? current.AdsPowerUrl,
+                AdsPowerApiKey = request.AdsPowerApiKey ?? current.AdsPowerApiKey,
             });
             return ToDto(settings);
+        });
+
+        // ───────────── Интеграции ─────────────
+        api.MapPost("/integrations/adspower/check", async (Adapters.Browser.AdsPowerClient adsPower, SettingsService settings,
+            CancellationToken ct) =>
+        {
+            try
+            {
+                await adsPower.CheckAsync(ct);
+                var profiles = await adsPower.ListProfilesAsync(1, 1, ct);
+                return new CheckResultDto(true, $"AdsPower на связи ({settings.Current.AdsPowerUrl})." +
+                                                (profiles.Count == 0 ? " Профилей не найдено." : ""));
+            }
+            catch (Adapters.Browser.AdsPowerException ex)
+            {
+                return new CheckResultDto(false, ex.Message);
+            }
+        });
+
+        api.MapGet("/integrations/adspower/profiles", async (Adapters.Browser.AdsPowerClient adsPower, CancellationToken ct) =>
+        {
+            try
+            {
+                var profiles = await adsPower.ListProfilesAsync(1, 200, ct);
+                return Results.Ok(profiles.Select(p => new AdsPowerProfileDto(p.Id, p.Number, p.Name, p.Group)).ToList());
+            }
+            catch (Adapters.Browser.AdsPowerException ex)
+            {
+                return Results.Json(new ErrorDto(ex.Message), Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status502BadGateway);
+            }
         });
 
         api.MapGet("/overview", async (IPepaStore store, ProcessMapper mapper, CancellationToken ct) =>
@@ -328,7 +361,7 @@ internal static class ApiEndpoints
     {
         var current = settings.Current;
         return new SettingsDto(current.WorkspaceRoot, current.MaxParallelProcesses, current.StepBudget,
-            current.ActionTimeoutSeconds, settings.RestartRequired);
+            current.ActionTimeoutSeconds, settings.RestartRequired, current.AdsPowerUrl, null, current.AdsPowerApiKey is not null);
     }
 
     private static ScenarioDto ToDto(StoredScenario stored, ScenarioService scenarios)

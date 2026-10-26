@@ -96,6 +96,9 @@ public sealed record FieldDescriptor
     public double? Min { get; init; }
     public double? Max { get; init; }
     public FieldCondition? VisibleWhen { get; init; }
+
+    /// <summary>Откуда конструктор может предложить значения (например, «adspower-profiles» — профили AdsPower).</summary>
+    public string? Lookup { get; init; }
 }
 
 /// <summary>Описание типа блока: всё, что нужно конструктору, проверке и движку, кроме самого поведения.</summary>
@@ -121,6 +124,9 @@ public sealed record NodeTypeDescriptor
 
     /// <summary>Поле, значение которого показывается на карточке блока в схеме.</summary>
     public string? SummaryField { get; init; }
+
+    /// <summary>Пояснение для конструктора, если блок сам занимает ресурс (см. <see cref="INodeExecutor.RequiredResource"/>).</summary>
+    public string? ResourceHint { get; init; }
 
     /// <summary>Можно ли настраивать повторы и тайм-аут (имеет смысл только для действий с вводом-выводом).</summary>
     public bool SupportsRetry => Effect != NodeEffect.None;

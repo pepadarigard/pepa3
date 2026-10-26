@@ -159,6 +159,17 @@ public sealed partial class ProcessEngine
             return;
         }
 
+        // Блок сам занимает ресурс (например, профиль браузера): сначала ресурс — сразу или в очереди, — затем действие.
+        if (executor.RequiredResource(input) is { } need && need.Key.Trim() is { Length: > 0 } resourceKey &&
+            !await HoldsResourceAsync(process.Id, resourceKey))
+        {
+            var resourceStep = NewStep(process, token, node, descriptor, new JsonObject { ["resource"] = resourceKey },
+                StepState.Planned, plannedAt) with { StartedAt = plannedAt, Effect = NodeEffect.None };
+            await ApplyResultAsync(process, graph, token, node, descriptor, resourceStep,
+                new NodeResult.AcquireResource(resourceKey, need.Title, null) { RepeatNode = true }, null);
+            return;
+        }
+
         var context = new NodeExecutionContext
         {
             ProcessId = process.Id,
@@ -257,7 +268,9 @@ public sealed partial class ProcessEngine
         var execution = context with { Checkpoint = checkpoint };
         var timeout = node.Settings.TimeoutSeconds is { } seconds
             ? TimeSpan.FromSeconds(seconds)
-            : _options.DefaultActionTimeout;
+            : executor.ExpectedDuration(context.Input) is { } expected && expected + TimeSpan.FromSeconds(30) > _options.DefaultActionTimeout
+                ? expected + TimeSpan.FromSeconds(30)
+                : _options.DefaultActionTimeout;
         var stepCancellation = slot.BeginStep();
         using var timeoutCancellation = new CancellationTokenSource(timeout, _time);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(stepCancellation.Token, timeoutCancellation.Token);
@@ -433,8 +446,16 @@ public sealed partial class ProcessEngine
                 {
                     State = StepState.Waiting,
                     FinishedAt = null,
-                    Output = new JsonObject { ["resource"] = acquire.Key, ["until"] = acquire.TimeoutAt?.ToString("O") },
+                    Output = new JsonObject
+                    {
+                        ["resource"] = acquire.Key,
+                        ["until"] = acquire.TimeoutAt?.ToString("O"),
+                        ["repeat"] = acquire.RepeatNode ? true : null,
+                    },
                 };
+                break;
+            case NodeResult.RunAgain:
+                finalStep = finalStep with { State = StepState.Succeeded, Port = null, Error = null };
                 break;
             case NodeResult.StartChild { WaitForCompletion: true }:
                 finalStep = finalStep with { State = StepState.Waiting, FinishedAt = null };
@@ -542,6 +563,16 @@ public sealed partial class ProcessEngine
 
                 break;
             }
+
+            case NodeResult.RunAgain again:
+                p = Cleared(p) with { Status = ProcessStatus.Running };
+                t = t with { State = TokenState.Ready, Attempt = 1, WaitKind = WaitKind.None, WakeAt = null, WaitingStepId = null, WaitRef = null };
+                if (!string.IsNullOrWhiteSpace(again.Message))
+                {
+                    journal.Add((JournalLevel.Info, again.Message));
+                }
+
+                break;
 
             case NodeResult.Wait wait:
                 p = Cleared(p) with { Status = ProcessStatus.Waiting };
@@ -943,10 +974,24 @@ public sealed partial class ProcessEngine
         if (process.IsTerminal)
         {
             _graphs.TryRemove(process.Id, out _);
+            try
+            {
+                ProcessFinished?.Invoke(process.Id);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Ошибка в обработчике завершения процесса {ProcessId}.", process.Id);
+            }
         }
 
         Notify(process.Id);
     }
+
+    /// <summary>Процесс завершён (успешно, с ошибкой или остановлен) — например, чтобы адаптер закрыл свои подключения.</summary>
+    public event Action<string>? ProcessFinished;
+
+    private async Task<bool> HoldsResourceAsync(string processId, string key) =>
+        (await _store.ListResourcesAsync()).Any(r => r.Key == key && r.HolderProcessId == processId);
 
     /// <summary>
     /// После сбоя платформы приводит процесс в согласованное состояние: начатые шаги — «неизвестно»,

@@ -1,6 +1,15 @@
 import {
   BellRing,
   Box,
+  Camera,
+  CircleX,
+  Fingerprint,
+  Globe,
+  Keyboard,
+  Link,
+  MousePointerClick,
+  ScanSearch,
+  TextCursorInput,
   Lock,
   LockOpen,
   Repeat,
@@ -49,6 +58,15 @@ const nodeIcons: Record<string, LucideIcon> = {
   workflow: Workflow,
   rocket: Rocket,
   repeat: Repeat,
+  globe: Globe,
+  fingerprint: Fingerprint,
+  link: Link,
+  "mouse-pointer-click": MousePointerClick,
+  "text-cursor-input": TextCursorInput,
+  keyboard: Keyboard,
+  "scan-search": ScanSearch,
+  camera: Camera,
+  "circle-x": CircleX,
 };
 
 export function NodeIcon({ name, ...props }: { name: string } & LucideProps) {
@@ -64,6 +82,8 @@ export function categoryColor(category: string): string {
       return "var(--cat-files)";
     case "flow":
       return "var(--cat-flow)";
+    case "browser":
+      return "var(--cat-browser)";
     default:
       return "var(--cat-other)";
   }

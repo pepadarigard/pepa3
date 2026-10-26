@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/Pepa.Adapters.Browser/Pepa.Adapters.Browser.csproj" />
     <Project Path="src/Pepa.Adapters.FileSystem/Pepa.Adapters.FileSystem.csproj" />
     <Project Path="src/Pepa.Core/Pepa.Core.csproj" />
     <Project Path="src/Pepa.Desktop/Pepa.Desktop.csproj" />
@@ -9,6 +10,7 @@
     <Project Path="src/Pepa.Storage.Sqlite/Pepa.Storage.Sqlite.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/Pepa.Adapters.Browser.Tests/Pepa.Adapters.Browser.Tests.csproj" />
     <Project Path="tests/Pepa.Adapters.FileSystem.Tests/Pepa.Adapters.FileSystem.Tests.csproj" />
     <Project Path="tests/Pepa.Core.Tests/Pepa.Core.Tests.csproj" />
     <Project Path="tests/Pepa.Engine.Tests/Pepa.Engine.Tests.csproj" />

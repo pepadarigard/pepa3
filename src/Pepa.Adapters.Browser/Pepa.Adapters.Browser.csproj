@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Браузер через Playwright: обычный Edge/Chrome и профили AdsPower (Local API + CDP). -->
+  <ItemGroup>
+    <ProjectReference Include="..\Pepa.Core\Pepa.Core.csproj" />
+    <ProjectReference Include="..\Pepa.Adapters.FileSystem\Pepa.Adapters.FileSystem.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Playwright" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+  </ItemGroup>
+</Project>

@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging;
+using Pepa.Adapters.Browser;
 using Pepa.Adapters.FileSystem;
 using Pepa.Core.Expressions;
 using Pepa.Core.Nodes;
@@ -80,7 +81,18 @@ public sealed class PepaHost : IAsyncDisposable
         var settings = await SettingsService.LoadAsync(store, dataDirectory,
             options.DefaultWorkspaceRoot ?? HostPaths.DefaultWorkspace(dataDirectory));
         var workspace = new Workspace(() => settings.Current.WorkspaceRoot);
-        var registry = new NodeRegistry().RegisterLogicNodes().RegisterFlowNodes().RegisterFileNodes(workspace);
+        var adsPower = new AdsPowerClient(() => new AdsPowerSettings
+        {
+            BaseUrl = settings.Current.AdsPowerUrl,
+            ApiKey = settings.Current.AdsPowerApiKey,
+        });
+        var browsers = new BrowserSessions(new BrowserModuleOptions
+        {
+            DataDirectory = dataDirectory,
+            ExecutablePathOverride = options.BrowserExecutablePath,
+        }, adsPower);
+        var registry = new NodeRegistry().RegisterLogicNodes().RegisterFlowNodes().RegisterFileNodes(workspace)
+            .RegisterBrowserNodes(browsers, workspace);
         var token = options.Token ?? Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
         var hostContext = new HostContext
         {
@@ -125,6 +137,8 @@ public sealed class PepaHost : IAsyncDisposable
         builder.Services.AddSingleton(settings);
         builder.Services.AddSingleton(hostContext);
         builder.Services.AddSingleton<EventHub>();
+        builder.Services.AddSingleton(adsPower);
+        builder.Services.AddSingleton(browsers);
         builder.Services.AddSingleton(sp => new ProcessEngine(
             sp.GetRequiredService<IPepaStore>(),
             sp.GetRequiredService<NodeRegistry>(),
@@ -142,8 +156,16 @@ public sealed class PepaHost : IAsyncDisposable
         engine.Changed += change => events.Publish("process", change.ProcessId);
         engine.EventsChanged += () => events.Publish("events");
         engine.TriggersChanged += () => events.Publish("triggers");
+        // Процесс завершился — закрыть его браузеры (и профили AdsPower, если так настроено в блоке).
+        engine.ProcessFinished += processId => _ = browsers.ReleaseProcessAsync(processId);
 
         hostContext.Recovery = await engine.StartAsync(cancellationToken);
+        var unfinished = await store.ListProcessesAsync(new ProcessQuery
+        {
+            Statuses = [ProcessStatus.Running, ProcessStatus.Waiting, ProcessStatus.Paused, ProcessStatus.NeedsAttention],
+            Limit = int.MaxValue,
+        }, cancellationToken);
+        browsers.Prune(unfinished.Select(p => p.Id).ToList());
         if (options.SeedSamples)
         {
             await SeedSamplesAsync(store, app.Services.GetRequiredService<ScenarioService>(), logger);
@@ -255,6 +277,8 @@ public sealed class PepaHost : IAsyncDisposable
         finally
         {
             await engine.StopAsync();
+            await Services.GetRequiredService<BrowserSessions>().DisposeAsync();
+            Services.GetRequiredService<AdsPowerClient>().Dispose();
             await events.DisposeAsync();
             await _app.DisposeAsync();
             Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();

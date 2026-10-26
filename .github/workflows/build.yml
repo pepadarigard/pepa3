@@ -41,6 +41,7 @@ jobs:
           npm test
           npm run build
 
+      # Блоки браузера проверяются на установленном Microsoft Edge, имитация AdsPower запускает его же с портом отладки.
       - name: Тесты .NET (на Windows)
         run: dotnet test Pepa.slnx -c Release
 
@@ -50,7 +51,7 @@ jobs:
       - name: Проверка состава приложения
         shell: pwsh
         run: |
-          foreach ($file in @("Pepa.exe", "wwwroot/index.html", "Microsoft.Web.WebView2.Core.dll", "e_sqlite3.dll")) {
+          foreach ($file in @("Pepa.exe", "wwwroot/index.html", "Microsoft.Web.WebView2.Core.dll", "e_sqlite3.dll", "Microsoft.Playwright.dll", ".playwright/node/win32_x64/node.exe")) {
             if (-not (Test-Path "out/Pepa/$file")) { throw "В сборке нет $file" }
           }
           Copy-Item README.md out/Pepa/README.md
@@ -87,6 +88,8 @@ jobs:
 
       - name: Тесты .NET
         run: dotnet test Pepa.slnx
+        env:
+          PEPA_TEST_BROWSER_PATH: /usr/bin/google-chrome
 
       - name: Сквозная проверка интерфейса (Playwright)
         working-directory: ui

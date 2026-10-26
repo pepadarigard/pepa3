@@ -9,26 +9,36 @@ import { navigate } from "../router";
 interface Integration {
   icon: LucideIcon;
   title: string;
-  status: "ready" | "planned";
+  status: "ready" | "check" | "planned";
   description: string;
   details: string;
+  settings?: boolean;
 }
+
+const statusBadge = {
+  ready: { tone: "success", text: "Работает" },
+  check: { tone: "warn", text: "Готово — проверьте у себя" },
+  planned: { tone: "neutral", text: "Запланировано" },
+} as const;
 
 const integrations: Integration[] = [
   {
     icon: Globe,
-    title: "Браузер (Playwright)",
-    status: "planned",
-    description: "Открытие страниц, клики, ввод, ожидание элементов, чтение данных.",
-    details: "Этап 4. Обычный браузер — в пределах поддерживаемых способов подключения.",
+    title: "Браузер (Edge, Chrome)",
+    status: "ready",
+    description:
+      "Блоки «Открыть браузер», «Перейти по адресу», «Нажать», «Ввести текст», «Нажать клавишу», «Ждать элемент», «Прочитать со страницы», «Снимок», «Закрыть».",
+    details:
+      "Через Playwright. Используется установленный Microsoft Edge или Google Chrome; вход на сайты сохраняется в отдельном профиле Pepa. Ввод и переход проверяются после сбоя по состоянию страницы; нажатие — по элементу, который должен появиться.",
   },
   {
     icon: Bot,
     title: "AdsPower",
-    status: "planned",
-    description: "Запуск существующих профилей через Local API и подключение к ним браузерных действий.",
+    status: "check",
+    description: "Блок «Открыть профиль AdsPower»: открывает существующий профиль через Local API, и дальше работают те же блоки браузера.",
     details:
-      "Этап 4. Перед реализацией — проверка документации Local API и его доступности на вашем тарифе. Профиль будет ресурсом: один активный процесс на профиль (менеджер ресурсов уже работает).",
+      "Профиль — ресурс: одновременно им пользуется один процесс, остальные ждут очереди. После перезапуска Pepa подключается к ещё открытому профилю, не открывая его заново. Проверено на имитации Local API по официальному описанию; с настоящим AdsPower проверьте связь в настройках.",
+    settings: true,
   },
   {
     icon: Send,
@@ -135,10 +145,15 @@ export function IntegrationsPage() {
             <div className="stack" style={{ gap: 6 }}>
               <div className="row">
                 <h2>{item.title}</h2>
-                <Badge tone="neutral">Запланировано</Badge>
+                <Badge tone={statusBadge[item.status].tone}>{statusBadge[item.status].text}</Badge>
               </div>
               <p className="muted small">{item.description}</p>
               <p className="small faint">{item.details}</p>
+              {item.settings && (
+                <div className="row">
+                  <Button size="small" onClick={() => navigate({ page: "settings" })}>Настроить и проверить связь</Button>
+                </div>
+              )}
             </div>
           </div>
         ))}

@@ -90,8 +90,10 @@ public sealed partial class ProcessEngine
                 var resource = await write.GetResourceAsync(key);
                 if (resource?.HolderProcessId == process.Id)
                 {
-                    return NodeResult.Ok(Ports.Out, EmptyUpdates, new JsonObject { ["resource"] = key },
-                        $"Ресурс «{key}» уже занят этим процессом.");
+                    return acquire.RepeatNode
+                        ? new NodeResult.RunAgain(null)
+                        : NodeResult.Ok(Ports.Out, EmptyUpdates, new JsonObject { ["resource"] = key },
+                            $"Ресурс «{key}» уже занят этим процессом.");
                 }
 
                 if (resource?.HolderProcessId is null)
@@ -108,8 +110,10 @@ public sealed partial class ProcessEngine
                             AcquiredAt = now,
                             UpdatedAt = now,
                         });
-                        return NodeResult.Ok(Ports.Out, EmptyUpdates, new JsonObject { ["resource"] = key },
-                            $"Ресурс «{key}» занят процессом.");
+                        return acquire.RepeatNode
+                            ? new NodeResult.RunAgain($"Ресурс «{acquire.Title ?? key}» занят процессом.")
+                            : NodeResult.Ok(Ports.Out, EmptyUpdates, new JsonObject { ["resource"] = key },
+                                $"Ресурс «{key}» занят процессом.");
                     }
                 }
                 else if (await WouldDeadlockAsync(write, process.Id, resource.HolderProcessId))
@@ -174,6 +178,20 @@ public sealed partial class ProcessEngine
                     duplicate
                         ? $"Событие «{input.Type}» с ключом «{input.ExternalId}» уже было отправлено раньше — повтор не нужен."
                         : $"Отправлено событие «{input.Type}»" + (input.CorrelationKey is { Length: > 0 } k ? $" (ключ «{k}»)." : "."));
+            }
+
+            case NodeResult.Success { ReleaseResources: { Count: > 0 } keys }:
+            {
+                foreach (var key in keys.Select(k => k.Trim()).Distinct(StringComparer.Ordinal))
+                {
+                    if (await write.GetResourceAsync(key) is { } held && held.HolderProcessId == process.Id &&
+                        await ReleaseAndGrantAsync(write, held, now) is { } granted)
+                    {
+                        effects.Enqueue.Add(granted);
+                    }
+                }
+
+                return result;
             }
 
             default:
@@ -330,14 +348,19 @@ public sealed partial class ProcessEngine
             return false;
         }
 
+        // Ресурс, который блок занимает сам: получив его, блок выполняется снова (уже с ресурсом).
+        var repeat = step.Output?["repeat"]?.GetValue<bool>() == true;
+        NodeResult Granted(string message) => repeat
+            ? new NodeResult.RunAgain(message)
+            : NodeResult.Ok(Ports.Out, EmptyUpdates, new JsonObject { ["resource"] = key }, message);
+
         return await ApplyResultAsync(process, graph, token, node, descriptor, step, NodeResult.Ok(), null, decide: async write =>
         {
             var resource = await write.GetResourceAsync(key);
             if (resource?.HolderProcessId == process.Id)
             {
                 await write.RemoveWaiterAsync(key, process.Id);
-                return NodeResult.Ok(Ports.Out, EmptyUpdates, new JsonObject { ["resource"] = key },
-                    $"Ресурс «{key}» получен из очереди.");
+                return Granted($"Ресурс «{resource.Title}» получен из очереди.");
             }
 
             if (resource is null || resource.HolderProcessId is null)
@@ -355,8 +378,7 @@ public sealed partial class ProcessEngine
                         UpdatedAt = now,
                     });
                     await write.RemoveWaiterAsync(key, process.Id);
-                    return NodeResult.Ok(Ports.Out, EmptyUpdates, new JsonObject { ["resource"] = key },
-                        $"Ресурс «{key}» освободился и занят процессом.");
+                    return Granted($"Ресурс «{resource?.Title ?? key}» освободился и занят процессом.");
                 }
             }
 

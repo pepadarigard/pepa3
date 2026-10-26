@@ -8,6 +8,7 @@
     <ProjectReference Include="..\Pepa.Engine\Pepa.Engine.csproj" />
     <ProjectReference Include="..\Pepa.Storage.Sqlite\Pepa.Storage.Sqlite.csproj" />
     <ProjectReference Include="..\Pepa.Adapters.FileSystem\Pepa.Adapters.FileSystem.csproj" />
+    <ProjectReference Include="..\Pepa.Adapters.Browser\Pepa.Adapters.Browser.csproj" />
   </ItemGroup>
   <ItemGroup>
     <!-- Собранный интерфейс (ui/ → npm run build) копируется рядом с приложением. -->

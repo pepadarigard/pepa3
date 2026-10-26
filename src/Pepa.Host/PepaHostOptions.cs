@@ -28,6 +28,9 @@ public sealed record PepaHostOptions
 
     /// <summary>Писать журнал платформы в консоль (для сервера без окна).</summary>
     public bool ConsoleLogging { get; init; }
+
+    /// <summary>Свой исполняемый файл браузера вместо Edge/Chrome (разработка и проверка без Windows).</summary>
+    public string? BrowserExecutablePath { get; init; }
 }
 
 public static class HostPaths

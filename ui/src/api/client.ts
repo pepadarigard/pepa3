@@ -1,4 +1,5 @@
 import type {
+  AdsPowerProfile,
   Info,
   NodeTypes,
   PepaEvent,
@@ -143,6 +144,9 @@ export const api = {
   deleteTrigger: (id: string) => request<{ message: string }>("DELETE", `/triggers/${id}`),
   runTrigger: (id: string) => request<{ processId: string }>("POST", `/triggers/${id}/run`),
   dismissTrigger: (id: string) => request<{ message: string }>("POST", `/triggers/${id}/dismiss`),
+
+  checkAdsPower: () => request<{ ok: boolean; message: string }>("POST", "/integrations/adspower/check"),
+  adsPowerProfiles: () => request<AdsPowerProfile[]>("GET", "/integrations/adspower/profiles"),
 
   settings: () => request<Settings>("GET", "/settings"),
   saveSettings: (settings: Settings) => request<Settings>("PUT", "/settings", settings),

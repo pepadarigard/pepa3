@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { AlertTriangle, Plus, Trash2, Unlink } from "lucide-react";
+import { AlertTriangle, Lock, Plus, Trash2, Unlink } from "lucide-react";
 import type { Json, NodeDefinition, NodeTypeDescriptor, ValidationIssue, VariableDefinition, VariableType } from "../../api/types";
 import { categoryColor, NodeIcon } from "../../components/Icon";
 import { Badge, Button } from "../../components/ui";
@@ -59,6 +59,11 @@ export function NodeInspector({ node, descriptor, variables, issues, onChange, o
           <Badge tone={effectText[descriptor.effect].tone} dot={false}>{effectText[descriptor.effect].text}</Badge>
           {descriptor.supportsVerification && <Badge tone="success" dot={false}>Умеет проверять результат</Badge>}
         </div>
+        {descriptor.resourceHint && (
+          <div className="small muted row" style={{ alignItems: "flex-start", gap: 6 }}>
+            <Lock size={14} style={{ flex: "none", marginTop: 2 }} /> {descriptor.resourceHint}
+          </div>
+        )}
         {general.map((issue, i) => (
           <div key={i} className={`issue ${issue.severity}`} style={{ border: 0, padding: 0, cursor: "default" }}>
             <AlertTriangle size={14} /> {issue.message}

@@ -40,7 +40,7 @@ export function Palette({ categories, descriptors, onAdd }: { categories: NodeCa
         );
       })}
       <div className="small faint" style={{ padding: "0 4px" }}>
-        Браузер, Windows-приложения, AdsPower и Telegram появятся здесь по мере подключения интеграций.
+        Windows-приложения и Telegram появятся здесь по мере подключения интеграций.
       </div>
     </aside>
   );

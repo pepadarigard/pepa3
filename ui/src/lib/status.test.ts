@@ -59,9 +59,10 @@ describe("nodeSummary для блоков событий и сценариев",
     isStart: false,
     isEnd: false,
     outputs: [],
-    fields: [{ name: summaryField, label: "", kind, required: true, default: kind === "text" ? "manual" : null, help: null, placeholder: null, options: null, min: null, max: null, visibleWhen: null }],
+    fields: [{ name: summaryField, label: "", kind, required: true, default: kind === "text" ? "manual" : null, help: null, placeholder: null, options: null, min: null, max: null, visibleWhen: null, lookup: null }],
     summaryField,
     supportsRetry: false,
+    resourceHint: null,
   });
   const node = (type: string, config: Record<string, string>) => ({
     id: "n", type, label: null, position: { x: 0, y: 0 }, config, settings: { retryCount: 0, retryDelaySeconds: 5, timeoutSeconds: null }, note: null,

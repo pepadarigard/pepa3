@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { FieldDescriptor, Json, VariableDefinition } from "../../api/types";
 import { useScenarios } from "../../api/hooks";
+import { api } from "../../api/client";
+import type { AdsPowerProfile } from "../../api/types";
 import { formatDuration } from "../../lib/format";
 
 interface Props {
@@ -111,6 +113,7 @@ export function FieldEditor({ field, value, onChange, variables, onCreateVariabl
         </span>
       )}
       {control}
+      {field.lookup === "adspower-profiles" && <AdsPowerPicker onPick={(id) => onChange(id)} />}
       {error ? <span className="field-error">{error}</span> : field.help && <span className="field-help">{field.help}</span>}
     </div>
   );
@@ -214,6 +217,44 @@ function ScenarioSelect({ value, invalid, onChange }: { value: string; invalid: 
         </option>
       ))}
       {value && !known && !scenarios.isLoading && <option value={value}>Сценарий не найден ({value.slice(-6)})</option>}
+    </select>
+  );
+}
+
+/** Выбор профиля из запущенного AdsPower (по кнопке: Local API ограничивает частоту запросов). */
+function AdsPowerPicker({ onPick }: { onPick: (id: string) => void }) {
+  const [state, setState] = useState<{ loading: boolean; profiles: AdsPowerProfile[] | null; error: string | null }>({
+    loading: false,
+    profiles: null,
+    error: null,
+  });
+  const load = async () => {
+    setState({ loading: true, profiles: null, error: null });
+    try {
+      setState({ loading: false, profiles: await api.adsPowerProfiles(), error: null });
+    } catch (e) {
+      setState({ loading: false, profiles: null, error: e instanceof Error ? e.message : String(e) });
+    }
+  };
+  if (!state.profiles) {
+    return (
+      <div className="stack" style={{ gap: 4 }}>
+        <button type="button" className="chip day" onClick={load} disabled={state.loading} style={{ alignSelf: "flex-start" }}>
+          {state.loading ? "Загрузка профилей…" : "Выбрать из AdsPower"}
+        </button>
+        {state.error && <span className="field-error">{state.error}</span>}
+      </div>
+    );
+  }
+  if (state.profiles.length === 0) return <span className="field-help">В AdsPower нет профилей.</span>;
+  return (
+    <select className="select" defaultValue="" onChange={(e) => e.target.value && onPick(e.target.value)}>
+      <option value="">— выберите профиль ({state.profiles.length}) —</option>
+      {state.profiles.map((p) => (
+        <option key={p.id} value={p.id}>
+          {p.number ? `№${p.number} · ` : ""}{p.name || "без имени"} · {p.id}{p.group ? ` · ${p.group}` : ""}
+        </option>
+      ))}
     </select>
   );
 }

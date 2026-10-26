@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { FolderOpen, Monitor, Moon, Save, Sparkles, Sun } from "lucide-react";
+import { Fingerprint, FolderOpen, Monitor, Moon, PlugZap, Save, Sparkles, Sun } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { useInfo, useSettings } from "../api/hooks";
@@ -17,6 +17,8 @@ export function SettingsPage() {
   const [form, setForm] = useState<Settings | null>(null);
   const [saving, setSaving] = useState(false);
   const [theme, setTheme] = useState<Theme>(loadTheme());
+  const [checking, setChecking] = useState(false);
+  const [check, setCheck] = useState<{ ok: boolean; message: string } | null>(null);
 
   useEffect(() => {
     if (settings.data && !form) setForm(settings.data);
@@ -25,6 +27,18 @@ export function SettingsPage() {
   if (settings.isLoading || !form) return <div className="page">{settings.error ? <ErrorState error={settings.error} /> : <Loading />}</div>;
 
   const changed = JSON.stringify(form) !== JSON.stringify(settings.data);
+
+  const checkAdsPower = async () => {
+    setChecking(true);
+    setCheck(null);
+    try {
+      setCheck(await api.checkAdsPower());
+    } catch (e) {
+      setCheck({ ok: false, message: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setChecking(false);
+    }
+  };
 
   const save = async () => {
     setSaving(true);
@@ -105,6 +119,41 @@ export function SettingsPage() {
               <input className="input" type="number" min={100} max={10000000} value={form.stepBudget} onChange={number("stepBudget")} />
               <span className="field-help">Защита от бесконечных циклов: по достижении Pepa спросит, продолжать ли.</span>
             </label>
+          </div>
+        </div>
+      </Card>
+
+      <Card title={<h2 className="row"><Fingerprint size={16} /> AdsPower</h2>}>
+        <div className="card-body stack">
+          <p className="small muted">
+            Блок «Открыть профиль AdsPower» работает через Local API запущенного приложения AdsPower. Адрес и ключ видны в
+            AdsPower: Настройки → Local API. Ключ нужен, только если в AdsPower включена проверка ключа.
+          </p>
+          <div className="grid-2">
+            <label className="field">
+              <span className="field-label">Адрес Local API</span>
+              <input className="input mono" value={form.adsPowerUrl ?? ""} placeholder="http://127.0.0.1:50325"
+                onChange={(e) => setForm({ ...form, adsPowerUrl: e.target.value })} />
+            </label>
+            <label className="field">
+              <span className="field-label">Ключ API</span>
+              <input className="input mono" type="password" autoComplete="off" value={form.adsPowerApiKey ?? ""}
+                placeholder={form.adsPowerHasKey ? "сохранён — оставьте пустым, чтобы не менять" : "не задан"}
+                onChange={(e) => setForm({ ...form, adsPowerApiKey: e.target.value === "" ? null : e.target.value })} />
+              {form.adsPowerHasKey && (
+                <button type="button" className="link-button small" style={{ color: "var(--danger)", alignSelf: "flex-start" }}
+                  onClick={() => setForm({ ...form, adsPowerApiKey: "", adsPowerHasKey: false })}>
+                  Удалить сохранённый ключ
+                </button>
+              )}
+            </label>
+          </div>
+          <div className="row wrap">
+            <Button size="small" icon={PlugZap} busy={checking} onClick={checkAdsPower} disabled={changed} title={changed ? "Сначала сохраните настройки" : undefined}>
+              Проверить связь
+            </Button>
+            {check && <Badge tone={check.ok ? "success" : "danger"}>{check.ok ? "На связи" : "Нет связи"}</Badge>}
+            {check && <span className="small muted">{check.message}</span>}
           </div>
         </div>
       </Card>

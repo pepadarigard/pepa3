@@ -1,0 +1,11 @@
+<Project>
+  <!-- Playwright кладёт в сборку Node.js для всех платформ (~700 МБ), если не указать нужную.
+       Библиотекам он не нужен вовсе (его получают приложения и тесты), приложениям — только для своей платформы. -->
+  <PropertyGroup Condition="'$(PlaywrightPlatform)' == ''">
+    <PlaywrightPlatform Condition="'$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</PlaywrightPlatform>
+    <PlaywrightPlatform Condition="'$(PlaywrightPlatform)' == '' and '$(OutputType)' != 'Exe' and '$(OutputType)' != 'WinExe'">none</PlaywrightPlatform>
+    <PlaywrightPlatform Condition="'$(PlaywrightPlatform)' == '' and $([MSBuild]::IsOSPlatform('Windows'))">win-x64</PlaywrightPlatform>
+    <PlaywrightPlatform Condition="'$(PlaywrightPlatform)' == '' and $([MSBuild]::IsOSPlatform('OSX'))">osx-arm64</PlaywrightPlatform>
+    <PlaywrightPlatform Condition="'$(PlaywrightPlatform)' == ''">linux-x64</PlaywrightPlatform>
+  </PropertyGroup>
+</Project>
