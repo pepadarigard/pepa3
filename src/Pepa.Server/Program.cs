@@ -30,14 +30,15 @@ catch (InstanceAlreadyRunningException ex)
 }
 
 Console.WriteLine($"Pepa запущена. Откройте в браузере:\n  {host.LaunchUrl}\nОстановка — Ctrl+C.");
-var stop = new TaskCompletionSource();
-Console.CancelKeyPress += (_, e) =>
+// Ctrl+C и SIGTERM обрабатывает сам веб-хост; ждём его сигнала и останавливаем движок аккуратно.
+try
 {
-    e.Cancel = true;
-    stop.TrySetResult();
-};
-AppDomain.CurrentDomain.ProcessExit += (_, _) => stop.TrySetResult();
-await stop.Task;
+    await Task.Delay(Timeout.Infinite, host.ShutdownRequested);
+}
+catch (OperationCanceledException)
+{
+}
+
 Console.WriteLine("Остановка…");
 await host.StopAsync();
 return 0;

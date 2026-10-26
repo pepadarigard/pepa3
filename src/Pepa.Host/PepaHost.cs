@@ -49,6 +49,9 @@ public sealed class PepaHost : IAsyncDisposable
     public Uri LaunchUrl => new($"{BaseUrl.ToString().TrimEnd('/')}/#token={Uri.EscapeDataString(Token)}");
 
     public ProcessEngine Engine => _app.Services.GetRequiredService<ProcessEngine>();
+
+    /// <summary>Срабатывает, когда приложение просят завершиться (Ctrl+C, SIGTERM, остановка службы).</summary>
+    public CancellationToken ShutdownRequested => _app.Lifetime.ApplicationStopping;
     public IServiceProvider Services => _app.Services;
 
     public static async Task<PepaHost> StartAsync(PepaHostOptions options, CancellationToken cancellationToken = default)
