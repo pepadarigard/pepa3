@@ -1916,3 +1916,104 @@ pre.json {
 /* ИИ-помощник: списки вопросов и ошибок в подсказках */
 .assistant-list { margin: 6px 0 0; padding-left: 18px; }
 .assistant-list li { margin: 2px 0; }
+
+/* ───────────── Группы блоков ───────────── */
+
+/* Рамка не мешает работать с холстом внутри неё: события принимает только заголовок. */
+.react-flow__node-groupFrame {
+  pointer-events: none !important;
+}
+
+.group-frame {
+  width: 100%;
+  height: 100%;
+  border: 1.5px dashed var(--border-strong);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--accent-soft) 30%, transparent);
+}
+
+.group-frame-header {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 8px 0 10px;
+  border-bottom: 1px dashed var(--border);
+  color: var(--muted);
+  font-size: 12.5px;
+  cursor: grab;
+}
+
+.group-frame-header:active {
+  cursor: grabbing;
+}
+
+.group-title {
+  color: var(--text);
+  font-weight: 620;
+  max-width: 260px;
+  cursor: text;
+}
+
+.group-title-input {
+  height: 24px;
+  padding: 0 6px;
+  font-size: 12.5px;
+  max-width: 240px;
+}
+
+.group-button {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.group-button:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.group-issues {
+  min-width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  padding: 0 5px;
+  font-size: 11px;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+  background: var(--danger);
+  color: #fff;
+}
+
+.group-card {
+  border-style: dashed;
+  border-width: 1.5px;
+  background: color-mix(in srgb, var(--accent-soft) 60%, var(--surface));
+}
+
+.group-card .group-title {
+  display: block;
+  font-size: 13px;
+}
+
+.group-card-icon {
+  background: var(--accent);
+}
+
+.group-card-actions {
+  padding: 0 12px 10px;
+}
+
+.group-card-actions .link-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}

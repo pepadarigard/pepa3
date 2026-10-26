@@ -15,7 +15,7 @@ import {
   type NodeChange,
   type ReactFlowInstance,
 } from "@xyflow/react";
-import { ArrowLeft, Bug, CalendarClock, CircleDot, ClipboardPaste, Copy, LayoutGrid, Play, Plus, Redo2, Save, Search, Shapes, Sparkles, Undo2, Workflow } from "lucide-react";
+import { ArrowLeft, Bug, CalendarClock, CircleDot, ClipboardPaste, Copy, Group, LayoutGrid, Play, Plus, Redo2, Save, Search, Shapes, Sparkles, Undo2, Workflow } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
 import { useNodeTypes, useScenario, useScenarios } from "../../api/hooks";
@@ -28,15 +28,27 @@ import { Badge, Button, Card, Empty, ErrorState, Loading } from "../../component
 import { formatMoment } from "../../lib/format";
 import { copyBlocks, loadClipboard, pasteBlocks, saveClipboard, type BlockClipboard } from "../../lib/clipboard";
 import { autoLayout, connect, createNode, newId, NODE_WIDTH, nodeSummary, toFlowEdge, type PepaEdge, type PepaNode } from "../../lib/graph";
+import {
+  addGroup, canvasView, groupIdOf, groupOfNode, isGroupNodeId, moveMembers, nextGroupTitle, pruneGroups, readGroups, writeGroups,
+  type CanvasNode, type EditorGroup,
+} from "../../lib/groups";
 import { navigate, setLeaveGuard } from "../../router";
 import { blankScenario } from "../ScenariosPage";
 import { EdgeInspector, NodeInspector, ScenarioInspector } from "./Inspector";
 import { IssuesPanel } from "./IssuesPanel";
 import { AssistantDialog } from "./AssistantDialog";
 import { RecorderDialog } from "./RecorderDialog";
-import { FlowContext, nodeTypes } from "./NodeCard";
+import { canvasNodeTypes, GroupActionsContext, type GroupActions } from "./GroupNodes";
+import { FlowContext } from "./NodeCard";
 import { DRAG_TYPE, Palette } from "./Palette";
-import { definitionOf, fromDefinition, snapshotOf, useEditor, type Meta } from "./useEditor";
+import { definitionOf, fromDefinition, snapshotOf, useEditor, type EditorState, type Meta } from "./useEditor";
+
+/** Состояние с изменёнными группами (данные редактора сценария). */
+function withGroups(s: EditorState, update: (groups: EditorGroup[]) => EditorGroup[]): EditorState {
+  const before = readGroups(s.meta.editor);
+  const after = update(before);
+  return after === before ? s : { ...s, meta: { ...s.meta, editor: writeGroups(s.meta.editor, after) } };
+}
 
 export function EditorPage({ id }: { id?: string }) {
   if (!id) return <EditorPicker />;
@@ -135,6 +147,42 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
     return !!node && descriptors.get(node.data.definition.type)?.isStart === true;
   }, [descriptors, editor.state.nodes]);
 
+  // ───────────── Группы ─────────────
+
+  const groups = useMemo(() => readGroups(state.meta.editor), [state.meta.editor]);
+  const view = useMemo(() => canvasView(state.nodes, state.edges, groups,
+    (n) => n.data.definition.label || descriptors.get(n.data.definition.type)?.title || n.data.definition.type, issuesByNode),
+  [descriptors, groups, issuesByNode, state.edges, state.nodes]);
+  // Где рамки и свёрнутые группы стоят на холсте сейчас — от этого считается сдвиг при перетаскивании.
+  const shownAt = useRef(new Map<string, { x: number; y: number }>());
+  shownAt.current = new Map(view.nodes.filter((n) => isGroupNodeId(n.id)).map((n) => [n.id, n.position]));
+  const dragFrom = useRef(new Map<string, { x: number; y: number }>());
+
+  const createGroup = useCallback(() => {
+    const hidden = new Set(groups.filter((g) => g.collapsed).flatMap((g) => g.nodeIds));
+    const ids = editor.state.nodes.filter((n) => n.selected && !hidden.has(n.id)).map((n) => n.id);
+    if (ids.length === 0) {
+      feedback.toast("Выберите блоки для группы: щелчки с Ctrl или рамка с Shift.", "info");
+      return;
+    }
+    editor.commit((s) => withGroups(s, (gs) => addGroup(gs, ids, newId("g"), nextGroupTitle(gs))));
+    feedback.toast("Группа создана. Дважды щёлкните её название, чтобы переименовать; её можно свернуть в один блок.", "info");
+  }, [editor, feedback, groups]);
+
+  const groupActions = useMemo<GroupActions>(() => ({
+    editable: true,
+    rename: (groupId, title) => editor.commit((s) => withGroups(s, (gs) => gs.map((g) => (g.id === groupId ? { ...g, title } : g))), `group.${groupId}.title`),
+    toggle: (groupId) => editor.commit((s) => {
+      const target = readGroups(s.meta.editor).find((g) => g.id === groupId);
+      const next = withGroups(s, (gs) => gs.map((g) => (g.id === groupId ? { ...g, collapsed: !g.collapsed } : g)));
+      // Свёрнутые блоки не остаются выбранными: иначе Delete удалил бы невидимое.
+      return target && !target.collapsed
+        ? { ...next, nodes: next.nodes.map((n) => (target.nodeIds.includes(n.id) && n.selected ? { ...n, selected: false } : n)) }
+        : next;
+    }),
+    ungroup: (groupId) => editor.commit((s) => withGroups(s, (gs) => gs.filter((g) => g.id !== groupId))),
+  }), [editor]);
+
   // ───────────── Сохранение и запуск ─────────────
 
   const save = useCallback(async (): Promise<Scenario | null> => {
@@ -178,19 +226,39 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
 
   // ───────────── Изменения схемы ─────────────
 
-  const onNodesChange = useCallback((changes: NodeChange<PepaNode>[]) => {
+  const onNodesChange = useCallback((all: NodeChange<CanvasNode>[]) => {
+    const changes = all.filter((c) => c.type === "add" || !isGroupNodeId(c.id)) as NodeChange<PepaNode>[];
+    // Рамку или свёрнутую группу тащат — вместе с ней едут её блоки (кроме тех, что выбраны и едут сами).
+    const movingThemselves = new Set(changes.filter((c) => c.type === "position").map((c) => c.id));
+    for (const change of all) {
+      if (change.type !== "position" || !isGroupNodeId(change.id)) continue;
+      if (!change.position) {
+        if (change.dragging === false) dragFrom.current.delete(change.id);
+        continue;
+      }
+      const base = dragFrom.current.get(change.id) ?? shownAt.current.get(change.id);
+      const group = groups.find((g) => g.id === groupIdOf(change.id));
+      if (!base || !group) continue;
+      // Блоки сдвигаются на целые клетки сетки — чтобы оставались выровненными.
+      const dx = Math.round((change.position.x - base.x) / 10) * 10;
+      const dy = Math.round((change.position.y - base.y) / 10) * 10;
+      if (dx === 0 && dy === 0) continue;
+      dragFrom.current.set(change.id, { x: base.x + dx, y: base.y + dy });
+      editor.replace((s) => ({ ...s, nodes: moveMembers(s.nodes, group, dx, dy, movingThemselves) }));
+    }
+
     const allowed = changes.filter((c) => !(c.type === "remove" && isStart(c.id)));
     if (allowed.length !== changes.length) feedback.toast("Блок «Начало» удалить нельзя.", "info");
     if (allowed.some((c) => c.type === "remove")) {
       editor.commit((s) => {
         const nodes = applyNodeChanges(allowed, s.nodes);
         const ids = new Set(nodes.map((n) => n.id));
-        return { ...s, nodes, edges: s.edges.filter((e) => ids.has(e.source) && ids.has(e.target)) };
+        return withGroups({ ...s, nodes, edges: s.edges.filter((e) => ids.has(e.source) && ids.has(e.target)) }, (gs) => pruneGroups(gs, ids));
       });
     } else if (allowed.length > 0) {
       editor.replace((s) => ({ ...s, nodes: applyNodeChanges(allowed, s.nodes) }));
     }
-  }, [editor, feedback, isStart]);
+  }, [editor, feedback, groups, isStart]);
 
   const onEdgesChange = useCallback((changes: EdgeChange<PepaEdge>[]) => {
     const update = (s: typeof state) => ({ ...s, edges: applyEdgeChanges(changes, s.edges) });
@@ -251,7 +319,9 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
 
   const removeNode = (nodeId: string) => {
     if (isStart(nodeId)) return;
-    editor.commit((s) => ({ ...s, nodes: s.nodes.filter((n) => n.id !== nodeId), edges: s.edges.filter((e) => e.source !== nodeId && e.target !== nodeId) }));
+    editor.commit((s) => withGroups(
+      { ...s, nodes: s.nodes.filter((n) => n.id !== nodeId), edges: s.edges.filter((e) => e.source !== nodeId && e.target !== nodeId) },
+      (gs) => pruneGroups(gs, new Set(s.nodes.filter((n) => n.id !== nodeId).map((n) => n.id)))));
   };
 
   const removeEdge = (edgeId: string) => editor.commit((s) => ({ ...s, edges: s.edges.filter((e) => e.id !== edgeId) }));
@@ -347,18 +417,23 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
   }, [descriptors, editor, insertBlocks, isStart]);
 
   const selectAll = useCallback(() => {
-    editor.replace((s) => ({ ...s, nodes: s.nodes.map((n) => ({ ...n, selected: true })), edges: s.edges.map((e) => ({ ...e, selected: false })) }));
-  }, [editor]);
+    // Блоки свёрнутых групп не видны — их не выбираем (иначе Delete удалил бы их незаметно).
+    const hidden = new Set(groups.filter((g) => g.collapsed).flatMap((g) => g.nodeIds));
+    editor.replace((s) => ({ ...s, nodes: s.nodes.map((n) => ({ ...n, selected: !hidden.has(n.id) })), edges: s.edges.map((e) => ({ ...e, selected: false })) }));
+  }, [editor, groups]);
 
   const [searchOpen, setSearchOpen] = useState(false);
 
   const selectNode = (nodeId: string) => {
+    // Блок в свёрнутой группе (ошибка из списка, поиск) — сначала развернуть группу.
+    const hiddenIn = groupOfNode(groups, nodeId);
+    if (hiddenIn?.collapsed) groupActions.toggle(hiddenIn.id);
     editor.replace((s) => ({
       ...s,
       nodes: s.nodes.map((n) => ({ ...n, selected: n.id === nodeId })),
       edges: s.edges.map((e) => ({ ...e, selected: false })),
     }));
-    void flow.fitView({ nodes: [{ id: nodeId }], duration: 300, maxZoom: 1.1, padding: 0.6 });
+    setTimeout(() => void flow.fitView({ nodes: [{ id: nodeId }], duration: 300, maxZoom: 1.1, padding: 0.6 }), hiddenIn?.collapsed ? 60 : 0);
   };
 
   const layout = () => {
@@ -407,11 +482,14 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
       } else if (key === "a" || key === "ф") {
         e.preventDefault();
         selectAll();
+      } else if (key === "g" || key === "п") {
+        e.preventDefault();
+        createGroup();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [copySelected, duplicateSelected, editor, pasteFromClipboard, save, selectAll]);
+  }, [copySelected, createGroup, duplicateSelected, editor, pasteFromClipboard, save, selectAll]);
 
   // ───────────── Отрисовка ─────────────
 
@@ -436,6 +514,7 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
         <Button size="small" variant="ghost" iconOnly icon={Search} title="Найти блок (Ctrl+F)" onClick={() => setSearchOpen(true)} />
         <Button size="small" variant="ghost" iconOnly icon={Copy} title="Копировать выбранные блоки (Ctrl+C)" onClick={copySelected} />
         <Button size="small" variant="ghost" iconOnly icon={ClipboardPaste} title="Вставить блоки (Ctrl+V) — можно и в другой сценарий" onClick={pasteFromClipboard} />
+        <Button size="small" variant="ghost" iconOnly icon={Group} title="Объединить выбранные блоки в группу (Ctrl+G) — её можно свернуть в один блок" onClick={createGroup} />
         <Button size="small" icon={Sparkles} title="Описать сценарий словами — помощник предложит блоки" onClick={() => setAssistantOpen(true)}>ИИ-помощник</Button>
         <Button size="small" icon={CircleDot} title="Записать действия в браузере и превратить их в блоки" onClick={() => setRecorderOpen(true)}>Записать</Button>
         <Button size="small" icon={LayoutGrid} title="Расставить блоки автоматически" onClick={layout}>Упорядочить</Button>
@@ -461,21 +540,26 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
           }
         }}>
           <FlowContext.Provider value={{ descriptors, issues: issuesByNode }}>
-            <ReactFlow<PepaNode, PepaEdge>
-              nodes={state.nodes}
-              edges={state.edges}
-              nodeTypes={nodeTypes}
+            <GroupActionsContext.Provider value={groupActions}>
+            <ReactFlow<CanvasNode, PepaEdge>
+              nodes={view.nodes}
+              edges={view.edges}
+              nodeTypes={canvasNodeTypes}
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
               isValidConnection={isValidConnection}
-              onNodeDragStart={() => editor.checkpoint()}
+              onNodeDragStart={() => {
+                editor.checkpoint();
+                dragFrom.current.clear();
+              }}
+              onNodeDragStop={() => dragFrom.current.clear()}
               deleteKeyCode={["Delete", "Backspace"]}
               connectionLineType={ConnectionLineType.SmoothStep}
               defaultEdgeOptions={{ type: "smoothstep" }}
               snapToGrid
               snapGrid={[10, 10]}
-              onInit={(instance) => openReadable(instance, canvas.current, isStart)}
+              onInit={(instance) => openReadable(instance as unknown as ReactFlowInstance<PepaNode, PepaEdge>, canvas.current, isStart)}
               minZoom={0.2}
               maxZoom={1.8}
               proOptions={{ hideAttribution: true }}
@@ -484,6 +568,7 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
               <Controls showInteractive={false} />
               <MiniMap pannable zoomable />
             </ReactFlow>
+            </GroupActionsContext.Provider>
           </FlowContext.Provider>
           <IssuesPanel report={report} checking={checking} onSelect={selectNode} />
           {searchOpen && (

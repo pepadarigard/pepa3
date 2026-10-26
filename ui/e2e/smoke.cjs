@@ -180,6 +180,38 @@ async function main() {
     await page.locator(".react-flow__node").nth(3).waitFor();
     if (!(await page.locator(".editor-title").innerText()).startsWith("Цикл")) throw new Error("Шаблон не открылся в конструкторе");
 
+    step("Группа блоков: свернуть, сохранить, развернуть");
+    const blocks = page.locator(".react-flow__node-pepa");
+    // За угол блока: через середину может проходить линия связи.
+    await blocks.nth(1).click({ position: { x: 16, y: 10 } });
+    await blocks.nth(2).click({ position: { x: 16, y: 10 }, modifiers: ["Control"] });
+    await page.keyboard.press("Control+g");
+    await page.getByTestId("group-frame").waitFor();
+    const shownBefore = await blocks.count();
+    await page.getByRole("button", { name: "Свернуть группу" }).click();
+    const groupCard = page.getByTestId("group-card");
+    await groupCard.waitFor();
+    if (!(await groupCard.innerText()).includes("2 блока")) throw new Error("Свёрнутая группа не показывает свои блоки");
+    if ((await blocks.count()) !== shownBefore - 2) throw new Error("Блоки свёрнутой группы видны");
+    await page.screenshot({ path: path.join(shots, "16b-group-collapsed.png") });
+    await page.keyboard.press("Control+s");
+    await page.locator(".editor-top .badge", { hasText: /^Сохранено$/ }).waitFor();
+    await page.reload();
+    await groupCard.waitFor();
+    await groupCard.getByRole("button", { name: "Развернуть" }).click();
+    await page.getByTestId("group-frame").waitFor();
+    // Группа перетаскивается за заголовок вместе со своими блоками.
+    const member = await blocks.nth(1).boundingBox();
+    const header = await page.locator(".group-frame-header").boundingBox();
+    await page.mouse.move(header.x + 40, header.y + header.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(header.x + 140, header.y + header.height / 2 + 60, { steps: 8 });
+    await page.mouse.up();
+    const movedMember = await blocks.nth(1).boundingBox();
+    if (Math.abs(movedMember.x - member.x) < 50 || Math.abs(movedMember.y - member.y) < 30) throw new Error("Блоки не поехали вместе с группой");
+    await page.getByRole("button", { name: "Разгруппировать" }).click();
+    await page.getByTestId("group-frame").waitFor({ state: "detached" });
+
     step("Окно записи действий");
     await page.goto(`${base}/#/editor/${saved.id}`);
     await page.getByRole("button", { name: "Записать", exact: true }).click();

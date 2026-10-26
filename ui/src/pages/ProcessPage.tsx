@@ -8,10 +8,12 @@ import { useRunScenario } from "../components/RunDialog";
 import { Badge, Button, Card, Empty, ErrorState, Loading } from "../components/ui";
 import { ru } from "../i18n/ru";
 import { durationBetween, formatDateTime, formatMoment, preview } from "../lib/format";
-import { toFlowEdges, toFlowNodes, type PepaEdge, type PepaNode } from "../lib/graph";
+import { toFlowEdges, toFlowNodes, type PepaEdge } from "../lib/graph";
+import { canvasView, isGroupNodeId, readGroups, type CanvasNode } from "../lib/groups";
 import { attentionAdvice, explainProcess, isActive, processTone, type Tone } from "../lib/status";
 import { navigate } from "../router";
-import { FlowContext, nodeTypes, type NodeRunState } from "./editor/NodeCard";
+import { canvasNodeTypes } from "./editor/GroupNodes";
+import { FlowContext, type NodeRunState } from "./editor/NodeCard";
 
 const toneColor: Record<Tone, string> = {
   info: "var(--info)",
@@ -238,11 +240,15 @@ function ProcessGraph({ definition, details, descriptors, selected, onSelect }: 
   selected: string | null;
   onSelect: (nodeId: string | null) => void;
 }) {
-  const nodes = useMemo<PepaNode[]>(
-    () => toFlowNodes(definition).map((n) => ({ ...n, selected: n.id === selected, draggable: false, connectable: false })),
-    [definition, selected],
-  );
-  const edges = useMemo<PepaEdge[]>(() => toFlowEdges(definition).map((e) => ({ ...e, selectable: false })), [definition]);
+  // Группы из конструктора — рамками (развёрнутыми), чтобы было видно, в какой части схемы процесс.
+  const view = useMemo(() => {
+    const groups = readGroups(definition.editor).map((g) => ({ ...g, collapsed: false }));
+    const flowNodes = toFlowNodes(definition).map((n) => ({ ...n, selected: n.id === selected, draggable: false, connectable: false }));
+    const flowEdges = toFlowEdges(definition).map((e) => ({ ...e, selectable: false }));
+    return canvasView(flowNodes, flowEdges, groups, (n) => n.data.definition.label ?? n.id);
+  }, [definition, selected]);
+  const nodes = useMemo<CanvasNode[]>(() => view.nodes.map((n) => (isGroupNodeId(n.id) ? { ...n, draggable: false } : n)), [view]);
+  const edges = view.edges;
   const states = useMemo(() => {
     const map = new Map<string, NodeRunState>();
     for (const step of details.steps) {
@@ -255,14 +261,16 @@ function ProcessGraph({ definition, details, descriptors, selected, onSelect }: 
   return (
     <div className="process-graph flow-readonly">
       <FlowContext.Provider value={{ descriptors, states, current: isActive(details.process.status) ? (details.activeNodeIds.length > 0 ? details.activeNodeIds : [details.process.currentNodeId].filter((n): n is string => !!n)) : null }}>
-        <ReactFlow<PepaNode, PepaEdge>
+        <ReactFlow<CanvasNode, PepaEdge>
           nodes={nodes}
           edges={edges}
-          nodeTypes={nodeTypes}
+          nodeTypes={canvasNodeTypes}
           nodesDraggable={false}
           nodesConnectable={false}
           elementsSelectable
-          onNodeClick={(_, node) => onSelect(node.id === selected ? null : node.id)}
+          onNodeClick={(_, node) => {
+            if (!isGroupNodeId(node.id)) onSelect(node.id === selected ? null : node.id);
+          }}
           onPaneClick={() => onSelect(null)}
           fitView
           fitViewOptions={{ padding: 0.12, maxZoom: 0.9, minZoom: 0.5 }}
