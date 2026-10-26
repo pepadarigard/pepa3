@@ -1,0 +1,24 @@
+# .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+TestResults/
+artifacts/
+out/
+
+# Node / UI
+node_modules/
+ui/dist/
+ui/test-results/
+ui/e2e/screenshots/
+
+# Собранный интерфейс копируется в Host при сборке
+src/Pepa.Host/wwwroot/
+
+# Локальные данные при разработке
+.data/
+*.db
+*.db-shm
+*.db-wal

@@ -1,0 +1,270 @@
+using Microsoft.Extensions.Logging;
+using Pepa.Core;
+using Pepa.Core.Model;
+using Pepa.Core.Nodes;
+using Pepa.Engine.Persistence;
+
+namespace Pepa.Engine;
+
+public sealed record RecoveryReport(int Paused, int UnknownSteps, int CancelledPlannedSteps)
+{
+    public override string ToString() =>
+        $"Восстановление: приостановлено процессов — {Paused}, шагов с неизвестным итогом — {UnknownSteps}, " +
+        $"отменено неначатых шагов — {CancelledPlannedSteps}.";
+}
+
+public sealed partial class ProcessEngine
+{
+    /// <summary>
+    /// Приводит в порядок процессы, прерванные закрытием или сбоем приложения.
+    /// Ничего не выполняет и ничего не возобновляет.
+    /// </summary>
+    private async Task<RecoveryReport> RecoverAsync(CancellationToken cancellationToken)
+    {
+        var unfinished = await _store.ListProcessesAsync(new ProcessQuery
+        {
+            Statuses = [ProcessStatus.Running, ProcessStatus.Waiting, ProcessStatus.Paused, ProcessStatus.NeedsAttention],
+            Limit = int.MaxValue,
+        }, cancellationToken);
+
+        int paused = 0, unknown = 0, cancelled = 0;
+        foreach (var process in unfinished)
+        {
+            var open = await _store.GetOpenStepsAsync(process.Id, cancellationToken);
+            var interrupted = open.Where(s => s.State == StepState.Running).ToList();
+            var planned = open.Where(s => s.State == StepState.Planned).ToList();
+            var wasActive = process.Status is ProcessStatus.Running or ProcessStatus.Waiting;
+            if (interrupted.Count == 0 && planned.Count == 0 && !wasActive)
+            {
+                continue;
+            }
+
+            var now = _time.GetUtcNow();
+            var updated = process with { UpdatedAt = now };
+            await using var write = await _store.BeginWriteAsync(cancellationToken);
+            foreach (var step in interrupted)
+            {
+                await write.UpdateStepAsync(step with
+                {
+                    State = StepState.Unknown,
+                    Error = "Приложение было закрыто во время выполнения шага — неизвестно, выполнилось ли действие.",
+                    FinishedAt = now,
+                });
+                unknown++;
+            }
+
+            foreach (var step in planned)
+            {
+                await write.UpdateStepAsync(step with
+                {
+                    State = StepState.Cancelled,
+                    Resolution = "Не начат: приложение было закрыто. При возобновлении шаг будет запланирован заново.",
+                    FinishedAt = now,
+                });
+                cancelled++;
+            }
+
+            if (interrupted.Count > 0)
+            {
+                var last = interrupted[^1];
+                updated = Attention(updated, AttentionKind.UnknownStep,
+                    $"Приложение было закрыто во время шага «{last.NodeLabel}». Неизвестно, выполнилось ли действие. " +
+                    "Проверьте результат и решите, что делать дальше.", last.Id);
+                await write.AddJournalAsync(Journal(process.Id, JournalLevel.Error, updated.StatusMessage!, last.Id, last.NodeId));
+            }
+            else if (wasActive)
+            {
+                updated = Cleared(updated) with
+                {
+                    Status = ProcessStatus.Paused,
+                    PauseReason = PauseReason.Restart,
+                    StatusMessage = "Приложение было закрыто. Процесс приостановлен — проверьте его состояние и возобновите вручную.",
+                };
+                await write.AddJournalAsync(Journal(process.Id, JournalLevel.Warning, updated.StatusMessage!));
+                paused++;
+            }
+
+            await write.UpdateProcessAsync(updated);
+            await write.CommitAsync();
+        }
+
+        var report = new RecoveryReport(paused, unknown, cancelled);
+        if (unknown > 0 || paused > 0)
+        {
+            _logger.LogWarning("{Report}", report);
+        }
+
+        return report;
+    }
+
+    // ───────────────────────────── Решения пользователя ─────────────────────────────
+
+    private async Task<ControlResult> ContinueCoreAsync(ProcessRecord process, IReadOnlyList<TokenRecord> tokens)
+    {
+        var now = _time.GetUtcNow();
+        var active = tokens.Where(t => t.State != TokenState.Completed).ToList();
+        if (active.Count == 0)
+        {
+            throw new EngineOperationException("У процесса нет точки, с которой можно продолжить.");
+        }
+
+        var overdue = active.Any(t => t.State == TokenState.Waiting && t.WakeAt <= now);
+        var updated = Cleared(process) with
+        {
+            Status = active.Any(t => t.State == TokenState.Ready) ? ProcessStatus.Running : ProcessStatus.Waiting,
+            StepBudget = process.Attention == AttentionKind.StepLimit
+                ? process.StepCount + _options.DefaultStepBudget
+                : process.StepBudget,
+            UpdatedAt = now,
+        };
+        var message = "Процесс возобновлён пользователем." +
+                      (overdue ? " Срок ожидания уже наступил — выполнение продолжится сразу." : "");
+        await using (var write = await _store.BeginWriteAsync())
+        {
+            await write.UpdateProcessAsync(updated);
+            await write.AddJournalAsync(Journal(process.Id, JournalLevel.Info, message));
+            await write.CommitAsync();
+        }
+
+        AfterCommit(updated);
+        return new ControlResult(message);
+    }
+
+    private async Task<ControlResult> VerifyCoreAsync(ProcessRecord process, IReadOnlyList<TokenRecord> tokens)
+    {
+        var (step, token, node, executor) = await LoadAttentionAsync(process, tokens);
+        var context = new NodeExecutionContext
+        {
+            ProcessId = process.Id,
+            Node = node,
+            Input = (step.Input?.DeepClone() as System.Text.Json.Nodes.JsonObject) ?? [],
+            Checkpoint = step.Checkpoint?.DeepClone() as System.Text.Json.Nodes.JsonObject,
+            Variables = (System.Text.Json.Nodes.JsonObject)process.Variables.DeepClone(),
+            Attempt = step.Attempt,
+            Time = _time,
+        };
+        var verification = await SafeVerifyAsync(executor, context);
+        var label = Label(node, executor.Descriptor);
+        switch (verification.Outcome)
+        {
+            case VerificationOutcome.Done:
+                await ApplyResultAsync(process, Graph(process), token, node, executor.Descriptor, step,
+                    NodeResult.Ok(verification.Port, verification.VariableUpdates ?? EmptyUpdates, verification.Output),
+                    $"проверено — действие выполнено. {verification.Message}");
+                return new ControlResult($"Проверка подтвердила, что действие выполнено. Процесс продолжен. {verification.Message}");
+
+            case VerificationOutcome.NotDone:
+            {
+                var now = _time.GetUtcNow();
+                var updated = Cleared(process) with { Status = ProcessStatus.Running, UpdatedAt = now };
+                var message = $"Проверка показала, что шаг {label} не выполнен ({verification.Message}). Шаг будет выполнен снова.";
+                await using (var write = await _store.BeginWriteAsync())
+                {
+                    await write.UpdateStepAsync(step with
+                    {
+                        State = StepState.Failed,
+                        Resolution = $"Проверено: не выполнено. {verification.Message}",
+                        FinishedAt = step.FinishedAt ?? now,
+                    });
+                    await write.UpsertTokenAsync(token with
+                    {
+                        State = TokenState.Ready, Attempt = token.Attempt + 1, WaitKind = WaitKind.None, WakeAt = null,
+                        WaitingStepId = null,
+                    });
+                    await write.UpdateProcessAsync(updated);
+                    await write.AddJournalAsync(Journal(process.Id, JournalLevel.Info, message, step.Id, node.Id));
+                    await write.CommitAsync();
+                }
+
+                AfterCommit(updated);
+                return new ControlResult(message);
+            }
+
+            default:
+            {
+                var message = $"Проверка не дала однозначного ответа: {verification.Message} " +
+                              "Решите вручную: считать шаг выполненным, выполнить его ещё раз или остановить процесс.";
+                var updated = process with { StatusMessage = message, UpdatedAt = _time.GetUtcNow() };
+                await using (var write = await _store.BeginWriteAsync())
+                {
+                    await write.UpdateProcessAsync(updated);
+                    await write.AddJournalAsync(Journal(process.Id, JournalLevel.Warning, message, step.Id, node.Id));
+                    await write.CommitAsync();
+                }
+
+                AfterCommit(updated);
+                return new ControlResult(message);
+            }
+        }
+    }
+
+    private async Task<ControlResult> RetryCoreAsync(ProcessRecord process, IReadOnlyList<TokenRecord> tokens)
+    {
+        var token = tokens.FirstOrDefault(t => t.State != TokenState.Completed)
+                    ?? throw new EngineOperationException("У процесса нет точки, с которой можно продолжить.");
+        var step = process.AttentionStepId is { } stepId ? await _store.GetStepAsync(stepId) : null;
+        var node = Graph(process).FindNode(token.NodeId);
+        var label = node is null ? $"«{token.NodeId}»" : Label(node, _registry.FindDescriptor(node.Type));
+        var now = _time.GetUtcNow();
+        var updated = Cleared(process) with { Status = ProcessStatus.Running, UpdatedAt = now };
+        var message = $"Шаг {label} будет выполнен ещё раз по решению пользователя.";
+        await using (var write = await _store.BeginWriteAsync())
+        {
+            if (step is not null)
+            {
+                await write.UpdateStepAsync(step with { Resolution = "Пользователь решил выполнить шаг ещё раз." });
+            }
+
+            await write.UpsertTokenAsync(token with
+            {
+                State = TokenState.Ready, Attempt = token.Attempt + 1, WaitKind = WaitKind.None, WakeAt = null,
+                WaitingStepId = null,
+            });
+            await write.UpdateProcessAsync(updated);
+            await write.AddJournalAsync(Journal(process.Id, JournalLevel.Warning, message, step?.Id, token.NodeId));
+            await write.CommitAsync();
+        }
+
+        AfterCommit(updated);
+        return new ControlResult(message);
+    }
+
+    /// <summary>Считать шаг выполненным или пропустить его и идти дальше по единственному выходу.</summary>
+    private async Task<ControlResult> ProceedCoreAsync(ProcessRecord process, IReadOnlyList<TokenRecord> tokens,
+        StepState finalState)
+    {
+        var (step, token, node, executor) = await LoadAttentionAsync(process, tokens);
+        var descriptor = executor.Descriptor;
+        var port = descriptor.SuccessOutputs.Single().Id;
+        var label = Label(node, descriptor);
+        var message = finalState == StepState.Skipped
+            ? $"Шаг {label} пропущен по решению пользователя."
+            : $"Пользователь подтвердил, что шаг {label} выполнен. Значения, которые шаг должен был сохранить, не записаны.";
+        await ApplyResultAsync(process, Graph(process), token, node, descriptor, step,
+            new NodeResult.Success(port, EmptyUpdates, null, message, MessageLevel.Warning),
+            finalState == StepState.Skipped ? "Пропущен пользователем." : "Отмечен выполненным пользователем.",
+            finalState);
+        return new ControlResult(message);
+    }
+
+    private async Task<(StepRecord Step, TokenRecord Token, NodeDefinition Node, INodeExecutor Executor)> LoadAttentionAsync(
+        ProcessRecord process, IReadOnlyList<TokenRecord> tokens)
+    {
+        var step = process.AttentionStepId is { } stepId ? await _store.GetStepAsync(stepId) : null;
+        if (step is null)
+        {
+            throw new EngineOperationException("Не найден шаг, по которому нужно решение.");
+        }
+
+        var token = tokens.FirstOrDefault(t => t.Id == step.TokenId && t.State != TokenState.Completed)
+                    ?? throw new EngineOperationException("У процесса нет точки, с которой можно продолжить.");
+        var node = Graph(process).FindNode(step.NodeId)
+                   ?? throw new EngineOperationException($"Блок «{step.NodeId}» не найден в сценарии.");
+        if (!_registry.TryGet(node.Type, out var executor))
+        {
+            throw new EngineOperationException($"Тип блока «{node.Type}» недоступен в этой версии Pepa.");
+        }
+
+        return (step, token, node, executor);
+    }
+}

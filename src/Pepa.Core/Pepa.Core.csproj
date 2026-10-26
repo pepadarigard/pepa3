@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Модель сценария, описания блоков, проверка, выражения, контракты исполнителей.
+       Не зависит ни от хранилища, ни от интерфейса. -->
+  <ItemGroup>
+    <PackageReference Include="Jint" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Pepa.Core.Tests" />
+  </ItemGroup>
+</Project>

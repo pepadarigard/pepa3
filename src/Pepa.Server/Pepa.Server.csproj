@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Pepa без окна: тот же движок и интерфейс в обычном браузере. Для разработки, тестов и серверного запуска. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>pepa-server</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Pepa.Host\Pepa.Host.csproj" />
+  </ItemGroup>
+</Project>

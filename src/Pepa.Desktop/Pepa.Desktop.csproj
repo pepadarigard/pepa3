@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Оконное приложение Windows: WPF-оболочка, внутри которой WebView2 показывает интерфейс. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <!-- Позволяет собирать оболочку не на Windows (запускается только на Windows). -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <AssemblyName>Pepa</AssemblyName>
+    <RootNamespace>Pepa.Desktop</RootNamespace>
+    <ApplicationIcon>Assets\pepa.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Pepa.Host\Pepa.Host.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" />
+  </ItemGroup>
+  <ItemGroup>
+    <Resource Include="Assets\pepa.ico" />
+  </ItemGroup>
+</Project>
