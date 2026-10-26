@@ -13,6 +13,9 @@
     <Project Path="src/Pepa.Server/Pepa.Server.csproj" />
     <Project Path="src/Pepa.Storage.Sqlite/Pepa.Storage.Sqlite.csproj" />
   </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/Pepa.Plugins.Sample/Pepa.Plugins.Sample.csproj" />
+  </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Pepa.Adapters.Browser.Tests/Pepa.Adapters.Browser.Tests.csproj" />
     <Project Path="tests/Pepa.Adapters.Desktop.Tests/Pepa.Adapters.Desktop.Tests.csproj" />

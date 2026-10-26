@@ -1,8 +1,16 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
     <ProjectReference Include="..\..\src\Pepa.Host\Pepa.Host.csproj" />
+    <!-- Пример расширения: не ссылка (тесты загружают его как расширение), а сборка рядом в sample-plugin\. -->
+    <ProjectReference Include="..\..\samples\Pepa.Plugins.Sample\Pepa.Plugins.Sample.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
   <ItemGroup>
     <Compile Include="..\Pepa.Assistant.Tests\FakeAnthropic.cs" Link="FakeAnthropic.cs" />
   </ItemGroup>
+  <Target Name="CopySamplePlugin" AfterTargets="Build">
+    <MSBuild Projects="..\..\samples\Pepa.Plugins.Sample\Pepa.Plugins.Sample.csproj" Targets="GetTargetPath" Properties="Configuration=$(Configuration)">
+      <Output TaskParameter="TargetOutputs" ItemName="SamplePluginAssembly" />
+    </MSBuild>
+    <Copy SourceFiles="@(SamplePluginAssembly)" DestinationFolder="$(OutDir)sample-plugin" SkipUnchangedFiles="true" />
+  </Target>
 </Project>

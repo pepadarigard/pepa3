@@ -492,3 +492,19 @@ export interface AssistantDraft {
   requests: number;
   usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number };
 }
+
+/** Расширение (папка в plugins): что загружено или почему нет. */
+export interface PluginInfo {
+  id: string;
+  name: string;
+  version: string | null;
+  nodeTypes: string[];
+  /** Не загружено: причина (блоков этого расширения нет, остальная Pepa работает). */
+  error: string | null;
+}
+
+export interface Plugins {
+  /** Папка, куда кладут расширения. */
+  directory: string;
+  plugins: PluginInfo[];
+}

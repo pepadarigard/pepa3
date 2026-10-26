@@ -49,6 +49,7 @@ Windows-сервере без включённого ПК пользовател
 | Resource Manager | `Pepa.Engine/ProcessEngine.Platform.cs` (ресурсы, очередь, взаимные блокировки) | есть |
 | Persistence Layer | `Pepa.Storage.Sqlite` | есть |
 | Integration Adapters | `Pepa.Adapters.*` | файлы, браузер, AdsPower, Telegram, окна Windows (`Desktop` + `Desktop.Windows`) |
+| Extensions | `Pepa.Core.Plugins` (контракт), `Pepa.Host/Plugins` (загрузка) | свои блоки из сборок в `plugins/<имя>/`: отдельный контекст загрузки, те же правила надёжности (D-043) |
 | Permission System | рабочая папка (`Workspace`), запрет системных папок | начато |
 | Observability | шаги, журнал процесса, журнал платформы `logs/` | есть |
 | AI Provider Layer | `Pepa.Assistant` (Claude API), ключ — `Pepa.Host/Settings/AssistantKeyStore.cs` | составление блоков есть |

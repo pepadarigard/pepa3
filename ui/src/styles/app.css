@@ -2020,3 +2020,11 @@ pre.json {
   align-items: center;
   gap: 4px;
 }
+
+.plugin-row {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}

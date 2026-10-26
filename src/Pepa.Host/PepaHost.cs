@@ -20,6 +20,7 @@ using Pepa.Engine.Nodes;
 using Pepa.Engine.Persistence;
 using Pepa.Host.Api;
 using Pepa.Host.Logging;
+using Pepa.Host.Plugins;
 using Pepa.Host.Samples;
 using Pepa.Host.Security;
 using Pepa.Host.Settings;
@@ -104,6 +105,9 @@ public sealed class PepaHost : IAsyncDisposable
             "Окна Windows, мышь и клавиатура доступны только в приложении Pepa для Windows (Pepa.exe), а сейчас Pepa запущена без окна.");
         var registry = new NodeRegistry().RegisterLogicNodes().RegisterFlowNodes().RegisterFileNodes(workspace)
             .RegisterBrowserNodes(browsers, workspace).RegisterTelegramNodes(telegram, workspace).RegisterDesktopNodes(desktop);
+        // Расширения — до движка и помощника: их блоки должны быть в реестре с самого начала (и в каталоге помощника).
+        var plugins = PluginLoader.Load(options.PluginsDirectory ?? Path.Combine(dataDirectory, "plugins"), dataDirectory, registry,
+            () => settings.Current.WorkspaceRoot);
         var token = options.Token ?? Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
         var hostContext = new HostContext
         {
@@ -143,6 +147,7 @@ public sealed class PepaHost : IAsyncDisposable
         });
         builder.Services.AddSingleton<IPepaStore>(store);
         builder.Services.AddSingleton(registry);
+        builder.Services.AddSingleton(plugins);
         builder.Services.AddSingleton<IWorkspace>(workspace);
         builder.Services.AddSingleton<IExpressionEvaluator, JintExpressionEvaluator>();
         builder.Services.AddSingleton(settings);
@@ -173,6 +178,17 @@ public sealed class PepaHost : IAsyncDisposable
 
         var app = builder.Build();
         var logger = app.Services.GetRequiredService<ILogger<PepaHost>>();
+        foreach (var plugin in plugins.Plugins)
+        {
+            if (plugin.Error is null)
+            {
+                logger.LogInformation("Расширение «{Name}» ({Id}) загружено: блоков — {Count}.", plugin.Name, plugin.Id, plugin.NodeTypes.Count);
+            }
+            else
+            {
+                logger.LogWarning("Расширение {Id} не загружено: {Error}", plugin.Id, plugin.Error);
+            }
+        }
         var engine = app.Services.GetRequiredService<ProcessEngine>();
         engineRef = engine;
         var events = app.Services.GetRequiredService<EventHub>();

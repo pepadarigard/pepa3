@@ -5,6 +5,7 @@ import { api } from "../api/client";
 import { useInfo, useSettings } from "../api/hooks";
 import type { Settings } from "../api/types";
 import { AssistantCard } from "../components/AssistantCard";
+import { PluginsCard } from "../components/PluginsCard";
 import { useFeedback } from "../components/feedback";
 import { Badge, Button, Callout, Card, ErrorState, Loading } from "../components/ui";
 import { native } from "../lib/native";
@@ -173,6 +174,8 @@ export function SettingsPage() {
       </Card>
 
       <AssistantCard />
+
+      <PluginsCard />
 
       {info.data && (
         <Card title="О программе">

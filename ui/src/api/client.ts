@@ -11,6 +11,7 @@ import type {
   TelegramStatus,
   Info,
   NodeTypes,
+  Plugins,
   PepaEvent,
   Resource,
   SaveTrigger,
@@ -159,6 +160,7 @@ export const api = {
 
   desktopWindows: () => request<DesktopWindow[]>("GET", "/integrations/desktop/windows"),
   templates: () => request<ScenarioTemplate[]>("GET", "/templates"),
+  plugins: () => request<Plugins>("GET", "/plugins"),
   assistant: () => request<AssistantStatus>("GET", "/assistant"),
   assistantSetKey: (apiKey: string) => request<AssistantStatus>("PUT", "/assistant/key", { apiKey }),
   assistantClearKey: () => request<AssistantStatus>("DELETE", "/assistant/key"),

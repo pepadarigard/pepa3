@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Пример расширения Pepa: свои блоки. Собранную сборку кладут в папку данных Pepa: plugins\sample\.
+       Pepa.Core не копируется рядом (Private=false): у расширения та же сборка, что у Pepa. -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Pepa.Core\Pepa.Core.csproj" Private="false" />
+  </ItemGroup>
+</Project>

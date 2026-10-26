@@ -35,6 +35,9 @@ public sealed record PepaHostOptions
     /// <summary>Адрес сервера Telegram «ip:порт» вместо основного (проверки: чтобы не обращаться к настоящему Telegram).</summary>
     public string? TelegramServerAddress { get; init; }
 
+    /// <summary>Папка расширений; null — plugins в папке данных.</summary>
+    public string? PluginsDirectory { get; init; }
+
     /// <summary>Адрес Claude API вместо настоящего (проверки: имитация сервера).</summary>
     public string? AssistantBaseUrl { get; init; }
 

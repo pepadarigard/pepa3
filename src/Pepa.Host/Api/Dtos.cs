@@ -281,3 +281,9 @@ public sealed record AssistantDraftDto(
     IReadOnlyList<string> Problems,
     int Requests,
     Assistant.AssistantUsage Usage);
+
+/// <summary>Расширения: куда их класть и что загружено.</summary>
+public sealed record PluginsDto(string Directory, IReadOnlyList<PluginDto> Plugins);
+
+/// <param name="Error">Не загружено: причина (блоков этого расширения нет).</param>
+public sealed record PluginDto(string Id, string Name, string? Version, IReadOnlyList<string> NodeTypes, string? Error);

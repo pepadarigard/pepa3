@@ -369,6 +369,7 @@ async function main() {
     await page.getByPlaceholder("sk-ant-…").fill("sk-ant-e2e-0123456789abcdef");
     await page.getByRole("button", { name: "Сохранить ключ" }).click();
     await page.getByText("Подключён · ключ …cdef").waitFor();
+    await page.getByTestId("plugins-card").getByText("Расширений нет.").waitFor();
     await page.getByRole("button", { name: "Проверить", exact: true }).click();
     await page.getByText("Ключ подходит").waitFor();
     await page.goto(`${base}/#/scenarios`);

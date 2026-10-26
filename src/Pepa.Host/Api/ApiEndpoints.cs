@@ -329,6 +329,9 @@ internal static class ApiEndpoints
             }
         });
 
+        api.MapGet("/plugins", (Plugins.PluginCatalog plugins) => new PluginsDto(plugins.Directory,
+            plugins.Plugins.Select(p => new PluginDto(p.Id, p.Name, p.Version, p.NodeTypes, p.Error)).ToList()));
+
         api.MapGet("/templates", (Core.Nodes.NodeRegistry registry) => Samples.SampleScenarios.All().Select(s =>
         {
             var name = System.Text.RegularExpressions.Regex.Replace(s.Name, @"^Пример \d+\.\s*", "");
