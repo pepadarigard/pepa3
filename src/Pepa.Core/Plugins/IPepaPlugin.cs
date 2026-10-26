@@ -22,7 +22,8 @@ public interface IPepaPlugin
 }
 
 /// <summary>Что расширение добавляет в Pepa и что ему доступно.</summary>
-public sealed class PluginRegistration(string id, string dataDirectory, Func<string> workspaceRoot)
+/// <param name="resolveInWorkspace">Путь внутри рабочей папки с теми же проверками, что у встроенных блоков файлов.</param>
+public sealed class PluginRegistration(string id, string dataDirectory, Func<string> workspaceRoot, Func<string, string>? resolveInWorkspace = null)
 {
     private readonly List<NodeCategory> _categories = [];
     private readonly List<INodeExecutor> _nodes = [];
@@ -42,6 +43,13 @@ public sealed class PluginRegistration(string id, string dataDirectory, Func<str
 
     /// <summary>Рабочая папка Pepa (из «Настроек»; может смениться, поэтому — функция).</summary>
     public Func<string> WorkspaceRoot { get; } = workspaceRoot;
+
+    /// <summary>
+    /// Полный путь к файлу внутри рабочей папки — с теми же проверками, что у встроенных блоков файлов (не выйти за папку,
+    /// в том числе через ссылки на другие папки; без запрещённых имён). Нельзя — <see cref="NodeInputException"/> с причиной.
+    /// </summary>
+    public string ResolveWorkspacePath(string path) =>
+        resolveInWorkspace is { } resolve ? resolve(path) : throw new NodeInputException("Рабочая папка Pepa недоступна расширениям.");
 
     public IReadOnlyList<NodeCategory> Categories => _categories;
     public IReadOnlyList<INodeExecutor> Nodes => _nodes;

@@ -66,6 +66,21 @@ public sealed class TelegramServiceTests : IAsyncLifetime
     private TelegramService Create(string address, TimeSpan? timeout = null) =>
         new(_data, _ => Task.CompletedTask) { ServerAddress = address, ConnectTimeout = timeout ?? TimeSpan.FromSeconds(30) };
 
+    private sealed class FullDisk : MemoryStream
+    {
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default) =>
+            ValueTask.FromException(new IOException("На диске нет места."));
+    }
+
+    [Fact]
+    public async Task Disk_error_while_downloading_is_told_apart_from_a_broken_connection()
+    {
+        var stream = new DiskErrorStream(new FullDisk());
+        await Assert.ThrowsAsync<IOException>(async () => await stream.WriteAsync(new byte[] { 1, 2, 3 }, TestContext.Current.CancellationToken));
+        Assert.Equal("На диске нет места.", stream.Failure?.Message);
+        Assert.Null(new DiskErrorStream(new MemoryStream()).Failure);
+    }
+
     [Fact]
     public void Api_hash_and_phone_are_checked_before_connecting()
     {

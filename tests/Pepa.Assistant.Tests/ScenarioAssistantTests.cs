@@ -261,6 +261,50 @@ public sealed class ScenarioAssistantTests : IDisposable
     }
 
     [Fact]
+    public async Task Edit_keeps_block_settings_and_fields_the_model_did_not_mention()
+    {
+        // Модель вернула сценарий почти без изменений: у «many» не назвала уровень, у «small» очистила сообщение.
+        _api.ReplyDraft(Draft(
+            [
+                Block("check", "condition", ("expression", "vars.count > 2")),
+                Block("many", "log", ("message", "Много")),
+                Block("few", "log", ("message", "Мало"), ("level", "info")),
+                Block("done", "end", ("outcome", "success")),
+                Block("small", "end", ("outcome", "failure"), ("message", "")),
+            ],
+            [Link("check", "true", "many"), Link("check", "false", "few"), Link("many", "out", "done"), Link("few", "out", "small")]));
+        var settings = new NodeSettings { RetryCount = 3, RetryDelaySeconds = 30, TimeoutSeconds = 600, Breakpoint = true };
+        var current = Current();
+        current = current with
+        {
+            Nodes = current.Nodes.Select(n => n.Id == "many"
+                ? n with { Settings = settings, Config = new JsonObject { ["message"] = "Много", ["level"] = "warning" } }
+                : n).ToList(),
+        };
+        var draft = await Assistant().DraftAsync("sk-ant-test", Ask("Ничего не менять.") with { ExistingVariables = current.Variables, Current = current },
+            TestContext.Current.CancellationToken);
+
+        Assert.Empty(draft.Problems);
+        var many = draft.Nodes.Single(n => n.Id == "many");
+        // Повторы, тайм-аут и точка останова — не то, что помощник меняет: они остаются.
+        Assert.Equal(settings, many.Settings);
+        Assert.Equal("warning", many.Config["level"]!.GetValue<string>());
+        Assert.Equal("", draft.Nodes.Single(n => n.Id == "small").Config["message"]!.GetValue<string>());
+        Assert.Contains("пустым значением", UserText(_api.Requests.Single().Body!));
+    }
+
+    [Fact]
+    public async Task Scenario_with_repeated_block_ids_is_refused_before_asking_the_model()
+    {
+        var current = Current();
+        current = current with { Nodes = [.. current.Nodes, current.Nodes[2] with { Position = new NodePosition(0, 300) }] };
+        var error = await Assert.ThrowsAsync<AssistantException>(() => Assistant().DraftAsync("sk-ant-test",
+            Ask("Добавить паузу.") with { Current = current }, TestContext.Current.CancellationToken));
+        Assert.Contains("«many»", error.Message);
+        Assert.Empty(_api.Requests);
+    }
+
+    [Fact]
     public async Task Scenario_is_explained_by_blocks_without_changes()
     {
         _api.ReplyDraft(new JsonObject

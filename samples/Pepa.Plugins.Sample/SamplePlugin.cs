@@ -18,7 +18,7 @@ public sealed class SamplePlugin : IPepaPlugin
     public void Register(PluginRegistration registration) => registration
         .AddCategory(Category)
         .AddNode(new TextCaseNode())
-        .AddNode(new AppendLineNode(registration.WorkspaceRoot));
+        .AddNode(new AppendLineNode(registration.ResolveWorkspacePath));
 }
 
 /// <summary>Блок без внешних действий: повтор безопасен, проверять нечего.</summary>
@@ -64,10 +64,14 @@ public sealed class TextCaseNode : INodeExecutor
 /// <summary>
 /// Блок с внешним действием — дописать строку в файл рабочей папки. По правилам Pepa он умеет проверить результат: до
 /// действия запоминает длину файла (PrepareAsync), а после сбоя смотрит, появилась ли строка после этого места (VerifyAsync),
-/// — поэтому строка не допишется дважды.
+/// — поэтому строка не допишется дважды. Сравниваются байты: так проверка не зависит от кодировки и пометки BOM.
 /// </summary>
-public sealed class AppendLineNode(Func<string> workspaceRoot) : INodeExecutor
+/// <param name="resolve">Путь внутри рабочей папки Pepa (<see cref="PluginRegistration.ResolveWorkspacePath"/>).</param>
+public sealed class AppendLineNode(Func<string, string> resolve) : INodeExecutor
 {
+    /// <summary>UTF-8 без BOM: в начало нового файла не попадают лишние байты.</summary>
+    private static readonly Encoding Utf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+
     public NodeTypeDescriptor Descriptor { get; } = new()
     {
         Type = "sample.appendline",
@@ -96,7 +100,7 @@ public sealed class AppendLineNode(Func<string> workspaceRoot) : INodeExecutor
     {
         var path = FullPath(context);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        await File.AppendAllTextAsync(path, Line(context) + Environment.NewLine, Encoding.UTF8, cancellationToken);
+        await File.AppendAllTextAsync(path, Line(context) + Environment.NewLine, Utf8, cancellationToken);
         return NodeResult.Ok(Ports.Out, $"Строка дописана в «{context.RequireString("path")}».");
     }
 
@@ -109,22 +113,26 @@ public sealed class AppendLineNode(Func<string> workspaceRoot) : INodeExecutor
             return VerificationResult.NotDone("файла нет — строка не дописана");
         }
 
-        var text = await File.ReadAllTextAsync(path, Encoding.UTF8, cancellationToken);
-        var added = Encoding.UTF8.GetString(Encoding.UTF8.GetBytes(text).AsSpan((int)Math.Min(before, Encoding.UTF8.GetByteCount(text))));
-        return added.Contains(Line(context), StringComparison.Ordinal)
+        var bytes = await File.ReadAllBytesAsync(path, cancellationToken);
+        if (bytes.Length < before)
+        {
+            return VerificationResult.Inconclusive("файл стал короче, чем был до действия, — его меняли; проверьте сами");
+        }
+
+        var added = bytes.AsSpan((int)before);
+        if (added.Length == 0)
+        {
+            return VerificationResult.NotDone("файл не изменился — строка не дописана, её можно дописать");
+        }
+
+        // Целая строка с переводом строки — дописана; что-то другое (часть строки, чужая запись) — повторять нельзя.
+        return added.IndexOf(Utf8.GetBytes(Line(context) + Environment.NewLine)) >= 0
             ? VerificationResult.Done("строка есть в файле")
-            : VerificationResult.NotDone("строки в файле нет — её можно дописать");
+            : VerificationResult.Inconclusive("файл изменился, но целой строки в нём нет — возможно, она записана частично; проверьте сами");
     }
 
     private static string Line(NodeExecutionContext context) => (context.Input.GetString("line") ?? "").ReplaceLineEndings(" ");
 
-    /// <summary>Путь только внутри рабочей папки Pepa.</summary>
-    private string FullPath(NodeExecutionContext context)
-    {
-        var root = Path.GetFullPath(workspaceRoot());
-        var full = Path.GetFullPath(Path.Combine(root, context.RequireString("path")));
-        return full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
-            ? full
-            : throw new NodeInputException("Файл должен быть внутри рабочей папки Pepa.");
-    }
+    /// <summary>Путь только внутри рабочей папки Pepa — с проверками Pepa (их не нужно писать в каждом расширении).</summary>
+    private string FullPath(NodeExecutionContext context) => resolve(context.RequireString("path"));
 }

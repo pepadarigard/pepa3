@@ -1571,17 +1571,22 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
             CheckOnce();
             return new TelegramCallbackAnswer(null, null, false);
         }
+        // Отказ Telegram значит «не нажато», только если это ответ на единственную отправку: после «-503» библиотека сама
+        // отправляет нажатие ещё раз, и отказ на повтор не говорит, что первая отправка не дошла до бота.
         catch (RpcException ex) when (IsSessionRevoked(ex))
         {
             OnSessionRevoked(connection);
+            CheckOnce();
             throw new TelegramSendRejectedException(SessionExpiredHint, retryable: false);
         }
         catch (RpcException ex) when (ex.Code == 420 || ex.Message.Contains("FLOOD", StringComparison.Ordinal))
         {
+            CheckOnce();
             throw new TelegramSendRejectedException($"Telegram просит подождать ({ex.Message}) — кнопка не нажата.", retryable: true);
         }
         catch (RpcException ex) when (ex.Code is >= 400 and < 500)
         {
+            CheckOnce();
             throw new TelegramSendRejectedException($"Telegram не принял нажатие ({ex.Message}) — кнопка не нажата.", retryable: false);
         }
         catch (Exception ex) when (ex is not (OperationCanceledException or TelegramPressUncertainException or TelegramSendRejectedException))
@@ -1602,8 +1607,10 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
         try
         {
             // Ошибки диска (создать, записать, переименовать) — ошибки файла; ошибки самой загрузки — связь, повтор возможен.
-            await using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+            await using (var file = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
             {
+                // Запись в файл идёт изнутри загрузки: ошибку диска (место кончилось) нужно отличить от обрыва связи.
+                var stream = new DiskErrorStream(file);
                 try
                 {
                     switch (message.media)
@@ -1620,10 +1627,15 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
                 }
                 catch (Exception ex) when (ex is not (OperationCanceledException or TelegramNoMediaException or TelegramUnavailableException))
                 {
+                    if (stream.Failure is { } disk)
+                    {
+                        System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(disk).Throw();
+                    }
+
                     throw Unavailable(connection, ex, "скачать файл из Telegram");
                 }
 
-                await stream.FlushAsync(cancellationToken);
+                await file.FlushAsync(cancellationToken);
             }
 
             File.Move(temp, targetPath, overwrite: true);
@@ -2055,3 +2067,59 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
 
 /// <summary>Ошибка входа в Telegram с понятным текстом.</summary>
 public sealed class TelegramLoginException(string message) : Exception(message);
+
+/// <summary>Поток файла, который запоминает ошибку диска (ошибки самой загрузки — другие).</summary>
+internal sealed class DiskErrorStream(Stream inner) : Stream
+{
+    public Exception? Failure { get; private set; }
+
+    public override bool CanRead => false;
+    public override bool CanSeek => inner.CanSeek;
+    public override bool CanWrite => true;
+    public override long Length => inner.Length;
+
+    public override long Position
+    {
+        get => inner.Position;
+        set => inner.Position = value;
+    }
+
+    public override void Flush() => Guard(inner.Flush);
+
+    public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+    public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
+
+    public override void SetLength(long value) => Guard(() => inner.SetLength(value));
+
+    public override void Write(byte[] buffer, int offset, int count) => Guard(() => inner.Write(buffer, offset, count));
+
+    public override async Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+        await WriteAsync(buffer.AsMemory(offset, count), cancellationToken);
+
+    public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await inner.WriteAsync(buffer, cancellationToken);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Failure ??= ex;
+            throw;
+        }
+    }
+
+    private void Guard(Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Failure ??= ex;
+            throw;
+        }
+    }
+}

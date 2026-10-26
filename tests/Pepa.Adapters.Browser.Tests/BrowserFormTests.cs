@@ -128,7 +128,7 @@ public sealed class BrowserFormTests
         var id = await f.H.RunAsync(new ScenarioBuilder("Инструкции")
             .Variable("count", VariableType.Number, JsonValue.Create(3))
             .Variable("a", VariableType.Any).Variable("b", VariableType.Any).Variable("c", VariableType.Any).Variable("d", VariableType.Any)
-            .Variable("e", VariableType.Any)
+            .Variable("e", VariableType.Any).Variable("strict", VariableType.Any)
             .Node("start", "start")
             .Node("open", "browser.open", BrowserFixture.OpenConfig(f.Site.Url("/controls")))
             .Node("a", "browser.evaluate", new { script = "document.title.length > 0;", saveTo = "a" })
@@ -136,8 +136,10 @@ public sealed class BrowserFormTests
             .Node("c", "browser.evaluate", new { script = "function (v) { return v.count + 1; }", saveTo = "c" })
             .Node("d", "browser.evaluate", new { script = "// комментарий\nvars.count * 10", saveTo = "d" })
             .Node("e", "browser.evaluate", new { script = "async () => [0 / 0, 1]", saveTo = "e" })
+            // Директива в начале кода остаётся директивой: строгий режим действует.
+            .Node("strict", "browser.evaluate", new { script = "'use strict';\n(function () { return this === undefined; })()", saveTo = "strict" })
             .Node("end", "end")
-            .Chain("start", "open", "a", "b", "c", "d", "e", "end")
+            .Chain("start", "open", "a", "b", "c", "d", "e", "strict", "end")
             .Build());
         var done = await f.H.WaitForStatusAsync(id, ProcessStatus.Completed);
         Assert.True(done.Variables["a"]!.GetValue<bool>());
@@ -145,6 +147,7 @@ public sealed class BrowserFormTests
         Assert.Equal(4, done.Variables["c"]!.GetValue<double>());
         Assert.Equal(30, done.Variables["d"]!.GetValue<double>());
         Assert.Equal("[null,1]", done.Variables["e"]!.ToJsonString());
+        Assert.True(done.Variables["strict"]!.GetValue<bool>());
 
         // Ошибка в записи кода — код не выполнялся: обычная ошибка шага, а не «неизвестно, выполнился ли».
         var broken = await f.H.RunAsync(Single(f, "browser.evaluate", new { script = "window.ran = true; )(" }));
@@ -163,6 +166,21 @@ public sealed class BrowserFormTests
         var unknown = await f.H.WaitForStatusAsync(failed, ProcessStatus.NeedsAttention);
         Assert.Equal(AttentionKind.UnknownStep, unknown.Attention);
         Assert.Contains("начал выполняться", unknown.StatusMessage);
+    }
+
+    [Theory]
+    [InlineData("'use strict';\nx = 1", 13)]
+    [InlineData("// заметка\n\"use strict\"\nx()", 23)]
+    [InlineData("'a'; 'b'; x", 9)]
+    [InlineData("x = 1", 0)]
+    [InlineData("'abc'.length", 0)]
+    [InlineData("'abc'\n.length", 0)]
+    [InlineData("'не закрыта", 0)]
+    public void Start_mark_goes_after_leading_directives(string script, int end)
+    {
+        Assert.Equal(end, EvaluateNode.DirectivesEnd(script));
+        // Отметка — в той же строке: номера строк в ошибках не сдвигаются.
+        Assert.Equal(script.Count(c => c == '\n'), EvaluateNode.Marked(script).Count(c => c == '\n'));
     }
 
     [Fact]

@@ -340,6 +340,8 @@ public sealed class UiaDesktop : IDesktop, IDisposable
             RequireForeground(window);
             var focus = FocusOf(Handle(window));
             var refocus = false;
+            var followed = false;
+            var sentHere = 0;
             foreach (var ch in text.ReplaceLineEndings("\n"))
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -352,18 +354,22 @@ public sealed class UiaDesktop : IDesktop, IDisposable
                     Thread.Sleep(Math.Max(0, 80 - delayMs));
                     focus = FocusOf(Handle(window));
                     refocus = false;
+                    followed = false;
+                    sentHere = 0;
                 }
                 else if (focus != IntPtr.Zero && FocusOf(Handle(window)) is var now && now != focus)
                 {
-                    if (now == IntPtr.Zero || !NativeMethods.IsChild(focus, now))
+                    // Таблицы и списки на первом же символе открывают поле правки внутри себя — это тот же ввод. Только так:
+                    // сразу после первого символа, один раз, внутрь того же поля (не окна целиком). Иначе фокус ушёл не туда.
+                    if (now == IntPtr.Zero || followed || sentHere != 1 || focus == Handle(window) || !NativeMethods.IsChild(focus, now))
                     {
                         throw new DesktopInputBlockedException(
                             $"Во время ввода в окне «{window.Info.Title}» фокус перешёл на другое поле — Pepa остановилась, чтобы не печатать не туда.",
                             partial: sent > 0);
                     }
 
-                    // Таблицы и списки на первом же символе открывают поле правки внутри себя — это тот же ввод.
                     focus = now;
+                    followed = true;
                 }
 
                 switch (ch)
@@ -382,6 +388,7 @@ public sealed class UiaDesktop : IDesktop, IDisposable
                 }
 
                 sent++;
+                sentHere++;
                 if (delayMs > 0)
                 {
                     Thread.Sleep(delayMs);

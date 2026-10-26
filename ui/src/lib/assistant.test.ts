@@ -64,4 +64,10 @@ describe("draftChanges", () => {
     const same = { ...draft, nodes: current.nodes.slice(1), edges: current.edges.slice(1) };
     expect(hasChanges(draftChanges(current.nodes, current.edges, same, "start"))).toBe(false);
   });
+
+  it("изменённые настройки выполнения блока тоже видны", () => {
+    const retried = current.nodes.slice(1).map((n) => (n.id === "hello" ? { ...n, settings: { ...n.settings, timeoutSeconds: 600 } } : n));
+    const changes = draftChanges(current.nodes, current.edges, { ...draft, nodes: retried, edges: current.edges.slice(1) }, "start");
+    expect(changes.changed).toEqual([{ node: retried[0], what: ["повторы, тайм-аут или точка останова"] }]);
+  });
 });

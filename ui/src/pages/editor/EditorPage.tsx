@@ -454,14 +454,17 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
   const [searchOpen, setSearchOpen] = useState(false);
 
   const selectNode = (nodeId: string) => {
-    // Блок в свёрнутой группе (ошибка из списка, поиск) — сначала развернуть группу.
+    // Блок в свёрнутой группе (ошибка из списка, поиск) — сначала развернуть группу. Это не правка: в историю не
+    // попадает, и Ctrl+Z отменяет последнее изменение пользователя, а не разворот.
     const hiddenIn = groupOfNode(groups, nodeId);
-    if (hiddenIn?.collapsed) groupActions.toggle(hiddenIn.id);
-    editor.replace((s) => ({
-      ...s,
-      nodes: s.nodes.map((n) => ({ ...n, selected: n.id === nodeId })),
-      edges: s.edges.map((e) => ({ ...e, selected: false })),
-    }));
+    editor.replace((s) => {
+      const shown = hiddenIn?.collapsed ? withGroups(s, (gs) => gs.map((g) => (g.id === hiddenIn.id ? { ...g, collapsed: false } : g))) : s;
+      return {
+        ...shown,
+        nodes: shown.nodes.map((n) => ({ ...n, selected: n.id === nodeId })),
+        edges: shown.edges.map((e) => ({ ...e, selected: false })),
+      };
+    });
     setTimeout(() => void flow.fitView({ nodes: [{ id: nodeId }], duration: 300, maxZoom: 1.1, padding: 0.6 }), hiddenIn?.collapsed ? 60 : 0);
   };
 

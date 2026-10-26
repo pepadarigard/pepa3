@@ -568,9 +568,94 @@ public sealed class EvaluateNode(BrowserSessions sessions) : INodeExecutor
         ? $"async (vars) => {{ {Clean} const __pepa = (\n{script}\n); return __clean(await (typeof __pepa === 'function' ? __pepa(vars) : __pepa), 0); }}"
         : $"async (vars) => {{ {Clean} let __started = false; const __mark = () => {{ __started = true; }}; let __pepa; " +
           // Перед кодом — отметка «начали». Если eval упал, не дойдя до неё, код не разобрался и ничего не выполнялось.
-          $"try {{ __pepa = eval({JsonSerializer.Serialize("__mark();\n" + script)}); }} " +
+          $"try {{ __pepa = eval({JsonSerializer.Serialize(Marked(script))}); }} " +
           $"catch (e) {{ if (!__started) throw new Error('{NotParsedMarker}' + (e && e.message)); throw e; }} " +
           "return __clean(await (typeof __pepa === 'function' ? __pepa(vars) : __pepa), 0); }";
+
+    /// <summary>
+    /// Код с отметкой «начали»: после директив в начале («'use strict';» — иначе они перестали бы быть директивами) и в той
+    /// же строке (номера строк в ошибках — как в коде пользователя).
+    /// </summary>
+    internal static string Marked(string script)
+    {
+        var end = DirectivesEnd(script);
+        return end == 0 ? "__mark(); " + script : script[..end] + ";__mark();" + script[end..];
+    }
+
+    /// <summary>Где кончаются директивы в начале кода: строки-инструкции вроде «'use strict';» (0 — директив нет).</summary>
+    internal static int DirectivesEnd(string script)
+    {
+        int Skip(int i)
+        {
+            while (i < script.Length)
+            {
+                if (char.IsWhiteSpace(script[i]))
+                {
+                    i++;
+                }
+                else if (script.AsSpan(i).StartsWith("//"))
+                {
+                    i = script.IndexOf('\n', i) is var n and >= 0 ? n : script.Length;
+                }
+                else if (script.AsSpan(i).StartsWith("/*") && script.IndexOf("*/", i + 2, StringComparison.Ordinal) is var c and >= 0)
+                {
+                    i = c + 2;
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            return i;
+        }
+
+        var end = 0;
+        var at = Skip(0);
+        while (at < script.Length && script[at] is '\'' or '"')
+        {
+            var quote = script[at];
+            var j = at + 1;
+            while (j < script.Length && script[j] != quote && script[j] != '\n')
+            {
+                j += script[j] == '\\' ? 2 : 1;
+            }
+
+            if (j >= script.Length || script[j] != quote)
+            {
+                return end;
+            }
+
+            // Директива — только строка отдельной инструкцией: дальше «;», конец кода или перевод строки, после которого
+            // выражение не продолжается.
+            var k = j + 1;
+            while (k < script.Length && script[k] is ' ' or '\t')
+            {
+                k++;
+            }
+
+            if (k < script.Length && script[k] == ';')
+            {
+                end = k + 1;
+            }
+            else if (k >= script.Length)
+            {
+                end = k;
+            }
+            else if (script[k] is '\n' or '\r' && Skip(k) is var next && (next >= script.Length || !".[(+-*/%,?:=&|<>!`".Contains(script[next])))
+            {
+                end = k;
+            }
+            else
+            {
+                return end;
+            }
+
+            at = Skip(end);
+        }
+
+        return end;
+    }
 
     /// <summary>Метка ошибки разбора кода (код не выполнялся) в сообщении об ошибке со страницы.</summary>
     private const string NotParsedMarker = "PEPA_NOT_PARSED: ";

@@ -143,6 +143,13 @@ public sealed class ScenarioAssistant
             throw new AssistantException(AssistantErrorKind.Input, "В сценарии пока нет блоков — объяснять и менять нечего.");
         }
 
+        // Блоки помощник различает по id: с повторами он перепутал бы блоки (а ответ уже был бы оплачен).
+        if (scenario.Nodes.GroupBy(n => n.Id, StringComparer.Ordinal).Where(g => g.Count() > 1).Select(g => $"«{g.Key}»").ToList() is { Count: > 0 } repeated)
+        {
+            throw new AssistantException(AssistantErrorKind.Input,
+                $"В сценарии повторяются id блоков ({string.Join(", ", repeated)}) — исправьте сценарий (проверка покажет, где), потом попросите помощника.");
+        }
+
         var length = ScenarioPrompt.ScenarioJson(scenario).Length;
         if (length > MaxScenarioLength)
         {

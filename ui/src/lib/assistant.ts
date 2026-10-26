@@ -39,6 +39,12 @@ export function draftChanges(nodes: NodeDefinition[], edges: EdgeDefinition[], d
     if (old.type !== node.type) what.push("тип");
     if ((old.label ?? "") !== (node.label ?? "")) what.push("подпись");
     if ((old.note ?? "") !== (node.note ?? "")) what.push("заметка");
+    const s1 = old.settings;
+    const s2 = node.settings;
+    if (s1.retryCount !== s2.retryCount || s1.retryDelaySeconds !== s2.retryDelaySeconds || s1.timeoutSeconds !== s2.timeoutSeconds ||
+        (s1.breakpoint ?? false) !== (s2.breakpoint ?? false)) {
+      what.push("повторы, тайм-аут или точка останова");
+    }
     for (const field of new Set([...Object.keys(old.config), ...Object.keys(node.config)])) {
       if (JSON.stringify(old.config[field] ?? null) !== JSON.stringify(node.config[field] ?? null)) what.push(field);
     }

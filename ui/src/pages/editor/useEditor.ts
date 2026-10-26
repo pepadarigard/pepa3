@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import type { ScenarioDefinition } from "../../api/types";
 import { toDefinition, toFlowEdges, toFlowNodes, type PepaEdge, type PepaNode } from "../../lib/graph";
+import { readGroups } from "../../lib/groups";
 
 export type Meta = Pick<ScenarioDefinition, "id" | "name" | "description" | "variables" | "schemaVersion" | "editor">;
 
@@ -112,8 +113,13 @@ export function useEditor(initial: ScenarioDefinition) {
   };
 }
 
-/** После отмены сохраняем выделение тех блоков, что ещё существуют, — иначе панель свойств «прыгает». */
-function keepSelection(target: EditorState, from: EditorState): EditorState {
+/**
+ * После отмены сохраняем выделение тех блоков, что ещё существуют, — иначе панель свойств «прыгает». Блоки, которые в
+ * восстановленном состоянии спрятаны в свёрнутой группе, не остаются выбранными: их не видно, а копирование и правка
+ * действовали бы на них.
+ */
+export function keepSelection(target: EditorState, from: EditorState): EditorState {
   const selected = new Set(from.nodes.filter((n) => n.selected).map((n) => n.id));
-  return { ...target, nodes: target.nodes.map((n) => ({ ...n, selected: selected.has(n.id) })) };
+  const hidden = new Set(readGroups(target.meta.editor).filter((g) => g.collapsed).flatMap((g) => g.nodeIds));
+  return { ...target, nodes: target.nodes.map((n) => ({ ...n, selected: selected.has(n.id) && !hidden.has(n.id) })) };
 }

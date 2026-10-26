@@ -53,6 +53,12 @@ internal sealed class DraftConverter(NodeRegistry registry, ScenarioValidator va
         }
 
         // Блоки. При правке id «Начала» занят: блок с таким id совпал бы с ним на схеме.
+        var previous = new Dictionary<string, NodeDefinition>(StringComparer.Ordinal);
+        foreach (var node in current?.Nodes ?? [])
+        {
+            previous.TryAdd(node.Id, node);
+        }
+
         var nodes = new List<NodeDefinition>();
         var ids = new HashSet<string>(StringComparer.Ordinal);
         if (current?.Nodes.FirstOrDefault(n => n.Type == "start") is { } currentStart)
@@ -78,10 +84,13 @@ internal sealed class DraftConverter(NodeRegistry registry, ScenarioValidator va
                 continue;
             }
 
-            var config = new JsonObject();
+            // Правка блока, который уже был: за основу — его поля и настройки (повторы, тайм-аут, точка останова), чтобы
+            // не названное моделью не сбрасывалось к значениям по умолчанию.
+            var old = previous.GetValueOrDefault(id) is { } before && before.Type == descriptor.Type ? before : null;
+            var config = old is not null ? (JsonObject)old.Config.DeepClone() : new JsonObject();
             foreach (var field in descriptor.Fields)
             {
-                if (field.Default is { } value)
+                if (field.Default is { } value && !config.ContainsKey(field.Name))
                 {
                     config[field.Name] = value.DeepClone();
                 }
@@ -99,6 +108,23 @@ internal sealed class DraftConverter(NodeRegistry registry, ScenarioValidator va
 
                 if (setting.Value.Length == 0)
                 {
+                    if (old is not null)
+                    {
+                        // Правка: пустое значение — поле очищено (текст — пустой, остальное — как по умолчанию).
+                        if (FieldValue(field, "") is { } empty)
+                        {
+                            config[field.Name] = empty;
+                        }
+                        else if (field.Default is { } fallback)
+                        {
+                            config[field.Name] = fallback.DeepClone();
+                        }
+                        else
+                        {
+                            config.Remove(field.Name);
+                        }
+                    }
+
                     continue;
                 }
 
@@ -119,6 +145,7 @@ internal sealed class DraftConverter(NodeRegistry registry, ScenarioValidator va
                 Label = label.Length > 0 ? label : null,
                 Note = block.Note.Trim() is { Length: > 0 } note ? note : null,
                 Config = config,
+                Settings = old?.Settings ?? new NodeSettings(),
             });
         }
 
@@ -187,7 +214,12 @@ internal sealed class DraftConverter(NodeRegistry registry, ScenarioValidator va
     /// </summary>
     private static List<NodeDefinition> Arrange(List<NodeDefinition> nodes, List<EdgeDefinition> edges, string? entry, ScenarioDefinition current)
     {
-        var before = current.Nodes.ToDictionary(n => n.Id, n => n.Position, StringComparer.Ordinal);
+        var before = new Dictionary<string, NodePosition>(StringComparer.Ordinal);
+        foreach (var node in current.Nodes)
+        {
+            before.TryAdd(node.Id, node.Position);
+        }
+
         var placed = nodes.Where(n => before.ContainsKey(n.Id)).ToDictionary(n => n.Id, n => before[n.Id], StringComparer.Ordinal);
         var links = edges.ToList();
         if (current.Nodes.FirstOrDefault(n => n.Type == "start") is { } start && entry is not null)
