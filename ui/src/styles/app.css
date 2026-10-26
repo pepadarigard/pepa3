@@ -1771,3 +1771,51 @@ pre.json {
   max-height: 120px;
   overflow: auto;
 }
+
+.canvas-search {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(420px, calc(100% - 32px));
+  z-index: 20;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-lg, 0 8px 24px rgba(0, 0, 0, 0.18));
+  padding: 8px;
+}
+
+.canvas-search-results {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.canvas-search-results li > button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.canvas-search-results li > button:hover,
+.canvas-search-results li > button.active {
+  background: var(--surface-2);
+}
+
+.canvas-search-results li > button .truncate {
+  max-width: 100%;
+}
+

@@ -113,6 +113,26 @@ async function main() {
     if (written.length !== 1) throw new Error(`Ожидался один файл, найдено: ${written}`);
     await page.screenshot({ path: path.join(shots, "04-process-from-editor.png") });
 
+    step("Копирование блока в другой сценарий и поиск по схеме");
+    await page.goto(`${base}/#/editor/${saved.id}`);
+    await page.locator(`.react-flow__node[data-id="${newId}"]`).click();
+    await page.keyboard.press("Control+c");
+    await page.goto(`${base}/#/scenarios`);
+    await page.getByRole("button", { name: "Новый сценарий" }).click();
+    await page.locator(".react-flow__node").first().waitFor();
+    await page.locator(".react-flow__pane").click({ position: { x: 20, y: 20 } });
+    await page.keyboard.press("Control+v");
+    await page.locator(".react-flow__node").nth(2).waitFor();
+    if ((await page.locator(".react-flow__node").count()) !== 3) throw new Error("Блок не вставился");
+    await page.locator(".react-flow__pane").click({ position: { x: 20, y: 20 } });
+    await page.keyboard.press("Control+f");
+    await page.getByPlaceholder("Найти блок: подпись, тип, параметр…").fill("итог");
+    await page.keyboard.press("Enter");
+    await page.getByLabel("Свойства").locator(".field", { hasText: "Файл" }).locator("input").waitFor();
+    const pastedPath = await page.getByLabel("Свойства").locator(".field", { hasText: "Файл" }).locator("input").inputValue();
+    if (!pastedPath.startsWith("e2e/итог-")) throw new Error(`Вставлен не тот блок: ${pastedPath}`);
+    await page.screenshot({ path: path.join(shots, "14-editor-paste-search.png") });
+
     step("Пауза, продолжение и остановка ожидающего процесса");
     await page.goto(`${base}/#/scenarios`);
     await page.locator(".scenario-card", { hasText: "Пример 3" }).getByRole("button", { name: "Запустить" }).click();

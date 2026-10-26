@@ -15,18 +15,19 @@ import {
   type NodeChange,
   type ReactFlowInstance,
 } from "@xyflow/react";
-import { ArrowLeft, CalendarClock, LayoutGrid, Play, Plus, Redo2, Save, Shapes, Undo2, Workflow } from "lucide-react";
+import { ArrowLeft, CalendarClock, ClipboardPaste, Copy, LayoutGrid, Play, Plus, Redo2, Save, Search, Shapes, Undo2, Workflow } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
 import { useNodeTypes, useScenario, useScenarios } from "../../api/hooks";
-import type { NodeDefinition, NodeTypes, Scenario, ValidationReport } from "../../api/types";
+import type { NodeDefinition, NodeTypeDescriptor, NodeTypes, Scenario, ValidationReport } from "../../api/types";
 import { rememberEditedScenario } from "../../App";
 import { useFeedback } from "../../components/feedback";
 import { useRunScenario } from "../../components/RunDialog";
 import { useTriggersDialog } from "../../components/triggers";
 import { Badge, Button, Card, Empty, ErrorState, Loading } from "../../components/ui";
 import { formatMoment } from "../../lib/format";
-import { autoLayout, connect, createNode, NODE_WIDTH, newId, type PepaEdge, type PepaNode } from "../../lib/graph";
+import { copyBlocks, loadClipboard, pasteBlocks, saveClipboard, type BlockClipboard } from "../../lib/clipboard";
+import { autoLayout, connect, createNode, NODE_WIDTH, nodeSummary, type PepaEdge, type PepaNode } from "../../lib/graph";
 import { navigate, setLeaveGuard } from "../../router";
 import { blankScenario } from "../ScenariosPage";
 import { EdgeInspector, NodeInspector, ScenarioInspector } from "./Inspector";
@@ -253,17 +254,78 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
 
   const removeEdge = (edgeId: string) => editor.commit((s) => ({ ...s, edges: s.edges.filter((e) => e.id !== edgeId) }));
 
-  const duplicateSelected = useCallback(() => {
-    const selected = editor.state.nodes.filter((n) => n.selected && !isStart(n.id));
-    if (selected.length !== 1) return;
-    const source = selected[0];
-    const copy: NodeDefinition = { ...structuredClone(source.data.definition), id: newId("n") };
-    const position = { x: source.position.x + 40, y: source.position.y + 40 };
+  // ───────────── Копирование и вставка ─────────────
+
+  /** Вставить блоки из буфера: новые идентификаторы, связи внутри группы и недостающие переменные. */
+  const insertBlocks = useCallback((data: BlockClipboard, at: { x: number; y: number }) => {
+    let target = at;
+    const first = data.nodes[0];
+    const minX = Math.min(...data.nodes.map((n) => n.position?.x ?? 0));
+    const minY = Math.min(...data.nodes.map((n) => n.position?.y ?? 0));
+    const occupied = (p: { x: number; y: number }) => editor.state.nodes.some((n) =>
+      Math.abs(n.position.x - (p.x + (first.position?.x ?? 0) - minX)) < 5 && Math.abs(n.position.y - (p.y + (first.position?.y ?? 0) - minY)) < 5);
+    for (let i = 0; i < 20 && occupied(target); i++) target = { x: target.x + 40, y: target.y + 40 };
+    const pasted = pasteBlocks(data, target, editor.state.meta.variables);
     editor.commit((s) => ({
-      ...s,
-      nodes: [...s.nodes.map((n) => ({ ...n, selected: false })), { id: copy.id, type: "pepa", position, data: { definition: { ...copy, position } }, selected: true }],
+      meta: pasted.variables.length > 0 ? { ...s.meta, variables: [...s.meta.variables, ...pasted.variables] } : s.meta,
+      nodes: [...s.nodes.map((n) => ({ ...n, selected: false })), ...pasted.nodes],
+      edges: [...s.edges.map((e) => ({ ...e, selected: false })), ...pasted.edges],
     }));
-  }, [editor, isStart]);
+    if (pasted.variables.length > 0) {
+      feedback.toast(`Добавлены переменные: ${pasted.variables.map((v) => v.name).join(", ")}`, "info");
+    }
+  }, [editor, feedback]);
+
+  const groupOrigin = (data: BlockClipboard) => ({
+    x: Math.min(...data.nodes.map((n) => n.position?.x ?? 0)),
+    y: Math.min(...data.nodes.map((n) => n.position?.y ?? 0)),
+  });
+
+  const copySelected = useCallback(() => {
+    const data = copyBlocks(editor.state.nodes, editor.state.edges, editor.state.meta.variables, descriptors, isStart);
+    if (!data) {
+      feedback.toast("Выберите блоки, которые нужно скопировать.", "info");
+      return;
+    }
+    if (!saveClipboard(data)) {
+      feedback.toast("Не удалось скопировать блоки.", "error");
+      return;
+    }
+    feedback.toast(data.nodes.length === 1 ? "Блок скопирован — Ctrl+V, чтобы вставить" : `Скопировано блоков: ${data.nodes.length}`, "info");
+  }, [descriptors, editor, feedback, isStart]);
+
+  const pasteFromClipboard = useCallback(() => {
+    const data = loadClipboard();
+    if (!data) {
+      feedback.toast("Буфер пуст — сначала скопируйте блоки (Ctrl+C).", "info");
+      return;
+    }
+    const ids = new Set(editor.state.nodes.map((n) => n.id));
+    const origin = groupOrigin(data);
+    if (data.nodes.every((n) => ids.has(n.id))) {
+      // Тот же сценарий, оригиналы на месте — рядом с ними.
+      insertBlocks(data, { x: origin.x + 40, y: origin.y + 40 });
+    } else {
+      // Другой сценарий — в центр видимой части холста.
+      const rect = canvas.current?.getBoundingClientRect();
+      const center = rect ? flow.screenToFlowPosition({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }) : { x: 0, y: 0 };
+      const width = Math.max(...data.nodes.map((n) => n.position?.x ?? 0)) - origin.x + NODE_WIDTH;
+      insertBlocks(data, freeSpot(editor.state.nodes, { x: Math.round(center.x - width / 2), y: Math.round(center.y - 60) }));
+    }
+  }, [editor, feedback, flow, insertBlocks]);
+
+  const duplicateSelected = useCallback(() => {
+    const data = copyBlocks(editor.state.nodes, editor.state.edges, editor.state.meta.variables, descriptors, isStart);
+    if (!data) return;
+    const origin = groupOrigin(data);
+    insertBlocks(data, { x: origin.x + 40, y: origin.y + 40 });
+  }, [descriptors, editor, insertBlocks, isStart]);
+
+  const selectAll = useCallback(() => {
+    editor.replace((s) => ({ ...s, nodes: s.nodes.map((n) => ({ ...n, selected: true })), edges: s.edges.map((e) => ({ ...e, selected: false })) }));
+  }, [editor]);
+
+  const [searchOpen, setSearchOpen] = useState(false);
 
   const selectNode = (nodeId: string) => {
     editor.replace((s) => ({
@@ -293,6 +355,11 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
         void save();
         return;
       }
+      if (key === "f" || key === "а") {
+        e.preventDefault();
+        setSearchOpen(true);
+        return;
+      }
       const typing = (e.target as HTMLElement | null)?.closest("input, textarea, select, [contenteditable]");
       if (typing) return;
       if ((key === "z" || key === "я") && !e.shiftKey) {
@@ -304,11 +371,22 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
       } else if (key === "d" || key === "в") {
         e.preventDefault();
         duplicateSelected();
+      } else if (key === "c" || key === "с") {
+        // Обычное копирование текста (выделенного на странице) не перехватываем.
+        if (window.getSelection()?.toString()) return;
+        e.preventDefault();
+        copySelected();
+      } else if (key === "v" || key === "м") {
+        e.preventDefault();
+        pasteFromClipboard();
+      } else if (key === "a" || key === "ф") {
+        e.preventDefault();
+        selectAll();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [duplicateSelected, editor, save]);
+  }, [copySelected, duplicateSelected, editor, pasteFromClipboard, save, selectAll]);
 
   // ───────────── Отрисовка ─────────────
 
@@ -330,6 +408,9 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
         <span className="spacer" />
         <Button size="small" variant="ghost" iconOnly icon={Undo2} title="Отменить (Ctrl+Z)" disabled={!editor.canUndo} onClick={editor.undo} />
         <Button size="small" variant="ghost" iconOnly icon={Redo2} title="Вернуть (Ctrl+Y)" disabled={!editor.canRedo} onClick={editor.redo} />
+        <Button size="small" variant="ghost" iconOnly icon={Search} title="Найти блок (Ctrl+F)" onClick={() => setSearchOpen(true)} />
+        <Button size="small" variant="ghost" iconOnly icon={Copy} title="Копировать выбранные блоки (Ctrl+C)" onClick={copySelected} />
+        <Button size="small" variant="ghost" iconOnly icon={ClipboardPaste} title="Вставить блоки (Ctrl+V) — можно и в другой сценарий" onClick={pasteFromClipboard} />
         <Button size="small" icon={LayoutGrid} title="Расставить блоки автоматически" onClick={layout}>Упорядочить</Button>
         <Button size="small" icon={CalendarClock} title="Запуск по расписанию и по событиям"
           onClick={() => triggersDialog.open(scenario.id, state.meta.name || scenario.name)}>
@@ -374,6 +455,17 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
             </ReactFlow>
           </FlowContext.Provider>
           <IssuesPanel report={report} checking={checking} onSelect={selectNode} />
+          {searchOpen && (
+            <CanvasSearch
+              nodes={state.nodes}
+              descriptors={descriptors}
+              onPick={(nodeId) => {
+                selectNode(nodeId);
+                setSearchOpen(false);
+              }}
+              onClose={() => setSearchOpen(false)}
+            />
+          )}
         </div>
         <aside className="inspector" aria-label="Свойства">
           {selectedNode ? (
@@ -402,6 +494,67 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
       </div>
       {runner.element}
       {triggersDialog.element}
+    </div>
+  );
+}
+
+/** Поиск блока на схеме: по подписи, названию типа и кратким параметрам. */
+function CanvasSearch({ nodes, descriptors, onPick, onClose }: {
+  nodes: PepaNode[];
+  descriptors: Map<string, NodeTypeDescriptor>;
+  onPick: (nodeId: string) => void;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
+  const results = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+    return nodes
+      .map((n) => {
+        const definition = n.data.definition;
+        const descriptor = descriptors.get(definition.type);
+        const title = definition.label || descriptor?.title || definition.type;
+        const summary = nodeSummary(definition, descriptor);
+        const haystack = `${title} ${descriptor?.title ?? ""} ${summary} ${definition.type} ${definition.note ?? ""}`.toLowerCase();
+        return haystack.includes(q) ? { id: n.id, title, summary, type: descriptor?.title ?? definition.type } : null;
+      })
+      .filter((r): r is NonNullable<typeof r> => r !== null)
+      .slice(0, 12);
+  }, [descriptors, nodes, query]);
+
+  return (
+    <div className="canvas-search" role="search">
+      <input
+        className="input"
+        autoFocus
+        placeholder="Найти блок: подпись, тип, параметр…"
+        value={query}
+        onChange={(e) => {
+          setQuery(e.target.value);
+          setActive(0);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") onClose();
+          else if (e.key === "ArrowDown") setActive((i) => Math.min(i + 1, results.length - 1));
+          else if (e.key === "ArrowUp") setActive((i) => Math.max(i - 1, 0));
+          else if (e.key === "Enter" && results[active]) onPick(results[active].id);
+        }}
+        onBlur={() => setTimeout(onClose, 150)}
+      />
+      {query.trim() && (
+        <ul className="canvas-search-results">
+          {results.length === 0 && <li className="small muted">Ничего не найдено</li>}
+          {results.map((r, i) => (
+            <li key={r.id}>
+              <button type="button" className={i === active ? "active" : ""} onMouseDown={(e) => e.preventDefault()} onClick={() => onPick(r.id)}>
+                <strong className="truncate">{r.title}</strong>
+                <span className="small muted truncate">{r.summary ? `${r.type} · ${r.summary}` : r.type}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
