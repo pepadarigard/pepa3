@@ -22,6 +22,7 @@ public partial class MainWindow : Window
     private readonly PepaHost _host;
     private readonly bool _dark;
     private bool _closeConfirmed;
+    private bool _stopped;
     private bool _shown;
 
     public MainWindow(PepaHost host)
@@ -73,8 +74,20 @@ public partial class MainWindow : Window
         core.Navigate(_host.LaunchUrl.ToString());
     }
 
-    private bool IsOwnPage(string uri) =>
-        uri.StartsWith(_host.BaseUrl.ToString().TrimEnd('/'), StringComparison.OrdinalIgnoreCase);
+    private bool IsOwnPage(string uri)
+    {
+        var origin = _host.BaseUrl.ToString().TrimEnd('/');
+        // blob: — файлы, которые создаёт сама страница (экспорт сценария).
+        return uri.StartsWith(origin, StringComparison.OrdinalIgnoreCase) ||
+               uri.StartsWith("blob:" + origin, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Закрыть без вопросов (завершение сеанса Windows): движок остановится, остальное доделает восстановление.</summary>
+    public void CloseForSessionEnd()
+    {
+        _closeConfirmed = true;
+        Close();
+    }
 
     private void OnNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
     {
@@ -182,6 +195,14 @@ public partial class MainWindow : Window
         if (_closeConfirmed)
         {
             base.OnClosing(e);
+            if (!_stopped)
+            {
+                _stopped = true;
+                // Завершение сеанса: ждём движок недолго — незавершённые шаги разберёт восстановление.
+                // В пуле потоков: продолжения не должны возвращаться в заблокированный поток окна.
+                Task.Run(() => _host.StopAsync()).Wait(TimeSpan.FromSeconds(4));
+            }
+
             return;
         }
 
@@ -210,6 +231,7 @@ public partial class MainWindow : Window
         }
 
         _closeConfirmed = true;
+        _stopped = true;
         Hide();
         try
         {

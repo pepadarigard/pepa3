@@ -61,6 +61,7 @@ public partial class App : Application
         var window = new MainWindow(_host);
         MainWindow = window;
         window.Closed += (_, _) => Shutdown(0);
+        SessionEnding += (_, _) => window.CloseForSessionEnd();
         window.Show();
         ListenForActivation(activationName, window);
     }
