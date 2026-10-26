@@ -198,5 +198,21 @@ public sealed partial class SqliteStore
         ALTER TABLE tokens ADD COLUMN fork TEXT NULL;
         ALTER TABLE processes ADD COLUMN attention_token_id TEXT NULL;
         """,
+        // 5: место в очереди ресурса — у ветви (маркера), а не у процесса целиком.
+        """
+        CREATE TABLE resource_waiters_v5 (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            resource_key TEXT NOT NULL,
+            process_id   TEXT NOT NULL REFERENCES processes (id) ON DELETE CASCADE,
+            token_id     TEXT NOT NULL,
+            priority     INTEGER NOT NULL DEFAULT 0,
+            requested_at TEXT NOT NULL,
+            UNIQUE (resource_key, token_id)
+        );
+        INSERT INTO resource_waiters_v5 (id, resource_key, process_id, token_id, priority, requested_at)
+            SELECT id, resource_key, process_id, token_id, priority, requested_at FROM resource_waiters;
+        DROP TABLE resource_waiters;
+        ALTER TABLE resource_waiters_v5 RENAME TO resource_waiters;
+        """,
     ];
 }

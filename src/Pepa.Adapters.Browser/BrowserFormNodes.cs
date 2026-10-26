@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using Microsoft.Playwright;
 using Pepa.Adapters.FileSystem;
 using Pepa.Core;
@@ -507,23 +508,39 @@ public sealed class EvaluateNode(BrowserSessions sessions) : INodeExecutor
     }
 
     /// <summary>
-    /// Код пользователя — выражение или функция; переменные передаются аргументом (vars), а не вклеиваются в текст кода.
+    /// Странице передаются только переменные, которые код упоминает: vars.имя или, у функции со своим параметром,
+    /// v.имя для (v) => …. Если переменные нужны целиком (vars без «.имя», параметр-шаблон { … }) — все.
     /// </summary>
-    /// <summary>Странице передаются только переменные, которые код упоминает (vars.имя); при обращении к vars целиком — все.</summary>
     public static JsonObject UsedVariables(string script, JsonObject variables)
     {
-        if (System.Text.RegularExpressions.Regex.IsMatch(script, @"\bvars\b(?!\s*\.)"))
+        var name = "vars";
+        var declarations = 0;
+        if (LooksLikeFunction(script))
+        {
+            switch (FirstParameter(script))
+            {
+                case "":
+                    return variables;
+                case { } parameter:
+                    name = parameter;
+                    declarations = 1;
+                    break;
+            }
+        }
+
+        var escaped = Regex.Escape(name);
+        if (Regex.Matches(script, $@"(?<![\p{{L}}\p{{N}}_$.]){escaped}(?![\p{{L}}\p{{N}}_$])(?!\s*\.)").Count > declarations)
         {
             return variables;
         }
 
         var used = new JsonObject();
-        foreach (System.Text.RegularExpressions.Match match in System.Text.RegularExpressions.Regex.Matches(script, @"\bvars\s*\.\s*([\p{L}_$][\p{L}\p{N}_$]*)"))
+        foreach (Match match in Regex.Matches(script, $@"(?<![\p{{L}}\p{{N}}_$.]){escaped}\s*\.\s*([\p{{L}}_$][\p{{L}}\p{{N}}_$]*)"))
         {
-            var name = match.Groups[1].Value;
-            if (!used.ContainsKey(name) && variables.TryGetPropertyValue(name, out var value))
+            var variable = match.Groups[1].Value;
+            if (!used.ContainsKey(variable) && variables.TryGetPropertyValue(variable, out var value))
             {
-                used[name] = value?.DeepClone();
+                used[variable] = value?.DeepClone();
             }
         }
 
@@ -542,13 +559,56 @@ public sealed class EvaluateNode(BrowserSessions sessions) : INodeExecutor
         _ => node.ToJsonString(),
     };
 
-    internal static string Wrap(string script) =>
-        $"(vars) => {{ const __pepa = (\n{script}\n); return typeof __pepa === 'function' ? __pepa(vars) : __pepa; }}";
+    /// <summary>
+    /// Код пользователя на странице; переменные передаются аргументом (vars), а не вклеиваются в текст кода. Функцию
+    /// (() => …, async () => …, function (…) { … }) вызываем с vars; выражение или несколько инструкций выполняем как написаны
+    /// («….length;», «const n = …; n * 2» — как и раньше) с vars в области видимости.
+    /// </summary>
+    internal static string Wrap(string script) => LooksLikeFunction(script)
+        ? $"async (vars) => {{ {Clean} const __pepa = (\n{script}\n); return __clean(await (typeof __pepa === 'function' ? __pepa(vars) : __pepa), 0); }}"
+        : $"async (vars) => {{ {Clean} const __pepa = eval({JsonSerializer.Serialize(script)}); return __clean(await (typeof __pepa === 'function' ? __pepa(vars) : __pepa), 0); }}";
+
+    /// <summary>NaN и бесконечность в результате — пустое значение: в JSON их не записать, а код уже выполнен.</summary>
+    private const string Clean =
+        "const __clean = (x, d) => typeof x === 'number' ? (Number.isFinite(x) ? x : null) " +
+        ": x === null || typeof x !== 'object' || d > 30 ? x " +
+        ": Array.isArray(x) ? x.map(i => __clean(i, d + 1)) " +
+        ": Object.getPrototypeOf(x) === Object.prototype ? Object.fromEntries(Object.entries(x).map(([k, v]) => [k, __clean(v, d + 1)])) : x;";
+
+    /// <summary>
+    /// Проверка разбора кода без выполнения: ошибка в записи кода — значит, на странице ничего не выполнялось
+    /// (в отличие от ошибки во время выполнения, после которой страница могла уже измениться).
+    /// </summary>
+    private const string SyntaxCheck =
+        "(src) => { try { new Function(src); return null; } catch (e) { return e instanceof SyntaxError ? String(e.message) : null; } }";
+
+    private static string ParsedSource(string script) => LooksLikeFunction(script) ? $"return (\n{script}\n);" : script;
+
+    private static bool LooksLikeFunction(string script) =>
+        Regex.IsMatch(script.TrimStart(), @"^(async\b|function\b|\([^()]*\)\s*=>|[\p{L}_$][\p{L}\p{N}_$]*\s*=>)");
+
+    /// <summary>Первый параметр функции: null — параметров нет, "" — не простое имя (шаблон { … } или [ … ]).</summary>
+    private static string? FirstParameter(string script)
+    {
+        var text = script.TrimStart();
+        var list = Regex.Match(text, @"^(?:async\s*)?(?:function\b[^(]*)?\(([^)]*)\)\s*(?:=>|\{)") is { Success: true } wrapped
+            ? wrapped.Groups[1].Value
+            : Regex.Match(text, @"^(?:async\s+)?([\p{L}_$][\p{L}\p{N}_$]*)\s*=>") is { Success: true } single
+                ? single.Groups[1].Value
+                : null;
+        var first = list?.Split(',')[0].Trim();
+        return string.IsNullOrEmpty(first) ? null : Regex.IsMatch(first, @"^[\p{L}_$][\p{L}\p{N}_$]*$") ? first : "";
+    }
 
     public ValueTask<NodeResult> ExecuteAsync(NodeExecutionContext context, CancellationToken cancellationToken) =>
         BrowserNodes.Run(context, sessions, cancellationToken, async (_, page) =>
         {
             var script = context.RequireString("script");
+            if (await page.EvaluateAsync<string?>(SyntaxCheck, ParsedSource(script)) is { } syntaxError)
+            {
+                return NodeResult.Fail($"В коде JavaScript ошибка записи — код не выполнялся: {syntaxError}.", retryable: false);
+            }
+
             var result = await page.EvaluateAsync<JsonElement?>(Wrap(script), Plain(UsedVariables(script, context.Variables)));
             var value = result is { } element ? JsonSerializer.SerializeToNode(element) : null;
             var updates = new Dictionary<string, JsonNode?>();

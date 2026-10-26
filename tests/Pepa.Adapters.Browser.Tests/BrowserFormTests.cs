@@ -108,8 +108,49 @@ public sealed class BrowserFormTests
         {
             Id = "e", Type = EvaluateNode.TypeName, Config = new JsonObject { ["script"] = "'{{ vars.message }}'.length" },
         }).Select(i => i.Field));
-        Assert.Equal(new JsonObject { ["a"] = 1 }.ToJsonString(),
-            EvaluateNode.UsedVariables("vars.a + 1", new JsonObject { ["a"] = 1, ["secret"] = "x" }).ToJsonString());
+        var all = new JsonObject { ["a"] = 1, ["secret"] = "x" };
+        Assert.Equal("""{"a":1}""", EvaluateNode.UsedVariables("vars.a + 1", all).ToJsonString());
+        Assert.Equal("""{"a":1}""", EvaluateNode.UsedVariables("(v) => v.a + 1", all).ToJsonString());
+        Assert.Equal("""{"a":1}""", EvaluateNode.UsedVariables("function (vars) { return vars.a; }", all).ToJsonString());
+        Assert.Equal("""{"a":1}""", EvaluateNode.UsedVariables("x => x.a", all).ToJsonString());
+        Assert.Equal(all.ToJsonString(), EvaluateNode.UsedVariables("JSON.stringify(vars)", all).ToJsonString());
+        Assert.Equal(all.ToJsonString(), EvaluateNode.UsedVariables("(v) => Object.keys(v)", all).ToJsonString());
+        Assert.Equal(all.ToJsonString(), EvaluateNode.UsedVariables("({ a }) => a", all).ToJsonString());
+        Assert.Equal("{}", EvaluateNode.UsedVariables("document.vars.a", all).ToJsonString());
+    }
+
+    [Fact]
+    public async Task Scripts_written_as_statements_work_and_a_syntax_error_is_a_clear_failure()
+    {
+        TestBrowser.RequireBrowser();
+        await using var f = await BrowserFixture.CreateAsync();
+        // Так писали код до передачи переменных данными — он должен работать по-прежнему.
+        var id = await f.H.RunAsync(new ScenarioBuilder("Инструкции")
+            .Variable("count", VariableType.Number, JsonValue.Create(3))
+            .Variable("a", VariableType.Any).Variable("b", VariableType.Any).Variable("c", VariableType.Any).Variable("d", VariableType.Any)
+            .Variable("e", VariableType.Any)
+            .Node("start", "start")
+            .Node("open", "browser.open", BrowserFixture.OpenConfig(f.Site.Url("/controls")))
+            .Node("a", "browser.evaluate", new { script = "document.title.length > 0;", saveTo = "a" })
+            .Node("b", "browser.evaluate", new { script = "const n = vars.count; n * 2", saveTo = "b" })
+            .Node("c", "browser.evaluate", new { script = "function (v) { return v.count + 1; }", saveTo = "c" })
+            .Node("d", "browser.evaluate", new { script = "// комментарий\nvars.count * 10", saveTo = "d" })
+            .Node("e", "browser.evaluate", new { script = "async () => [0 / 0, 1]", saveTo = "e" })
+            .Node("end", "end")
+            .Chain("start", "open", "a", "b", "c", "d", "e", "end")
+            .Build());
+        var done = await f.H.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.True(done.Variables["a"]!.GetValue<bool>());
+        Assert.Equal(6, done.Variables["b"]!.GetValue<double>());
+        Assert.Equal(4, done.Variables["c"]!.GetValue<double>());
+        Assert.Equal(30, done.Variables["d"]!.GetValue<double>());
+        Assert.Equal("[null,1]", done.Variables["e"]!.ToJsonString());
+
+        // Ошибка в записи кода — код не выполнялся: обычная ошибка шага, а не «неизвестно, выполнился ли».
+        var broken = await f.H.RunAsync(Single(f, "browser.evaluate", new { script = "window.ran = true; )(" }));
+        var stopped = await f.H.WaitForStatusAsync(broken, ProcessStatus.NeedsAttention);
+        Assert.Equal(AttentionKind.StepFailed, stopped.Attention);
+        Assert.Contains("код не выполнялся", stopped.StatusMessage);
     }
 
     [Fact]

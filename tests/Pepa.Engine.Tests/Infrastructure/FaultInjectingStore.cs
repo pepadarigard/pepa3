@@ -96,6 +96,7 @@ public sealed class FaultInjectingStore(IPepaStore inner) : IPepaStore
         public Task<IReadOnlyList<ResourceWaiterRecord>> GetAllWaitersAsync() => inner.GetAllWaitersAsync();
         public Task AddWaiterAsync(ResourceWaiterRecord waiter) => inner.AddWaiterAsync(waiter);
         public Task RemoveWaiterAsync(string resourceKey, string processId) => inner.RemoveWaiterAsync(resourceKey, processId);
+        public Task RemoveTokenWaiterAsync(string resourceKey, string tokenId) => inner.RemoveTokenWaiterAsync(resourceKey, tokenId);
         public Task RemoveWaitersOfProcessAsync(string processId) => inner.RemoveWaitersOfProcessAsync(processId);
         public Task SaveTriggerAsync(TriggerRecord trigger) => inner.SaveTriggerAsync(trigger);
         public Task<bool> DeleteTriggerAsync(string id) => inner.DeleteTriggerAsync(id);

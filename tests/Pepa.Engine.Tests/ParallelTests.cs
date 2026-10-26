@@ -155,6 +155,92 @@ public sealed class ParallelTests
         Assert.Contains(await h.Store.GetJournalAsync(parent), j => j.Message.Contains("Вызванный сценарий", StringComparison.Ordinal));
     }
 
+    private static ScenarioDefinition Holder() => new ScenarioBuilder("Держатель")
+        .Node("start", "start")
+        .Node("lock", "resource.acquire", new { key = "R" })
+        .Node("hold", "event.wait", new { source = "manual", correlationKey = "go" })
+        .Node("free", "resource.release", new { key = "R" })
+        .Node("end", "end")
+        .Edge("start", "lock").Edge("lock", "hold").Edge("hold", "free", Ports.Event).Edge("free", "end").Build();
+
+    private static ScenarioDefinition Queued(string name) => new ScenarioBuilder(name)
+        .Node("start", "start")
+        .Node("lock", "resource.acquire", new { key = "R" })
+        .Node("act", "test.action", new { key = name })
+        .Node("end", "end")
+        .Chain("start", "lock", "act", "end").Build();
+
+    [Fact]
+    public async Task Resource_goes_to_the_first_in_queue_even_while_its_other_branch_is_working()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var holder = await h.RunAsync(Holder());
+        await h.WaitForAsync(holder, _ => Describe(h, holder).Contains("hold:Waiting/Event", StringComparison.Ordinal));
+
+        h.World.Block("slow");
+        var first = await h.RunAsync(new ScenarioBuilder("Первый")
+            .Node("start", "start")
+            .Node("split", "parallel")
+            .Node("lock", "resource.acquire", new { key = "R" })
+            .Node("use", "test.action", new { key = "first-use" })
+            .Node("pre", "wait", new { amount = 5, unit = "seconds" })
+            .Node("slow", "test.action", new { key = "slow" })
+            .Node("join", "join")
+            .Node("end", "end")
+            .Edge("start", "split").Edge("split", "lock", "b1").Edge("split", "pre", "b2")
+            .Edge("lock", "use").Edge("use", "join").Edge("pre", "slow").Edge("slow", "join").Edge("join", "end")
+            .Build());
+        await h.WaitForAsync(first, _ => Describe(h, first).Contains("lock:Waiting/Resource", StringComparison.Ordinal));
+        var second = await h.RunAsync(Queued("second"));
+        await h.WaitForAsync(second, p => p.Status == ProcessStatus.Waiting);
+
+        // У первого другая ветвь выполняет долгое действие — процесс «выполняется», а не «ждёт».
+        h.Time.Advance(TimeSpan.FromSeconds(6));
+        await h.World.EnteredAsync("slow");
+        Assert.Equal(ProcessStatus.Running, (await h.ProcessAsync(first)).Status);
+
+        await h.Engine.PublishEventAsync(new EventInput { Source = "manual", Type = "x", CorrelationKey = "go" });
+        await h.WaitForStatusAsync(holder, ProcessStatus.Completed);
+        Assert.Equal(first, (await h.Store.ListResourcesAsync()).Single(x => x.Key == "R").HolderProcessId);
+        h.World.Release("slow");
+        await h.WaitForStatusAsync(first, ProcessStatus.Completed);
+        Assert.Equal(1, h.World.Executions("first-use"));
+    }
+
+    [Fact]
+    public async Task Timeout_of_one_branch_keeps_the_queue_place_of_the_other()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var holder = await h.RunAsync(Holder());
+        await h.WaitForAsync(holder, _ => Describe(h, holder).Contains("hold:Waiting/Event", StringComparison.Ordinal));
+
+        var first = await h.RunAsync(new ScenarioBuilder("Первый")
+            .Node("start", "start")
+            .Node("split", "parallel")
+            .Node("l1", "resource.acquire", new { key = "R", timeoutSeconds = 60 })
+            .Node("l2", "resource.acquire", new { key = "R" })
+            .Node("use", "test.action", new { key = "first-use" })
+            .Node("join", "join")
+            .Node("end", "end")
+            .Edge("start", "split").Edge("split", "l1", "b1").Edge("split", "l2", "b2")
+            .Edge("l1", "join").Edge("l1", "join", Ports.Timeout).Edge("l2", "use").Edge("use", "join").Edge("join", "end")
+            .Build());
+        await h.WaitForAsync(first, _ => h.Store.GetTokensAsync(first).Result.Count(t => t.WaitKind == WaitKind.Resource) == 2);
+        var second = await h.RunAsync(Queued("second"));
+        await h.WaitForAsync(second, p => p.Status == ProcessStatus.Waiting);
+
+        // Ветвь 1 не дождалась ресурса — место ветви 2 в очереди остаётся.
+        await h.WaitForAsync(first, _ => Describe(h, first).Contains("join:Waiting/Join", StringComparison.Ordinal), advance: TimeSpan.FromSeconds(10));
+        h.World.Block("first-use");
+        await h.Engine.PublishEventAsync(new EventInput { Source = "manual", Type = "x", CorrelationKey = "go" });
+        await h.World.EnteredAsync("first-use");
+        Assert.Equal(first, (await h.Store.ListResourcesAsync()).Single(x => x.Key == "R").HolderProcessId);
+        Assert.Equal(0, h.World.Executions("second"));
+        h.World.Release("first-use");
+        await h.WaitForStatusAsync(first, ProcessStatus.Completed);
+        Assert.Equal(1, h.World.Executions("first-use"));
+    }
+
     [Fact]
     public async Task Nested_parallel_sections_join_in_order()
     {

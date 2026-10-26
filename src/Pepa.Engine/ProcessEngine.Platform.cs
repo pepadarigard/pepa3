@@ -119,7 +119,7 @@ public sealed partial class ProcessEngine
                 {
                     // Свободен — но если в очереди уже есть активные ожидающие, честно встаём за ними.
                     var waiters = await write.GetWaitersAsync(key);
-                    if (!waiters.Any(w => w.ProcessId != process.Id && w.ProcessStatus == ProcessStatus.Waiting))
+                    if (!waiters.Any(w => w.ProcessId != process.Id && IsActiveWaiter(w)))
                     {
                         await write.UpsertResourceAsync(new ResourceRecord
                         {
@@ -445,7 +445,7 @@ public sealed partial class ProcessEngine
             if (resource is null || resource.HolderProcessId is null)
             {
                 var first = (await write.GetWaitersAsync(key))
-                    .FirstOrDefault(w => w.ProcessId == process.Id || w.ProcessStatus == ProcessStatus.Waiting);
+                    .FirstOrDefault(w => w.ProcessId == process.Id || IsActiveWaiter(w));
                 if (first is null || first.ProcessId == process.Id)
                 {
                     await write.UpsertResourceAsync(new ResourceRecord
@@ -463,7 +463,7 @@ public sealed partial class ProcessEngine
 
             if (token.WakeAt is { } wakeAt && wakeAt <= now)
             {
-                await write.RemoveWaiterAsync(key, process.Id);
+                await write.RemoveTokenWaiterAsync(key, token.Id);
                 return NodeResult.Ok(Ports.Timeout, $"Ресурс «{key}» не освободился до {FormatLocal(wakeAt)} — тайм-аут.");
             }
 
@@ -476,7 +476,7 @@ public sealed partial class ProcessEngine
     /// <summary>Освободить ресурс и сразу передать первому в очереди активному процессу. Возвращает получателя.</summary>
     private static async Task<string?> ReleaseAndGrantAsync(IStoreWrite write, ResourceRecord resource, DateTimeOffset now)
     {
-        var next = (await write.GetWaitersAsync(resource.Key)).FirstOrDefault(w => w.ProcessStatus == ProcessStatus.Waiting);
+        var next = (await write.GetWaitersAsync(resource.Key)).FirstOrDefault(IsActiveWaiter);
         await write.UpsertResourceAsync(resource with
         {
             HolderProcessId = next?.ProcessId,
@@ -490,6 +490,12 @@ public sealed partial class ProcessEngine
 
         return next?.ProcessId;
     }
+
+    /// <summary>
+    /// Ожидающий, которому можно отдать ресурс: процесс идёт (с параллельными ветвями он «выполняется», пока другая ветвь
+    /// работает) или ждёт. Остановленные (пауза, решение пользователя) очередь не задерживают, но место в ней сохраняют.
+    /// </summary>
+    private static bool IsActiveWaiter(ResourceWaiterRecord waiter) => waiter.ProcessStatus is ProcessStatus.Waiting or ProcessStatus.Running;
 
     /// <summary>
     /// Ждёт ли держатель — по цепочке «ждёт ресурс у…» и «ждёт завершения вызванного сценария…» — этот процесс.
@@ -681,7 +687,7 @@ public sealed partial class ProcessEngine
 
                 break;
             case WaitKind.Resource when token.WaitRef is { } key:
-                await write.RemoveWaiterAsync(key, processId);
+                await write.RemoveTokenWaiterAsync(key, token.Id);
                 break;
         }
     }

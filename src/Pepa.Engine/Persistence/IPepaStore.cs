@@ -110,7 +110,11 @@ public interface IStoreWrite : IAsyncDisposable
     Task<IReadOnlyList<ResourceWaiterRecord>> GetWaitersAsync(string resourceKey);
     Task<IReadOnlyList<ResourceWaiterRecord>> GetAllWaitersAsync();
     Task AddWaiterAsync(ResourceWaiterRecord waiter);
+    /// <summary>Все места процесса в очереди ресурса (ресурс достался процессу — его получили все его ветви).</summary>
     Task RemoveWaiterAsync(string resourceKey, string processId);
+
+    /// <summary>Место одной ветви (тайм-аут, «Пропустить», «Повторить») — места других ветвей остаются.</summary>
+    Task RemoveTokenWaiterAsync(string resourceKey, string tokenId);
     Task RemoveWaitersOfProcessAsync(string processId);
 
     // Триггеры

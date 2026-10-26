@@ -268,7 +268,8 @@ public sealed class UiaDesktop : IDesktop, IDisposable
             var handle = Handle(window);
             var at = NativeMethods.WindowFromPoint(new NativeMethods.Point { X = x, Y = y });
             var root = at == IntPtr.Zero ? IntPtr.Zero : NativeMethods.GetAncestor(at, NativeMethods.GaRoot);
-            if (root != handle && NativeMethods.GetAncestor(root, NativeMethods.GaRootOwner) != handle)
+            // Только само окно: даже окно той же программы (диалог, панель) в этой точке — не то, куда просили нажать.
+            if (root != handle)
             {
                 throw new DesktopInputBlockedException($"В точке ({x}, {y}) сейчас другое окно — мышью нажать нельзя.");
             }
@@ -289,18 +290,38 @@ public sealed class UiaDesktop : IDesktop, IDisposable
         RunVoidAsync(() =>
         {
             var sent = 0;
+            RequireForeground(window);
+            var focus = FocusOf(Handle(window));
+            var refocus = false;
             foreach (var ch in text.ReplaceLineEndings("\n"))
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                // Перед каждым символом: окно всё ещё впереди (пользователь мог переключиться на другое).
+                // Перед каждым символом: окно всё ещё впереди (пользователь мог переключиться, программа — открыть диалог)
+                // и ввод там же, где начинался (фокус не перешёл на другое поле).
                 RequireForeground(window, partial: sent > 0);
+                if (refocus)
+                {
+                    // Tab и Enter из текста переводят фокус сами — это задумано: дальше сверяем с новым полем.
+                    Thread.Sleep(Math.Max(0, 80 - delayMs));
+                    focus = FocusOf(Handle(window));
+                    refocus = false;
+                }
+                else if (focus != IntPtr.Zero && FocusOf(Handle(window)) != focus)
+                {
+                    throw new DesktopInputBlockedException(
+                        $"Во время ввода в окне «{window.Info.Title}» фокус перешёл на другое поле — Pepa остановилась, чтобы не печатать не туда.",
+                        partial: sent > 0);
+                }
+
                 switch (ch)
                 {
                     case '\n':
                         SendInput.Keys([0x0D]);
+                        refocus = true;
                         break;
                     case '\t':
                         SendInput.Keys([0x09]);
+                        refocus = true;
                         break;
                     default:
                         SendInput.Unicode(ch);
@@ -376,7 +397,15 @@ public sealed class UiaDesktop : IDesktop, IDisposable
 
     // ───────────── Передний план и права ─────────────
 
-    /// <summary>Окно (или его собственный диалог) на переднем плане.</summary>
+    /// <summary>Поле с фокусом ввода в потоке окна (0 — неизвестно: у программы нет отдельных окон-полей).</summary>
+    private static IntPtr FocusOf(IntPtr handle)
+    {
+        var thread = NativeMethods.GetWindowThreadProcessId(handle, out _);
+        var info = new NativeMethods.GuiThreadInfo { Size = (uint)Marshal.SizeOf<NativeMethods.GuiThreadInfo>() };
+        return thread != 0 && NativeMethods.GetGUIThreadInfo(thread, ref info) ? info.Focus : IntPtr.Zero;
+    }
+
+    /// <summary>Окно (или его собственный диалог) на переднем плане — для вывода окна вперёд.</summary>
     private static bool OwnsForeground(IntPtr handle)
     {
         var foreground = NativeMethods.GetForegroundWindow();
@@ -396,6 +425,17 @@ public sealed class UiaDesktop : IDesktop, IDisposable
     private void RequireForeground(DesktopWindow window, bool partial = false)
     {
         var handle = Handle(window);
+        var foreground = NativeMethods.GetForegroundWindow();
+        if (foreground != IntPtr.Zero && foreground != handle && NativeMethods.GetAncestor(foreground, NativeMethods.GaRoot) != handle &&
+            NativeMethods.GetAncestor(foreground, NativeMethods.GaRootOwner) == handle)
+        {
+            // Ввод — только в то окно, о котором шаг: диалог программы («Сохранить?») мог открыться сам, и буква или Enter
+            // в нём выбрали бы ответ за пользователя.
+            throw new DesktopInputBlockedException(
+                $"Поверх окна «{window.Info.Title}» открыто другое окно этой программы (например, вопрос или диалог). Чтобы не ответить " +
+                "в нём за вас, Pepa остановилась. Закройте его или добавьте в сценарий шаг для этого окна.", partial);
+        }
+
         if (!OwnsForeground(handle))
         {
             throw new DesktopInputBlockedException(
@@ -880,6 +920,24 @@ internal static partial class NativeMethods
         public int Right;
         public int Bottom;
     }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct GuiThreadInfo
+    {
+        public uint Size;
+        public uint Flags;
+        public IntPtr Active;
+        public IntPtr Focus;
+        public IntPtr Capture;
+        public IntPtr MenuOwner;
+        public IntPtr MoveSize;
+        public IntPtr Caret;
+        public Rect CaretRect;
+    }
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool GetGUIThreadInfo(uint threadId, ref GuiThreadInfo info);
 
     [LibraryImport("user32.dll", SetLastError = true)]
     public static partial uint SendInput(uint count, [In] Input[] inputs, int size);

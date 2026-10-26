@@ -314,7 +314,7 @@ internal sealed class SqliteWrite(SqliteConnection connection, SqliteTransaction
         RunAsync("""
                  INSERT INTO resource_waiters (resource_key, process_id, token_id, priority, requested_at)
                  VALUES ($key, $process, $token, $priority, $requested)
-                 ON CONFLICT (resource_key, process_id) DO NOTHING;
+                 ON CONFLICT (resource_key, token_id) DO NOTHING;
                  """, c =>
         {
             c.Parameters.AddWithValue("$key", waiter.ResourceKey);
@@ -329,6 +329,13 @@ internal sealed class SqliteWrite(SqliteConnection connection, SqliteTransaction
         {
             c.Parameters.AddWithValue("$k", resourceKey);
             c.Parameters.AddWithValue("$p", processId);
+        });
+
+    public Task RemoveTokenWaiterAsync(string resourceKey, string tokenId) =>
+        RunAsync("DELETE FROM resource_waiters WHERE resource_key = $k AND token_id = $t;", c =>
+        {
+            c.Parameters.AddWithValue("$k", resourceKey);
+            c.Parameters.AddWithValue("$t", tokenId);
         });
 
     public Task RemoveWaitersOfProcessAsync(string processId) =>
