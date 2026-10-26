@@ -188,10 +188,12 @@ public sealed class DesktopTests
         await h.IdleAsync(TimeSpan.FromSeconds(2));
         Assert.Single(d.Actions, a => a == "type A");
 
-        // Первый закончил — ресурс освобождается, второй печатает.
+        // Первый закончил — ресурс освобождается, второй печатает. (Перемотка времени может успеть завершить и
+        // ожидание второго, поэтому ждём сам факт ввода, а не состояние «ждёт».)
         await h.WaitForStatusAsync(first, ProcessStatus.Completed, advance: TimeSpan.FromSeconds(5));
-        await h.WaitForStatusAsync(second, ProcessStatus.Waiting);
-        Assert.Equal(2, d.Actions.Count(a => a == "type A"));
+        await h.WaitForAsync(second, _ => d.Actions.Count(a => a == "type A") == 2);
+        var typed = d.Actions.Where(a => a.StartsWith("type", StringComparison.Ordinal)).ToList();
+        Assert.Equal(["type A", "type A"], typed);
     }
 
     [Fact]
