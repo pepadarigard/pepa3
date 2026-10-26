@@ -1916,6 +1916,9 @@ pre.json {
 /* ИИ-помощник: списки вопросов и ошибок в подсказках */
 .assistant-list { margin: 6px 0 0; padding-left: 18px; }
 .assistant-list li { margin: 2px 0; }
+.assistant-steps { margin: 0; padding-left: 22px; display: grid; gap: 6px; }
+.assistant-steps .link-button { font-weight: 600; }
+.segmented button svg { vertical-align: -2px; }
 
 /* ───────────── Группы блоков ───────────── */
 

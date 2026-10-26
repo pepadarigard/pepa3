@@ -22,6 +22,7 @@ internal sealed class ScenarioPrompt
         BlockTypes = registry.Descriptors.Where(d => !d.IsStart).Select(d => d.Type).Order(StringComparer.Ordinal).ToList();
         System = BuildSystem();
         Schema = BuildSchema();
+        ExplainSchema = BuildExplainSchema();
     }
 
     /// <summary>Типы блоков, которые можно ставить (кроме «Начала» — оно в сценарии уже есть).</summary>
@@ -31,8 +32,16 @@ internal sealed class ScenarioPrompt
 
     public IReadOnlyDictionary<string, JsonElement> Schema { get; }
 
+    /// <summary>Схема ответа на «объясни сценарий».</summary>
+    public IReadOnlyDictionary<string, JsonElement> ExplainSchema { get; }
+
     public static string FirstMessage(AssistantRequest request)
     {
+        if (request.Current is { } current)
+        {
+            return EditMessage(request, current);
+        }
+
         var text = new StringBuilder();
         text.AppendLine("Составь блоки сценария Pepa по описанию пользователя.");
         AppendVariables(text, request.ExistingVariables);
@@ -43,16 +52,74 @@ internal sealed class ScenarioPrompt
         return text.ToString();
     }
 
+    /// <summary>Правка существующего сценария: сценарий в формате ответа и просьба пользователя.</summary>
+    private static string EditMessage(AssistantRequest request, ScenarioDefinition current)
+    {
+        var text = new StringBuilder();
+        text.AppendLine("Измени сценарий Pepa по просьбе пользователя и верни ПОЛНЫЙ сценарий в формате ответа: все блоки (кроме " +
+                        "«Начала») и все связи (кроме связи из «Начала»), а не только изменения.");
+        text.AppendLine("- Что не просили менять — оставь как есть: те же id, типы, подписи, заметки и поля.");
+        text.AppendLine("- У новых блоков — новые id, которых в сценарии нет. Удаляй блоки, только если об этом просят или без этого не обойтись.");
+        if (EntryOf(current) is { } entry)
+        {
+            text.AppendLine($"- Сейчас «Начало» ведёт к блоку «{entry}». Первый блок должен остаться без входящих связей — к нему Pepa подключит «Начало».");
+        }
+
+        text.AppendLine("- В summary — что именно изменено. В variables — только новые переменные.");
+        AppendVariables(text, request.ExistingVariables);
+        text.AppendLine();
+        text.AppendLine("<сценарий>");
+        text.AppendLine(ScenarioJson(current));
+        text.AppendLine("</сценарий>");
+        text.AppendLine();
+        text.AppendLine("<просьба>");
+        text.AppendLine(request.Description.Trim());
+        text.AppendLine("</просьба>");
+        return text.ToString();
+    }
+
+    /// <summary>Объяснить сценарий простыми словами — без правок.</summary>
+    public static string ExplainMessage(ScenarioDefinition scenario)
+    {
+        var text = new StringBuilder();
+        text.AppendLine("Объясни пользователю простыми словами, что делает этот сценарий Pepa. Ничего не меняй и не предлагай новых блоков.");
+        text.AppendLine("- summary — 2–4 предложения: зачем сценарий и как он идёт в целом.");
+        text.AppendLine("- steps — по одному пояснению на блок в порядке выполнения: block — id блока из сценария, text — что он делает и " +
+                        "куда процесс идёт дальше (особенно при ошибке, тайм-ауте или ответе «нет»).");
+        text.AppendLine("- cautions — что стоит проверить: неподключённые исходы, заглушки и неизвестные значения, рискованные места " +
+                        "(например, действие без проверки результата). Может быть пусто.");
+        AppendVariables(text, scenario.Variables);
+        text.AppendLine();
+        text.AppendLine("<сценарий>");
+        text.AppendLine(ScenarioJson(scenario));
+        text.AppendLine("</сценарий>");
+        return text.ToString();
+    }
+
+    /// <summary>Сценарий в формате ответа: блоки с полями и связи; значения переменных не передаются.</summary>
+    internal static string ScenarioJson(ScenarioDefinition scenario) =>
+        JsonSerializer.Serialize(ToDraft(scenario) with { Variables = [] }, DraftSerializer.Options);
+
+    /// <summary>Блок, к которому ведёт «Начало».</summary>
+    internal static string? EntryOf(ScenarioDefinition scenario)
+    {
+        var start = scenario.Nodes.FirstOrDefault(n => n.Type == "start")?.Id;
+        return start is null ? null : scenario.Edges.FirstOrDefault(e => e.Source == start)?.Target;
+    }
+
     public static string RepairMessage(AssistantRequest request, string previousJson, IReadOnlyList<string> problems)
     {
         var text = new StringBuilder();
-        text.AppendLine("Ты составил черновик по описанию пользователя, но проверка Pepa нашла в нём ошибки. Исправь их и верни " +
-                        "полный исправленный черновик в том же формате (не только изменения). Остальное оставь как было.");
+        text.AppendLine(request.Current is null
+            ? "Ты составил черновик по описанию пользователя, но проверка Pepa нашла в нём ошибки. Исправь их и верни " +
+              "полный исправленный черновик в том же формате (не только изменения). Остальное оставь как было."
+            : "Ты изменил сценарий по просьбе пользователя, но проверка Pepa нашла в нём ошибки. Исправь их и верни полный " +
+              "исправленный сценарий в том же формате (не только изменения). Остальное оставь как было.");
         AppendVariables(text, request.ExistingVariables);
         text.AppendLine();
-        text.AppendLine("<описание>");
+        text.AppendLine(request.Current is null ? "<описание>" : "<просьба>");
         text.AppendLine(request.Description.Trim());
-        text.AppendLine("</описание>");
+        text.AppendLine(request.Current is null ? "</описание>" : "</просьба>");
         text.AppendLine();
         text.AppendLine("<черновик>");
         text.AppendLine(previousJson.Trim());
@@ -308,6 +375,31 @@ internal sealed class ScenarioPrompt
             })),
             ["links"] = Arr(Obj(new JsonObject { ["from"] = Str(), ["port"] = Str(), ["to"] = Str() })),
         });
+        return root.ToDictionary(p => p.Key, p => JsonSerializer.SerializeToElement(p.Value));
+    }
+
+    private static Dictionary<string, JsonElement> BuildExplainSchema()
+    {
+        static JsonObject Str() => new() { ["type"] = "string" };
+        var step = new JsonObject
+        {
+            ["type"] = "object",
+            ["additionalProperties"] = false,
+            ["required"] = new JsonArray("block", "text"),
+            ["properties"] = new JsonObject { ["block"] = Str(), ["text"] = Str() },
+        };
+        var root = new JsonObject
+        {
+            ["type"] = "object",
+            ["additionalProperties"] = false,
+            ["required"] = new JsonArray("summary", "steps", "cautions"),
+            ["properties"] = new JsonObject
+            {
+                ["summary"] = Str(),
+                ["steps"] = new JsonObject { ["type"] = "array", ["items"] = step },
+                ["cautions"] = new JsonObject { ["type"] = "array", ["items"] = Str() },
+            },
+        };
         return root.ToDictionary(p => p.Key, p => JsonSerializer.SerializeToElement(p.Value));
     }
 }

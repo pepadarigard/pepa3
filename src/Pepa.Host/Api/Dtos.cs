@@ -258,7 +258,17 @@ public sealed record AssistantStatusDto(bool Configured, string? KeyHint, string
 
 public sealed record AssistantKeyRequest(string? ApiKey);
 
-public sealed record AssistantDraftRequest(string? Description, IReadOnlyList<VariableDefinition>? Variables);
+/// <param name="Current">Сценарий, который нужно изменить по описанию; null — составить новые блоки.</param>
+public sealed record AssistantDraftRequest(string? Description, IReadOnlyList<VariableDefinition>? Variables, ScenarioDefinition? Current = null);
+
+public sealed record AssistantExplainRequest(ScenarioDefinition? Scenario);
+
+/// <summary>Объяснение сценария: в целом, по блокам и что проверить.</summary>
+public sealed record AssistantExplanationDto(
+    string Summary,
+    IReadOnlyList<Assistant.ExplainedBlock> Steps,
+    IReadOnlyList<string> Cautions,
+    Assistant.AssistantUsage Usage);
 
 /// <summary>Черновик блоков для вставки в схему (в том же виде, что скопированные блоки).</summary>
 public sealed record AssistantDraftDto(

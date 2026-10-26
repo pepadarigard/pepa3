@@ -194,6 +194,97 @@ public sealed class ScenarioAssistantTests : IDisposable
         Assert.Contains("Число из формы", UserText(_api.Requests.Single().Body!));
     }
 
+    /// <summary>Сценарий из черновика ValidDraft, уже стоящий на схеме: «Начало» → check → …</summary>
+    private static ScenarioDefinition Current() => new()
+    {
+        Name = "Проверка числа",
+        Variables =
+        [
+            new VariableDefinition { Name = "count", Type = VariableType.Number, Description = "Сколько", IsInput = true, Default = JsonValue.Create(777123) },
+        ],
+        Nodes =
+        [
+            new NodeDefinition { Id = "start", Type = "start", Position = new NodePosition(0, 0) },
+            new NodeDefinition { Id = "check", Type = "condition", Position = new NodePosition(300, 0), Config = new JsonObject { ["expression"] = "vars.count > 2" } },
+            new NodeDefinition { Id = "many", Type = "log", Position = new NodePosition(600, 0), Config = new JsonObject { ["message"] = "Много", ["level"] = "info" } },
+            new NodeDefinition { Id = "few", Type = "log", Position = new NodePosition(600, 150), Config = new JsonObject { ["message"] = "Мало", ["level"] = "info" } },
+            new NodeDefinition { Id = "done", Type = "end", Position = new NodePosition(900, 0), Config = new JsonObject { ["outcome"] = "success" } },
+            new NodeDefinition { Id = "small", Type = "end", Position = new NodePosition(900, 150), Config = new JsonObject { ["outcome"] = "failure", ["message"] = "Мало" } },
+        ],
+        Edges =
+        [
+            new EdgeDefinition { Id = "s", Source = "start", SourcePort = "out", Target = "check" },
+            new EdgeDefinition { Id = "a", Source = "check", SourcePort = "true", Target = "many" },
+            new EdgeDefinition { Id = "b", Source = "check", SourcePort = "false", Target = "few" },
+            new EdgeDefinition { Id = "c", Source = "many", SourcePort = "out", Target = "done" },
+            new EdgeDefinition { Id = "d", Source = "few", SourcePort = "out", Target = "small" },
+        ],
+    };
+
+    [Fact]
+    public async Task Existing_scenario_is_changed_keeping_blocks_and_their_places()
+    {
+        // Просьба: после «Много» подождать минуту. Модель возвращает весь сценарий с новым блоком.
+        _api.ReplyDraft(Draft(
+            [
+                Block("check", "condition", ("expression", "vars.count > 2")),
+                Block("many", "log", ("message", "Много")),
+                Block("pause", "wait", ("amount", "1"), ("unit", "minutes")),
+                Block("few", "log", ("message", "Мало")),
+                Block("done", "end"),
+                Block("small", "end", ("outcome", "failure"), ("message", "Мало")),
+            ],
+            [
+                Link("check", "true", "many"), Link("check", "false", "few"),
+                Link("many", "out", "pause"), Link("pause", "out", "done"), Link("few", "out", "small"),
+            ]));
+        var current = Current();
+        var draft = await Assistant().DraftAsync("sk-ant-test",
+            Ask("После «Много» подождать минуту.") with { ExistingVariables = current.Variables, Current = current },
+            TestContext.Current.CancellationToken);
+
+        Assert.Empty(draft.Problems);
+        Assert.Equal("check", draft.EntryNodeId);
+        var position = draft.Nodes.ToDictionary(n => n.Id, n => n.Position);
+        Assert.Equal(new NodePosition(600, 0), position["many"]);
+        Assert.Equal(new NodePosition(900, 0), position["done"]);
+        // Новый блок — справа от того, за которым идёт, ниже, если место занято.
+        Assert.True(position["pause"].X > position["many"].X);
+        Assert.NotEqual(0, position["pause"].Y);
+
+        var text = UserText(_api.Requests.Single().Body!);
+        Assert.Contains("<сценарий>", text);
+        Assert.Contains("«check»", text);
+        Assert.Contains("vars.count > 2", text);
+        // Значения переменных помощнику не отправляются.
+        Assert.DoesNotContain("777123", text);
+    }
+
+    [Fact]
+    public async Task Scenario_is_explained_by_blocks_without_changes()
+    {
+        _api.ReplyDraft(new JsonObject
+        {
+            ["summary"] = "Проверяет число и пишет в журнал.",
+            ["steps"] = new JsonArray(
+                new JsonObject { ["block"] = "check", ["text"] = "Сравнивает count с двойкой." },
+                new JsonObject { ["block"] = "nowhere", ["text"] = "Блок, которого нет." }),
+            ["cautions"] = new JsonArray("Если count не задан, условие будет ложным."),
+        });
+        var explanation = await Assistant().ExplainAsync("sk-ant-test", Current(), TestContext.Current.CancellationToken);
+
+        Assert.Equal("Проверяет число и пишет в журнал.", explanation.Summary);
+        Assert.Equal([new ExplainedBlock("check", "Сравнивает count с двойкой."), new ExplainedBlock(null, "Блок, которого нет.")], explanation.Steps);
+        Assert.Single(explanation.Cautions);
+        var body = _api.Requests.Single().Body!;
+        Assert.NotNull(body["output_config"]!["format"]!["schema"]!["properties"]!["cautions"]);
+        Assert.Contains("Объясни", UserText(body));
+
+        var empty = new ScenarioDefinition { Name = "Пусто", Nodes = [new NodeDefinition { Id = "start", Type = "start" }] };
+        Assert.Equal(AssistantErrorKind.Input, (await Assert.ThrowsAsync<AssistantException>(() =>
+            Assistant().ExplainAsync("sk-ant-test", empty, TestContext.Current.CancellationToken))).Kind);
+    }
+
     [Fact]
     public async Task Overloaded_service_is_asked_again_but_only_a_few_times()
     {

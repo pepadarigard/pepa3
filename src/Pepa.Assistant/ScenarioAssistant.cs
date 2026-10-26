@@ -16,7 +16,8 @@ namespace Pepa.Assistant;
 /// <see cref="MaxRepairs"/> раз). Помощник только предлагает блоки — запускает сценарий пользователь.
 /// </summary>
 /// <remarks>
-/// Модели уходят описание пользователя, имена и описания переменных сценария и каталог блоков Pepa. Данные процессов,
+/// Модели уходят описание пользователя, имена и описания переменных сценария и каталог блоков Pepa; при правке и
+/// объяснении — ещё блоки сценария с их полями (тексты, адреса, имена чатов). Значения переменных, данные процессов,
 /// файлы и история — нет.
 /// </remarks>
 public sealed class ScenarioAssistant
@@ -25,6 +26,9 @@ public sealed class ScenarioAssistant
 
     /// <summary>Длиннее описание — скорее всего, вставлен посторонний текст; попросим сократить.</summary>
     public const int MaxDescriptionLength = 8000;
+
+    /// <summary>Сценарий больше этого (в формате ответа) помощнику не отправляем: ответ не уместился бы.</summary>
+    public const int MaxScenarioLength = 60_000;
 
     private readonly ScenarioPrompt _prompt;
     private readonly DraftConverter _converter;
@@ -69,14 +73,19 @@ public sealed class ScenarioAssistant
                 $"Описание слишком длинное ({description.Length} знаков, можно до {MaxDescriptionLength}). Опишите задачу короче.");
         }
 
+        if (request.Current is { } current)
+        {
+            CheckScenario(current);
+        }
+
         using var client = CreateClient(apiKey);
         var usage = new Usage();
-        var answer = await AskAsync(client, ScenarioPrompt.FirstMessage(request), usage, cancellationToken);
+        var answer = await AskAsync(client, ScenarioPrompt.FirstMessage(request), _prompt.Schema, usage, cancellationToken);
         var requests = 1;
         while (true)
         {
-            var draft = Parse(answer);
-            var converted = _converter.Convert(draft, request.ExistingVariables);
+            var draft = Parse<DraftJson>(answer);
+            var converted = _converter.Convert(draft, request.ExistingVariables, request.Current);
             if (converted.Problems.Count == 0 || requests > MaxRepairs)
             {
                 return new AssistantDraft
@@ -93,8 +102,41 @@ public sealed class ScenarioAssistant
                 };
             }
 
-            answer = await AskAsync(client, ScenarioPrompt.RepairMessage(request, answer, converted.Problems), usage, cancellationToken);
+            answer = await AskAsync(client, ScenarioPrompt.RepairMessage(request, answer, converted.Problems), _prompt.Schema, usage, cancellationToken);
             requests++;
+        }
+    }
+
+    /// <summary>Объяснить сценарий простыми словами: что делает, по шагам, что проверить. Сценарий не меняется.</summary>
+    public async Task<AssistantExplanation> ExplainAsync(string apiKey, ScenarioDefinition scenario, CancellationToken cancellationToken)
+    {
+        CheckScenario(scenario);
+        using var client = CreateClient(apiKey);
+        var usage = new Usage();
+        var answer = Parse<ExplanationJson>(await AskAsync(client, ScenarioPrompt.ExplainMessage(scenario), _prompt.ExplainSchema, usage, cancellationToken));
+        var ids = scenario.Nodes.Select(n => n.Id).ToHashSet(StringComparer.Ordinal);
+        return new AssistantExplanation
+        {
+            Summary = answer.Summary.Trim(),
+            Steps = answer.Steps.Where(s => s.Text.Trim().Length > 0)
+                .Select(s => new ExplainedBlock(ids.Contains(s.Block.Trim()) ? s.Block.Trim() : null, s.Text.Trim())).ToList(),
+            Cautions = answer.Cautions.Select(c => c.Trim()).Where(c => c.Length > 0).ToList(),
+            Usage = usage.Total,
+        };
+    }
+
+    private static void CheckScenario(ScenarioDefinition scenario)
+    {
+        if (!scenario.Nodes.Any(n => n.Type != "start"))
+        {
+            throw new AssistantException(AssistantErrorKind.Input, "В сценарии пока нет блоков — объяснять и менять нечего.");
+        }
+
+        var length = ScenarioPrompt.ScenarioJson(scenario).Length;
+        if (length > MaxScenarioLength)
+        {
+            throw new AssistantException(AssistantErrorKind.Input,
+                $"Сценарий слишком большой для помощника ({length} знаков, можно до {MaxScenarioLength}). Разделите его на части (вызов сценария).");
         }
     }
 
@@ -125,7 +167,8 @@ public sealed class ScenarioAssistant
             : new AnthropicClient { ApiKey = apiKey.Trim(), Timeout = RequestTimeout, MaxRetries = 0 };
     }
 
-    private async Task<string> AskAsync(AnthropicClient client, string message, Usage usage, CancellationToken cancellationToken)
+    private async Task<string> AskAsync(AnthropicClient client, string message, IReadOnlyDictionary<string, JsonElement> schema, Usage usage,
+        CancellationToken cancellationToken)
     {
         var parameters = new MessageCreateParams
         {
@@ -139,7 +182,7 @@ public sealed class ScenarioAssistant
             OutputConfig = new BetaOutputConfig
             {
                 Effort = Effort.High,
-                Format = new BetaJsonOutputFormat { Schema = new Dictionary<string, JsonElement>(_prompt.Schema) },
+                Format = new BetaJsonOutputFormat { Schema = new Dictionary<string, JsonElement>(schema) },
             },
             Messages = [new BetaUserMessageParam { Content = message }],
         };
@@ -191,12 +234,12 @@ public sealed class ScenarioAssistant
             : throw new AssistantException(AssistantErrorKind.Answer, "Модель не прислала черновик. Попробуйте ещё раз.");
     }
 
-    private static DraftJson Parse(string answer)
+    private static T Parse<T>(string answer) where T : class
     {
         try
         {
-            return JsonSerializer.Deserialize<DraftJson>(answer, DraftSerializer.Options)
-                   ?? throw new AssistantException(AssistantErrorKind.Answer, "Модель прислала пустой черновик.");
+            return JsonSerializer.Deserialize<T>(answer, DraftSerializer.Options)
+                   ?? throw new AssistantException(AssistantErrorKind.Answer, "Модель прислала пустой ответ.");
         }
         catch (JsonException ex)
         {

@@ -19,7 +19,7 @@ import { ArrowLeft, Bug, CalendarClock, CircleDot, ClipboardPaste, Copy, Group, 
 import { useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
 import { useNodeTypes, useScenario, useScenarios } from "../../api/hooks";
-import type { NodeDefinition, NodeTypeDescriptor, NodeTypes, Scenario, ValidationReport } from "../../api/types";
+import type { AssistantDraft, NodeDefinition, NodeTypeDescriptor, NodeTypes, Scenario, ValidationReport } from "../../api/types";
 import { rememberEditedScenario } from "../../App";
 import { useFeedback } from "../../components/feedback";
 import { useRunScenario } from "../../components/RunDialog";
@@ -409,6 +409,35 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
   const [recorderOpen, setRecorderOpen] = useState(false);
   const [assistantOpen, setAssistantOpen] = useState(false);
 
+  /**
+   * Правка помощника: блоки и связи сценария заменяются присланными (кроме «Начала» — оно ведёт к первому блоку правки),
+   * новые переменные добавляются. Одно изменение — отменяется Ctrl+Z.
+   */
+  const applyAssistantEdit = useCallback((draft: AssistantDraft) => {
+    editor.commit((s) => {
+      const start = s.nodes.find((n) => isStart(n.id));
+      const startEdge = start ? s.edges.find((e) => e.source === start.id) : undefined;
+      const nodes: PepaNode[] = [
+        ...(start ? [{ ...start, selected: false }] : []),
+        ...draft.nodes.map((definition) => ({ id: definition.id, type: "pepa" as const, position: definition.position, data: { definition } })),
+      ];
+      const edges = [
+        ...(start && draft.entryNodeId
+          ? [toFlowEdge({ id: startEdge?.id ?? newId("e"), source: start.id, sourcePort: "out", target: draft.entryNodeId })]
+          : []),
+        ...draft.edges.map(toFlowEdge),
+      ];
+      const ids = new Set(nodes.map((n) => n.id));
+      const known = new Set(s.meta.variables.map((v) => v.name));
+      return withGroups({
+        meta: { ...s.meta, variables: [...s.meta.variables, ...draft.variables.filter((v) => !known.has(v.name))] },
+        nodes,
+        edges,
+      }, (gs) => pruneGroups(gs, ids));
+    });
+    feedback.toast("Изменения помощника применены. Проверьте схему; отменить — Ctrl+Z.", "info");
+  }, [editor, feedback, isStart]);
+
   const duplicateSelected = useCallback(() => {
     const data = copyBlocks(editor.state.nodes, editor.state.edges, editor.state.meta.variables, descriptors, isStart);
     if (!data) return;
@@ -612,12 +641,15 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
       {triggersDialog.element}
       {assistantOpen && (
         <AssistantDialog
-          variables={state.meta.variables}
+          scenario={definitionOf(state)}
+          startId={state.nodes.find((n) => isStart(n.id))?.id ?? null}
           onClose={() => setAssistantOpen(false)}
           onInsert={(blocks, entryId) => {
             const connected = insertAtView(blocks, entryId);
             feedback.toast(`Добавлено блоков от помощника: ${blocks.nodes.length}.${connected ? " Первый подключён к «Началу»." : " Соедините их со схемой."} Проверьте их перед сохранением.`, "info");
           }}
+          onApply={applyAssistantEdit}
+          onSelectNode={selectNode}
         />
       )}
       {recorderOpen && (

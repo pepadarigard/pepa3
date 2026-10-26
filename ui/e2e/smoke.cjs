@@ -30,17 +30,40 @@ function startFakeAnthropic() {
     ],
     links: [{ from: "hello", port: "out", to: "done" }],
   };
+  // Правка: приветствие меняется на «Здравствуйте»; объяснение: по строчке на блок. Сценарий берётся из запроса.
+  const answer = (text) => {
+    const scenario = text.includes("<сценарий>")
+      ? JSON.parse(text.slice(text.indexOf("<сценарий>") + "<сценарий>".length, text.indexOf("</сценарий>")))
+      : null;
+    if (scenario && text.startsWith("Объясни")) {
+      return {
+        summary: "Сценарий здоровается в журнале и заканчивается.",
+        steps: scenario.blocks.map((b) => ({ block: b.id, text: `Шаг «${b.type}».` })),
+        cautions: ["Проверьте текст приветствия."],
+      };
+    }
+    if (scenario) {
+      for (const block of scenario.blocks) {
+        for (const setting of block.settings) if (block.type === "log" && setting.field === "message") setting.value = "Здравствуйте, {{ vars.guest }}!";
+      }
+      return { summary: "Приветствие стало вежливее.", questions: [], variables: [], blocks: scenario.blocks, links: scenario.links };
+    }
+    return draft;
+  };
   const server = http.createServer((req, res) => {
-    req.resume();
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
     req.on("end", () => {
       res.setHeader("content-type", "application/json");
       if (req.url.startsWith("/v1/models/")) {
         res.end(JSON.stringify({ type: "model", id: "claude-opus-5-5", display_name: "Claude Opus 5.5", created_at: "2026-09-01T00:00:00Z" }));
         return;
       }
+      const content = JSON.parse(body).messages[0].content;
+      const text = typeof content === "string" ? content : content.map((part) => part.text ?? "").join("");
       res.end(JSON.stringify({
         id: "msg_e2e", type: "message", role: "assistant", model: "claude-opus-5-5",
-        content: [{ type: "text", text: JSON.stringify(draft) }],
+        content: [{ type: "text", text: JSON.stringify(answer(text)) }],
         stop_reason: "end_turn", stop_sequence: null,
         usage: { input_tokens: 1500, output_tokens: 700, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
       }));
@@ -362,6 +385,27 @@ async function main() {
     await page.getByText("Первый подключён к «Началу»").waitFor();
     if ((await page.locator(".react-flow__node").count()) !== 3) throw new Error("Помощник: ожидалось 3 блока на схеме");
     if ((await page.locator(".react-flow__edge").count()) !== 2) throw new Error("Помощник: ожидалось 2 связи на схеме");
+
+    step("ИИ-помощник: объяснить и изменить сценарий");
+    await page.getByRole("button", { name: "ИИ-помощник" }).click();
+    await assistant.getByRole("button", { name: "Объяснить сценарий" }).click();
+    await assistant.getByRole("button", { name: "Объяснить", exact: true }).click();
+    await assistant.getByTestId("assistant-explanation").getByText("Проверьте текст приветствия.").waitFor();
+    await assistant.getByTestId("assistant-explanation").getByRole("button", { name: "Поздороваться" }).waitFor();
+    await assistant.getByRole("button", { name: "Объяснить заново" }).click();
+    await assistant.getByRole("button", { name: "Изменить сценарий" }).click();
+    await assistant.getByLabel("Что изменить").fill("Поздороваться вежливее.");
+    await assistant.getByRole("button", { name: "Предложить изменения" }).click();
+    await assistant.getByTestId("assistant-changes").getByText("Изменятся (1)").waitFor();
+    await page.screenshot({ path: path.join(shots, "13b-assistant-edit.png") });
+    await assistant.getByRole("button", { name: "Применить изменения" }).click();
+    await page.getByText("Изменения помощника применены").waitFor();
+    await page.locator(".pnode-summary", { hasText: "Здравствуйте" }).waitFor();
+    if ((await page.locator(".react-flow__node").count()) !== 3) throw new Error("Правка помощника: ожидалось 3 блока");
+    if ((await page.locator(".react-flow__edge").count()) !== 2) throw new Error("Правка помощника: ожидалось 2 связи");
+    await page.locator(".react-flow__pane").click({ position: { x: 20, y: 20 } });
+    await page.keyboard.press("Control+z");
+    await page.locator(".pnode-summary", { hasText: "Привет" }).waitFor();
 
     step("Тёмная тема");
     await page.goto(`${base}/#/settings`);

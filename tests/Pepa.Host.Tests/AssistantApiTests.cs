@@ -61,4 +61,45 @@ public sealed class AssistantApiTests
 
         Assert.False((await f.SendAsync(HttpMethod.Delete, "/api/assistant/key")).Body!["configured"]!.GetValue<bool>());
     }
+
+    [Fact]
+    public async Task Scenario_is_explained_and_its_variable_values_are_not_sent()
+    {
+        using var api = new FakeAnthropic();
+        await using var f = await HostFixture.StartAsync(seedSamples: false, assistantUrl: api.Url);
+        await f.SendAsync(HttpMethod.Put, "/api/assistant/key", new { apiKey = "sk-ant-api03-abcdefghijklmnop-WXYZ" });
+        Assert.Equal(400, (await f.SendAsync(HttpMethod.Post, "/api/assistant/explain", new { })).Status);
+
+        var scenario = new
+        {
+            name = "Привет",
+            variables = new[] { new { name = "token", type = "text", description = "Ключ сервиса", isInput = false, @default = "очень-секретное-значение" } },
+            nodes = new object[]
+            {
+                new { id = "start", type = "start", position = new { x = 0, y = 0 } },
+                new { id = "hello", type = "log", position = new { x = 300, y = 0 }, config = new { message = "Привет" } },
+                new { id = "end", type = "end", position = new { x = 600, y = 0 } },
+            },
+            edges = new object[]
+            {
+                new { id = "a", source = "start", sourcePort = "out", target = "hello" },
+                new { id = "b", source = "hello", sourcePort = "out", target = "end" },
+            },
+        };
+        api.ReplyDraft(new JsonObject
+        {
+            ["summary"] = "Пишет «Привет» в журнал.",
+            ["steps"] = new JsonArray(new JsonObject { ["block"] = "hello", ["text"] = "Пишет приветствие." }),
+            ["cautions"] = new JsonArray(),
+        });
+        var (ok, explanation) = await f.SendAsync(HttpMethod.Post, "/api/assistant/explain", new { scenario });
+        Assert.Equal(200, ok);
+        Assert.Equal("hello", explanation!["steps"]![0]!["blockId"]!.GetValue<string>());
+        // Текст сообщения модели — разобранный (в JSON кириллица экранирована, и простой поиск по нему ничего не доказал бы).
+        var content = api.Requests.Single().Body!["messages"]![0]!["content"]!;
+        var sent = content is JsonValue value ? value.GetValue<string>() : string.Concat(content.AsArray().Select(b => b!["text"]?.GetValue<string>()));
+        Assert.Contains("Ключ сервиса", sent);
+        Assert.Contains("Привет", sent);
+        Assert.DoesNotContain("очень-секретное-значение", sent);
+    }
 }

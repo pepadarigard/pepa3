@@ -1,6 +1,7 @@
 import type {
   AdsPowerProfile,
   AssistantDraft,
+  AssistantExplanation,
   AssistantStatus,
   VariableDefinition,
   DesktopWindow,
@@ -162,8 +163,10 @@ export const api = {
   assistantSetKey: (apiKey: string) => request<AssistantStatus>("PUT", "/assistant/key", { apiKey }),
   assistantClearKey: () => request<AssistantStatus>("DELETE", "/assistant/key"),
   assistantCheck: () => request<{ ok: boolean; message: string }>("POST", "/assistant/check"),
-  assistantDraft: (description: string, variables: VariableDefinition[]) =>
-    request<AssistantDraft>("POST", "/assistant/draft", { description, variables }),
+  /** С current — правка этого сценария (ответ — весь изменённый сценарий), без него — новые блоки. */
+  assistantDraft: (description: string, variables: VariableDefinition[], current: ScenarioDefinition | null = null) =>
+    request<AssistantDraft>("POST", "/assistant/draft", { description, variables, current }),
+  assistantExplain: (scenario: ScenarioDefinition) => request<AssistantExplanation>("POST", "/assistant/explain", { scenario }),
   recorder: () => request<RecorderState>("GET", "/recorder"),
   recorderStart: (start: { browser: "pepa" | "adspower"; profileId: string | null; url: string | null }) =>
     request<RecorderState>("POST", "/recorder/start", start),

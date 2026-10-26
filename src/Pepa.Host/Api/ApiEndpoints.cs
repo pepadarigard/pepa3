@@ -298,18 +298,34 @@ internal static class ApiEndpoints
                 {
                     Description = request.Description ?? "",
                     ExistingVariables = request.Variables ?? [],
+                    Current = request.Current,
                 }, ct);
                 return Results.Json(new AssistantDraftDto(draft.Summary, draft.Questions, draft.Variables, draft.Nodes, draft.Edges,
                     draft.EntryNodeId, draft.Problems, draft.Requests, draft.Usage), Core.Serialization.PepaJson.Options);
             }
             catch (Assistant.AssistantException ex)
             {
-                return Results.Json(new ErrorDto(ex.Message), Core.Serialization.PepaJson.Options, statusCode: ex.Kind switch
-                {
-                    Assistant.AssistantErrorKind.Input => StatusCodes.Status400BadRequest,
-                    Assistant.AssistantErrorKind.Key => StatusCodes.Status409Conflict,
-                    _ => StatusCodes.Status502BadGateway,
-                });
+                return AssistantError(ex);
+            }
+        });
+
+        api.MapPost("/assistant/explain", async (AssistantExplainRequest request, AssistantKeyStore keys, Assistant.ScenarioAssistant assistant,
+            CancellationToken ct) =>
+        {
+            if (request.Scenario is null)
+            {
+                return Results.Json(new ErrorDto("Не передан сценарий."), Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            try
+            {
+                var explanation = await assistant.ExplainAsync(await keys.GetAsync(ct) ?? "", request.Scenario, ct);
+                return Results.Json(new AssistantExplanationDto(explanation.Summary, explanation.Steps, explanation.Cautions, explanation.Usage),
+                    Core.Serialization.PepaJson.Options);
+            }
+            catch (Assistant.AssistantException ex)
+            {
+                return AssistantError(ex);
             }
         });
 
@@ -589,6 +605,14 @@ internal static class ApiEndpoints
         };
         return new Adapters.Telegram.TelegramProxy(kind, request.Host ?? "", request.Port ?? 0, request.Username, request.Password, request.Secret);
     }
+
+    private static IResult AssistantError(Assistant.AssistantException ex) =>
+        Results.Json(new ErrorDto(ex.Message), Core.Serialization.PepaJson.Options, statusCode: ex.Kind switch
+        {
+            Assistant.AssistantErrorKind.Input => StatusCodes.Status400BadRequest,
+            Assistant.AssistantErrorKind.Key => StatusCodes.Status409Conflict,
+            _ => StatusCodes.Status502BadGateway,
+        });
 
     private static AssistantStatusDto AssistantDto(string? key, Assistant.ScenarioAssistant assistant) =>
         new(key is not null, key is null ? null : AssistantKeyStore.Hint(key), assistant.Model);

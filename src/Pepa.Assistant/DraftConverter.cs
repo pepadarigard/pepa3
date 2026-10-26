@@ -25,7 +25,8 @@ internal sealed class DraftConverter(NodeRegistry registry, ScenarioValidator va
     private const double ColumnWidth = 280;
     private const double RowHeight = 150;
 
-    public ConvertedDraft Convert(DraftJson draft, IReadOnlyList<VariableDefinition> existing)
+    /// <param name="current">При правке — сценарий до изменений: неизменённые блоки остаются на своих местах.</param>
+    public ConvertedDraft Convert(DraftJson draft, IReadOnlyList<VariableDefinition> existing, ScenarioDefinition? current = null)
     {
         var problems = new List<string>();
 
@@ -51,9 +52,14 @@ internal sealed class DraftConverter(NodeRegistry registry, ScenarioValidator va
             });
         }
 
-        // Блоки.
+        // Блоки. При правке id «Начала» занят: блок с таким id совпал бы с ним на схеме.
         var nodes = new List<NodeDefinition>();
         var ids = new HashSet<string>(StringComparer.Ordinal);
+        if (current?.Nodes.FirstOrDefault(n => n.Type == "start") is { } currentStart)
+        {
+            ids.Add(currentStart.Id);
+        }
+
         foreach (var block in draft.Blocks)
         {
             var id = block.Id.Trim();
@@ -171,7 +177,57 @@ internal sealed class DraftConverter(NodeRegistry registry, ScenarioValidator va
             problems.AddRange(Validate(existing, variables, nodes, edges, entry).Where(p => !problems.Contains(p)));
         }
 
-        return new ConvertedDraft(variables, Layout(nodes, edges, entry), edges, entry, problems);
+        return new ConvertedDraft(variables, current is null ? Layout(nodes, edges, entry) : Arrange(nodes, edges, entry, current), edges, entry,
+            problems);
+    }
+
+    /// <summary>
+    /// Правка: блоки, что были в сценарии, — на прежних местах; новые — справа от блока, за которым идут (ниже, если место
+    /// занято); остальные — рядом под схемой.
+    /// </summary>
+    private static List<NodeDefinition> Arrange(List<NodeDefinition> nodes, List<EdgeDefinition> edges, string? entry, ScenarioDefinition current)
+    {
+        var before = current.Nodes.ToDictionary(n => n.Id, n => n.Position, StringComparer.Ordinal);
+        var placed = nodes.Where(n => before.ContainsKey(n.Id)).ToDictionary(n => n.Id, n => before[n.Id], StringComparer.Ordinal);
+        var links = edges.ToList();
+        if (current.Nodes.FirstOrDefault(n => n.Type == "start") is { } start && entry is not null)
+        {
+            placed[start.Id] = start.Position;
+            links.Add(new EdgeDefinition { Id = "__start", Source = start.Id, SourcePort = "out", Target = entry });
+        }
+
+        bool Taken(NodePosition p) => placed.Values.Any(q => Math.Abs(q.X - p.X) < 220 && Math.Abs(q.Y - p.Y) < 110);
+        var pending = nodes.Where(n => !placed.ContainsKey(n.Id)).Select(n => n.Id).ToList();
+        for (var progress = true; progress && pending.Count > 0;)
+        {
+            progress = false;
+            foreach (var id in pending.ToList())
+            {
+                if (links.FirstOrDefault(e => e.Target == id && placed.ContainsKey(e.Source)) is not { } link)
+                {
+                    continue;
+                }
+
+                var source = placed[link.Source];
+                var spot = new NodePosition(source.X + ColumnWidth, source.Y);
+                while (Taken(spot))
+                {
+                    spot = spot with { Y = spot.Y + RowHeight };
+                }
+
+                placed[id] = spot;
+                pending.Remove(id);
+                progress = true;
+            }
+        }
+
+        var bottom = placed.Count == 0 ? 0 : placed.Values.Max(p => p.Y) + RowHeight;
+        for (var i = 0; i < pending.Count; i++)
+        {
+            placed[pending[i]] = new NodePosition(i * ColumnWidth, bottom);
+        }
+
+        return nodes.Select(n => n with { Position = placed[n.Id] }).ToList();
     }
 
     private IEnumerable<string> Validate(IReadOnlyList<VariableDefinition> existing, List<VariableDefinition> variables,

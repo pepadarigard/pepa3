@@ -471,6 +471,15 @@ export interface AssistantStatus {
 }
 
 /** Черновик помощника: блоки для вставки в схему. */
+/** Объяснение сценария помощником: в целом, по блокам и что проверить. */
+export interface AssistantExplanation {
+  summary: string;
+  /** blockId — блок сценария (null — помощник назвал блок, которого нет). */
+  steps: { blockId: string | null; text: string }[];
+  cautions: string[];
+  usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number };
+}
+
 export interface AssistantDraft {
   summary: string;
   questions: string[];
