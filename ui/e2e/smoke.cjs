@@ -133,6 +133,14 @@ async function main() {
     if (!pastedPath.startsWith("e2e/итог-")) throw new Error(`Вставлен не тот блок: ${pastedPath}`);
     await page.screenshot({ path: path.join(shots, "14-editor-paste-search.png") });
 
+    step("Отладка: пошаговый запуск");
+    await page.goto(`${base}/#/editor/${saved.id}`);
+    await page.getByRole("button", { name: "Пошагово" }).click();
+    await page.getByText("Пауза перед блоком (отладка)").waitFor({ timeout: 15000 });
+    await page.screenshot({ path: path.join(shots, "15-debug-paused.png") });
+    await page.getByRole("button", { name: "Продолжить без остановок" }).click();
+    await page.locator(".badge", { hasText: "Завершён" }).first().waitFor({ timeout: 15000 });
+
     step("Пауза, продолжение и остановка ожидающего процесса");
     await page.goto(`${base}/#/scenarios`);
     await page.locator(".scenario-card", { hasText: "Пример 3" }).getByRole("button", { name: "Запустить" }).click();

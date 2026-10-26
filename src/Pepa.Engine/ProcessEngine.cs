@@ -129,12 +129,18 @@ public sealed partial class ProcessEngine : IAsyncDisposable
         CancellationToken cancellationToken = default) =>
         StartProcessAsync(scenarioId, inputs, originKey: null, origin: null, cancellationToken);
 
+    /// <summary>Запуск вручную; <paramref name="stepMode"/> — отладка: пауза перед каждым блоком.</summary>
+    public Task<string> StartProcessAsync(string scenarioId, JsonObject? inputs, bool stepMode,
+        CancellationToken cancellationToken = default) =>
+        StartProcessAsync(scenarioId, inputs, originKey: null, origin: stepMode ? "пошагово" : null, cancellationToken,
+            stepMode ? new DebugState { StepMode = true } : null);
+
     /// <summary>
     /// Запустить процесс. <paramref name="originKey"/> защищает от двойного запуска (расписание, событие):
     /// если процесс с таким ключом уже есть, новый не создаётся и возвращается существующий.
     /// </summary>
     public async Task<string> StartProcessAsync(string scenarioId, JsonObject? inputs, string? originKey, string? origin,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, DebugState? debug = null)
     {
         EnsureRunning();
         var prepared = await PrepareStartAsync(scenarioId, inputs, cancellationToken);
@@ -142,7 +148,7 @@ public sealed partial class ProcessEngine : IAsyncDisposable
         bool created;
         await using (var write = await _store.BeginWriteAsync(cancellationToken))
         {
-            (process, created) = await InsertStartedProcessAsync(write, prepared, originKey, origin);
+            (process, created) = await InsertStartedProcessAsync(write, prepared, originKey, origin, debug);
             await write.CommitAsync();
         }
 
@@ -157,7 +163,7 @@ public sealed partial class ProcessEngine : IAsyncDisposable
 
     /// <summary>Записать новый процесс в транзакции. Если процесс с таким ключом происхождения уже есть — вернуть его.</summary>
     private async Task<(ProcessRecord Process, bool Created)> InsertStartedProcessAsync(IStoreWrite write, PreparedStart prepared,
-        string? originKey, string? origin)
+        string? originKey, string? origin, DebugState? debug = null)
     {
         if (originKey is not null && await write.GetProcessByOriginAsync(originKey) is { } existing)
         {
@@ -165,6 +171,7 @@ public sealed partial class ProcessEngine : IAsyncDisposable
         }
 
         var (process, token) = NewProcess(prepared, _time.GetUtcNow(), parentId: null, depth: 0, originKey);
+        process = process with { Debug = debug };
         await write.InsertProcessAsync(process);
         await write.UpsertTokenAsync(token);
         await write.AddJournalAsync(Journal(process.Id, JournalLevel.Info,
@@ -323,6 +330,10 @@ public sealed partial class ProcessEngine : IAsyncDisposable
                 ResumeAction.Retry => await RetryCoreAsync(process, tokens),
                 ResumeAction.MarkSucceeded => await ProceedCoreAsync(process, tokens, StepState.Succeeded),
                 ResumeAction.Skip => await ProceedCoreAsync(process, tokens, StepState.Skipped),
+                ResumeAction.RunWithoutPauses => await ContinueCoreAsync(process with
+                {
+                    Debug = process.Debug! with { StepMode = false, IgnoreBreakpoints = true },
+                }, tokens),
                 _ => throw new EngineOperationException("Неизвестное действие."),
             };
         }
@@ -342,6 +353,8 @@ public sealed partial class ProcessEngine : IAsyncDisposable
         {
             case ProcessStatus.Running or ProcessStatus.Waiting:
                 return [ProcessAction.Pause, ProcessAction.Cancel];
+            case ProcessStatus.Paused when process is { PauseReason: PauseReason.Breakpoint, Debug: not null }:
+                return [ProcessAction.Continue, ProcessAction.RunWithoutPauses, ProcessAction.Cancel];
             case ProcessStatus.Paused:
                 return [ProcessAction.Continue, ProcessAction.Cancel];
             case ProcessStatus.NeedsAttention:
@@ -415,6 +428,7 @@ public sealed partial class ProcessEngine : IAsyncDisposable
         ResumeAction.Retry => ProcessAction.Retry,
         ResumeAction.MarkSucceeded => ProcessAction.MarkSucceeded,
         ResumeAction.Skip => ProcessAction.Skip,
+        ResumeAction.RunWithoutPauses => ProcessAction.RunWithoutPauses,
         _ => throw new ArgumentOutOfRangeException(nameof(action)),
     };
 

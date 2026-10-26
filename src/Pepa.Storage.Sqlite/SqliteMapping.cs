@@ -79,6 +79,7 @@ internal static class SqliteMapping
         Variables = ObjectOf(r, "variables") ?? new JsonObject(),
         LastError = ObjectOf(r, "last_error"),
         Memory = ObjectOf(r, "memory"),
+        Debug = Str(r, "debug") is { } debug ? System.Text.Json.JsonSerializer.Deserialize<DebugState>(debug) : null,
         ParentProcessId = Str(r, "parent_process_id"),
         OriginKey = Str(r, "origin_key"),
         Depth = (int)(Long(r, "depth") ?? 0),

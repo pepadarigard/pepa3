@@ -47,6 +47,9 @@ public sealed record NodeSettings
 
     /// <summary>Предельное время выполнения шага; null — значение по умолчанию из настроек.</summary>
     public int? TimeoutSeconds { get; init; }
+
+    /// <summary>Отладка: приостановить процесс перед этим блоком (посмотреть переменные и продолжить).</summary>
+    public bool Breakpoint { get; init; }
 }
 
 /// <summary>Связь из выходного порта одного блока во вход другого.</summary>

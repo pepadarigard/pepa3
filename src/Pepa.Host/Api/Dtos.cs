@@ -37,7 +37,8 @@ public sealed record ScenarioDto(
 
 public sealed record SaveScenarioRequest(ScenarioDefinition Definition, int ExpectedVersion);
 
-public sealed record RunRequest(JsonObject? Inputs);
+/// <param name="StepMode">Отладка: пауза перед каждым блоком.</param>
+public sealed record RunRequest(JsonObject? Inputs, bool? StepMode = null);
 
 public sealed record RunResponse(string ProcessId);
 

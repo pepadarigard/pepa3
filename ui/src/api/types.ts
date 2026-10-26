@@ -16,6 +16,8 @@ export interface NodeSettings {
   retryCount: number;
   retryDelaySeconds: number;
   timeoutSeconds: number | null;
+  /** Отладка: пауза перед блоком. */
+  breakpoint?: boolean;
 }
 
 export interface NodeDefinition {
@@ -142,9 +144,9 @@ export type ProcessStatus =
   | "cancelled";
 
 export type AttentionKind = "none" | "unknownStep" | "stepFailed" | "stepLimit" | "engineError";
-export type PauseReason = "none" | "user" | "restart";
-export type ProcessAction = "pause" | "cancel" | "continue" | "verify" | "retry" | "markSucceeded" | "skip";
-export type ResumeAction = "continue" | "verify" | "retry" | "markSucceeded" | "skip";
+export type PauseReason = "none" | "user" | "restart" | "breakpoint";
+export type ProcessAction = "pause" | "cancel" | "continue" | "verify" | "retry" | "markSucceeded" | "skip" | "runWithoutPauses";
+export type ResumeAction = "continue" | "verify" | "retry" | "markSucceeded" | "skip" | "runWithoutPauses";
 
 export interface ProcessBrief {
   id: string;

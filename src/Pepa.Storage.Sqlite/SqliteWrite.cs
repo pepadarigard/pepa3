@@ -50,10 +50,10 @@ internal sealed class SqliteWrite(SqliteConnection connection, SqliteTransaction
     public Task InsertProcessAsync(ProcessRecord process) =>
         RunAsync("""
                  INSERT INTO processes (id, scenario_id, scenario_name, scenario_version, definition, status, attention,
-                     pause_reason, status_message, attention_step_id, variables, last_error, memory, parent_process_id,
+                     pause_reason, status_message, attention_step_id, variables, last_error, memory, debug, parent_process_id,
                      origin_key, depth, step_count, step_budget, created_at, updated_at, finished_at)
                  VALUES ($id, $scenario_id, $scenario_name, $scenario_version, $definition, $status, $attention,
-                     $pause_reason, $status_message, $attention_step_id, $variables, $last_error, $memory, $parent_process_id,
+                     $pause_reason, $status_message, $attention_step_id, $variables, $last_error, $memory, $debug, $parent_process_id,
                      $origin_key, $depth, $step_count, $step_budget, $created_at, $updated_at, $finished_at);
                  """, c => BindProcess(c, process));
 
@@ -62,7 +62,7 @@ internal sealed class SqliteWrite(SqliteConnection connection, SqliteTransaction
         var changed = await RunAsync("""
                                      UPDATE processes SET status = $status, attention = $attention, pause_reason = $pause_reason,
                                          status_message = $status_message, attention_step_id = $attention_step_id,
-                                         variables = $variables, last_error = $last_error, memory = $memory,
+                                         variables = $variables, last_error = $last_error, memory = $memory, debug = $debug,
                                          step_count = $step_count, step_budget = $step_budget, updated_at = $updated_at,
                                          finished_at = $finished_at
                                      WHERE id = $id;
@@ -441,6 +441,7 @@ internal sealed class SqliteWrite(SqliteConnection connection, SqliteTransaction
         c.Parameters.AddWithValue("$variables", p.Variables.ToJsonString());
         c.Parameters.AddWithValue("$last_error", JsonOrNull(p.LastError));
         c.Parameters.AddWithValue("$memory", JsonOrNull(p.Memory));
+        c.Parameters.AddWithValue("$debug", p.Debug is null ? DBNull.Value : System.Text.Json.JsonSerializer.Serialize(p.Debug));
         c.Parameters.AddWithValue("$parent_process_id", OrNull(p.ParentProcessId));
         c.Parameters.AddWithValue("$origin_key", OrNull(p.OriginKey));
         c.Parameters.AddWithValue("$depth", p.Depth);

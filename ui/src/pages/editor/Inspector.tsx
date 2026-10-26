@@ -116,6 +116,19 @@ export function NodeInspector({ node, descriptor, variables, issues, onChange, o
         </div>
       )}
 
+      {!descriptor.isStart && (
+        <div className="inspector-section">
+          <h3>Отладка</h3>
+          <label className="row" style={{ gap: 8, alignItems: "flex-start" }}>
+            <input type="checkbox" checked={node.settings.breakpoint === true} style={{ marginTop: 3 }}
+              onChange={(e) => onChange((n) => ({ ...n, settings: { ...n.settings, breakpoint: e.target.checked } }), "settings.breakpoint")} />
+            <span className="small">
+              Пауза перед этим блоком — процесс остановится, можно посмотреть переменные и нажать «Продолжить».
+            </span>
+          </label>
+        </div>
+      )}
+
       {descriptor.supportsRetry && (
         <div className="inspector-section">
           <h3>Надёжность</h3>

@@ -189,5 +189,9 @@ public sealed partial class SqliteStore
         );
         CREATE INDEX ix_triggers_scenario ON triggers (scenario_id);
         """,
+        // 3: отладка процесса (пошаговый запуск, точки останова).
+        """
+        ALTER TABLE processes ADD COLUMN debug TEXT NULL;
+        """,
     ];
 }

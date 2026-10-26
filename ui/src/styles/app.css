@@ -1819,3 +1819,15 @@ pre.json {
   max-width: 100%;
 }
 
+.pnode-breakpoint {
+  position: absolute;
+  top: -6px;
+  left: -6px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--danger);
+  border: 2px solid var(--surface);
+  box-shadow: 0 0 0 1px var(--danger);
+}
+

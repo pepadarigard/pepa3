@@ -69,6 +69,14 @@ export function explainProcess(p: ProcessSummary): { title: string; text: string
           "приостановлен — его нужно будет возобновить вручную.",
       };
     case "paused":
+      if (p.pauseReason === "breakpoint") {
+        return {
+          title: "Пауза перед блоком (отладка)",
+          text:
+            (p.statusMessage ?? "Процесс остановился перед блоком.") +
+            " «Продолжить» выполнит этот блок, «Продолжить без остановок» — весь процесс до конца.",
+        };
+      }
       return p.pauseReason === "restart"
         ? {
             title: "Приостановлен после перезапуска",

@@ -12,14 +12,14 @@ import { Button, Callout } from "./ui";
 export function useRunScenario() {
   const feedback = useFeedback();
   const queryClient = useQueryClient();
-  const [dialog, setDialog] = useState<{ id: string; name: string; inputs: VariableDefinition[] } | null>(null);
+  const [dialog, setDialog] = useState<{ id: string; name: string; inputs: VariableDefinition[]; stepMode: boolean } | null>(null);
 
-  const start = async (id: string, inputs?: Record<string, Json>) => {
+  const start = async (id: string, inputs?: Record<string, Json>, stepMode = false) => {
     try {
-      const result = await api.run(id, inputs);
+      const result = await api.run(id, inputs, stepMode);
       queryClient.invalidateQueries({ queryKey: ["processes"] });
       queryClient.invalidateQueries({ queryKey: ["overview"] });
-      feedback.toast("Процесс запущен");
+      feedback.toast(stepMode ? "Процесс запущен пошагово: пауза перед каждым блоком" : "Процесс запущен");
       navigate({ page: "process", id: result.processId });
       return true;
     } catch (e) {
@@ -32,14 +32,16 @@ export function useRunScenario() {
     }
   };
 
-  const run = async (id: string) => {
+  /** <paramref name="stepMode"/> — отладка: пауза перед каждым блоком. */
+  const run = async (id: string, options?: { stepMode?: boolean }) => {
+    const stepMode = options?.stepMode === true;
     try {
       const scenario = await api.scenario(id);
       const inputs = scenario.definition.variables.filter((v) => v.isInput);
       if (inputs.length === 0) {
-        await start(id);
+        await start(id, undefined, stepMode);
       } else {
-        setDialog({ id, name: scenario.name, inputs });
+        setDialog({ id, name: scenario.name, inputs, stepMode });
       }
     } catch (e) {
       feedback.error(e);
@@ -52,7 +54,7 @@ export function useRunScenario() {
       inputs={dialog.inputs}
       onCancel={() => setDialog(null)}
       onRun={async (values) => {
-        if (await start(dialog.id, values)) setDialog(null);
+        if (await start(dialog.id, values, dialog.stepMode)) setDialog(null);
       }}
     />
   );

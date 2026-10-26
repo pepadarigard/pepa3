@@ -1,4 +1,4 @@
-import { AlertTriangle, Ban, CheckCircle2, Hourglass, Loader2, Pause, Play, RotateCcw, SearchCheck, SkipForward, Square, ThumbsUp, XCircle, type LucideIcon } from "lucide-react";
+import { AlertTriangle, Ban, CheckCircle2, FastForward, Hourglass, Loader2, Pause, Play, RotateCcw, SearchCheck, SkipForward, Square, ThumbsUp, XCircle, type LucideIcon } from "lucide-react";
 import type { ProcessAction, ProcessStatus, ProcessSummary, ResumeAction, StepState } from "../api/types";
 import { useProcessControl } from "../api/hooks";
 import { ru } from "../i18n/ru";
@@ -42,6 +42,7 @@ const actionIcons: Record<ProcessAction, LucideIcon> = {
   retry: RotateCcw,
   markSucceeded: ThumbsUp,
   skip: SkipForward,
+  runWithoutPauses: FastForward,
 };
 
 /** Кнопки только для действий, разрешённых движком в текущем состоянии процесса. */

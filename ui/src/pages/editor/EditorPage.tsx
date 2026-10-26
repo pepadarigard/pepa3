@@ -15,7 +15,7 @@ import {
   type NodeChange,
   type ReactFlowInstance,
 } from "@xyflow/react";
-import { ArrowLeft, CalendarClock, ClipboardPaste, Copy, LayoutGrid, Play, Plus, Redo2, Save, Search, Shapes, Undo2, Workflow } from "lucide-react";
+import { ArrowLeft, Bug, CalendarClock, ClipboardPaste, Copy, LayoutGrid, Play, Plus, Redo2, Save, Search, Shapes, Undo2, Workflow } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
 import { useNodeTypes, useScenario, useScenarios } from "../../api/hooks";
@@ -160,7 +160,7 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
     }
   }, [editor.state, feedback, queryClient, scenario.id, version]);
 
-  const run = async () => {
+  const run = async (options?: { stepMode?: boolean }) => {
     let valid = report.isValid;
     if (dirty) {
       const saved = await save();
@@ -171,7 +171,7 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
       feedback.toast("Исправьте ошибки в сценарии — список внизу схемы.", "error");
       return;
     }
-    await runner.run(scenario.id);
+    await runner.run(scenario.id, options);
   };
 
   // ───────────── Изменения схемы ─────────────
@@ -417,6 +417,10 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
           Автозапуск
         </Button>
         <Button size="small" icon={Save} busy={saving} disabled={!dirty} onClick={() => void save()} title="Сохранить (Ctrl+S)">Сохранить</Button>
+        <Button size="small" icon={Bug} onClick={() => void run({ stepMode: true })}
+          title="Отладка: запустить с паузой перед каждым блоком — смотреть переменные и продолжать по шагу">
+          Пошагово
+        </Button>
         <Button size="small" variant="primary" icon={Play} onClick={() => void run()} title={report.isValid ? "Запустить новый процесс" : "Есть ошибки — запуск невозможен"}>
           Запустить
         </Button>

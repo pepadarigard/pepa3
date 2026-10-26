@@ -52,6 +52,9 @@ public enum ResumeAction
 
     /// <summary>Пропустить шаг с ошибкой и идти дальше.</summary>
     Skip,
+
+    /// <summary>Отладка: продолжить без пауз перед блоками (пошаговый режим и точки останова выключаются для процесса).</summary>
+    RunWithoutPauses,
 }
 
 /// <summary>Действия, доступные над процессом. Интерфейс показывает только их.</summary>
@@ -64,6 +67,7 @@ public enum ProcessAction
     Retry,
     MarkSucceeded,
     Skip,
+    RunWithoutPauses,
 }
 
 public sealed record EngineChange(string ProcessId);

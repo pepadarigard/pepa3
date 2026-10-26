@@ -86,6 +86,7 @@ export const NodeCard = memo(function NodeCard({ id, data, selected }: NodeProps
           </div>
         )
       )}
+      {definition.settings.breakpoint && <span className="pnode-breakpoint" title="Пауза перед этим блоком (отладка)" />}
       {errors > 0 && (
         <span className="pnode-flag" title="В блоке есть ошибки">
           {errors}

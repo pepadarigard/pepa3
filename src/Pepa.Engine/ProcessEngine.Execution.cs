@@ -144,6 +144,12 @@ public sealed partial class ProcessEngine
             return;
         }
 
+        if (BreakpointBefore(process, token, node, descriptor) is { } marker)
+        {
+            await PauseAtBreakpointAsync(process, node, descriptor, marker);
+            return;
+        }
+
         var plannedAt = _time.GetUtcNow();
         JsonObject input;
         try
@@ -871,6 +877,47 @@ public sealed partial class ProcessEngine
         await write.UpdateProcessAsync(process);
         await write.CommitAsync();
         AfterCommit(process);
+    }
+
+    /// <summary>
+    /// Отладка: нужна ли пауза перед блоком (пошаговый запуск или «Пауза перед блоком»). Возвращает маркер паузы; после
+    /// «Продолжить» маркер совпадает — и блок выполняется. Повторы после ошибки не останавливаются.
+    /// </summary>
+    private static string? BreakpointBefore(ProcessRecord process, TokenRecord token, NodeDefinition node, NodeTypeDescriptor descriptor)
+    {
+        if (descriptor.IsStart || token.Attempt > 1)
+        {
+            return null;
+        }
+
+        var debug = process.Debug;
+        if (debug?.StepMode != true && !(node.Settings.Breakpoint && debug?.IgnoreBreakpoints != true))
+        {
+            return null;
+        }
+
+        var marker = $"{token.Id}:{process.StepCount}";
+        return debug?.Passed == marker ? null : marker;
+    }
+
+    private async Task PauseAtBreakpointAsync(ProcessRecord process, NodeDefinition node, NodeTypeDescriptor descriptor, string marker)
+    {
+        var label = string.IsNullOrWhiteSpace(node.Label) ? descriptor.Title : node.Label;
+        var why = process.Debug?.StepMode == true ? "пошаговый запуск" : "пауза перед блоком";
+        var message = $"Пауза перед блоком «{label}» ({why}). Посмотрите переменные и нажмите «Продолжить».";
+        var updated = Cleared(process) with
+        {
+            Status = ProcessStatus.Paused,
+            PauseReason = PauseReason.Breakpoint,
+            StatusMessage = message,
+            Debug = (process.Debug ?? new DebugState()) with { Passed = marker },
+            UpdatedAt = _time.GetUtcNow(),
+        };
+        await using var write = await _store.BeginWriteAsync();
+        await write.UpdateProcessAsync(updated);
+        await write.AddJournalAsync(Journal(process.Id, JournalLevel.Info, message, null, node.Id));
+        await write.CommitAsync();
+        AfterCommit(updated);
     }
 
     private async Task PauseCoreAsync(ProcessRecord process, PauseReason reason)

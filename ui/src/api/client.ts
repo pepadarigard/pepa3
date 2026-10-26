@@ -114,8 +114,8 @@ export const api = {
   deleteScenario: (id: string) => request<{ message: string }>("DELETE", `/scenarios/${id}`),
   duplicateScenario: (id: string) => request<Scenario>("POST", `/scenarios/${id}/duplicate`),
   validate: (definition: ScenarioDefinition) => request<ValidationReport>("POST", "/scenarios/validate", definition),
-  run: (id: string, inputs?: Record<string, Json>) =>
-    request<{ processId: string }>("POST", `/scenarios/${id}/run`, { inputs: inputs ?? null }),
+  run: (id: string, inputs?: Record<string, Json>, stepMode = false) =>
+    request<{ processId: string }>("POST", `/scenarios/${id}/run`, { inputs: inputs ?? null, stepMode }),
 
   processes: (view: "active" | "finished" | "attention" | "all", scenarioId?: string, limit = 200) =>
     request<ProcessSummary[]>(

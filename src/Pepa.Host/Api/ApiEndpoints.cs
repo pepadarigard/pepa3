@@ -227,7 +227,7 @@ internal static class ApiEndpoints
             scenarios.Validate(definition));
 
         api.MapPost("/scenarios/{id}/run", async (string id, RunRequest? request, ProcessEngine engine, CancellationToken ct) =>
-            new RunResponse(await engine.StartProcessAsync(id, request?.Inputs, ct)));
+            new RunResponse(await engine.StartProcessAsync(id, request?.Inputs, request?.StepMode == true, ct)));
 
         // ───────────── Процессы ─────────────
         api.MapGet("/processes", async (string? view, string? scenarioId, int? limit, IPepaStore store, ProcessMapper mapper,

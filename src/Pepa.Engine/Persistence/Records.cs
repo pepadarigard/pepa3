@@ -48,6 +48,22 @@ public enum PauseReason
 
     /// <summary>Приложение было закрыто или перезапущено.</summary>
     Restart,
+
+    /// <summary>Отладка: пауза перед блоком (точка останова или пошаговый запуск).</summary>
+    Breakpoint,
+}
+
+/// <summary>Отладка процесса: пошаговый запуск и точки останова (настройка блока «Пауза перед блоком»).</summary>
+public sealed record DebugState
+{
+    /// <summary>Пауза перед каждым блоком.</summary>
+    public bool StepMode { get; init; }
+
+    /// <summary>Пользователь выбрал «Продолжить без остановок»: точки останова этого процесса не действуют.</summary>
+    public bool IgnoreBreakpoints { get; init; }
+
+    /// <summary>Пауза перед этим шагом уже была («маркер:номер шага») — при продолжении шаг выполняется.</summary>
+    public string? Passed { get; init; }
 }
 
 public sealed record ProcessRecord
@@ -75,6 +91,9 @@ public sealed record ProcessRecord
 
     /// <summary>Память блоков (позиция циклов и т.п.): ключ — идентификатор блока.</summary>
     public JsonObject? Memory { get; init; }
+
+    /// <summary>Отладка (null — обычный запуск).</summary>
+    public DebugState? Debug { get; init; }
 
     /// <summary>Процесс, который запустил этот (вызов сценария).</summary>
     public string? ParentProcessId { get; init; }

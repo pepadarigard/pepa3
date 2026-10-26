@@ -190,3 +190,24 @@ public sealed class PlatformApiTests
         Assert.Equal(409, (await f.SendAsync(HttpMethod.Post, "/api/resources/release", new { key = "нет-такого" })).Status);
     }
 }
+
+/// <summary>Отладка через API: пошаговый запуск и «Продолжить без остановок».</summary>
+public sealed class DebugApiTests
+{
+    [Fact]
+    public async Task Step_mode_run_pauses_and_can_continue_without_pauses()
+    {
+        await using var f = await HostFixture.StartAsync();
+        var scenarioId = await f.ScenarioIdAsync("Пример 1.");
+        var (_, run) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{scenarioId}/run", new { stepMode = true });
+        var id = run!["processId"]!.GetValue<string>();
+
+        var paused = (await f.WaitForProcessAsync(id, p => p["status"]!.GetValue<string>() == "paused"))["process"]!;
+        Assert.Equal("breakpoint", paused["pauseReason"]!.GetValue<string>());
+        Assert.Contains(paused["allowedActions"]!.AsArray(), a => a!.GetValue<string>() == "runWithoutPauses");
+
+        var (status, _) = await f.SendAsync(HttpMethod.Post, $"/api/processes/{id}/resume", new { action = "runWithoutPauses" });
+        Assert.Equal(200, status);
+        await f.WaitForProcessAsync(id, p => p["status"]!.GetValue<string>() == "completed");
+    }
+}
