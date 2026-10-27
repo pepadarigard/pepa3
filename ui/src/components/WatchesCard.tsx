@@ -85,7 +85,12 @@ export function WatchesCard() {
                       <input type="checkbox" checked={w.changes} onChange={(e) => update(i, { changes: e.target.checked })} /> Также изменённые файлы
                     </label>
                   </div>
-                  {status && (
+                  {status && !w.enabled && (
+                    <div className="row wrap small" style={{ gap: 8 }}>
+                      <Badge tone="muted">выключено</Badge>
+                    </div>
+                  )}
+                  {status && w.enabled && (
                     <div className="row wrap small" style={{ gap: 8 }}>
                       {status.error ? <Badge tone="danger">ошибка</Badge> : <Badge tone="success">следит</Badge>}
                       <span className="muted">файлов: {status.files}</span>

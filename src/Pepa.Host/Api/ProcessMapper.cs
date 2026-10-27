@@ -246,7 +246,9 @@ internal sealed class ProcessMapper(ProcessEngine engine, IPepaStore store)
 
         var source = trigger.Config.GetString("source") ?? "";
         var type = trigger.Config.GetString("eventType");
+        var key = trigger.Config.GetString("correlationKey");
         return $"событие «{source}" + (string.IsNullOrWhiteSpace(type) ? "" : $" / {type}") + "»" +
+               (string.IsNullOrEmpty(key) ? "" : $" с ключом «{key}»") +
                (string.IsNullOrWhiteSpace(trigger.Config.GetString("filter")) ? "" : " с условием");
     }
 }

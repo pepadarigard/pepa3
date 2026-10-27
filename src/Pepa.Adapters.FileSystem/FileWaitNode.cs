@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Pepa.Core;
+using Pepa.Core.Expressions;
 using Pepa.Core.Model;
 using Pepa.Core.Nodes;
 
@@ -38,7 +39,8 @@ public sealed class WaitFileNode(IWorkspace workspace, Func<IReadOnlyList<Folder
             {
                 Name = "name", Label = "Имя файла", Kind = FieldKind.Template, Placeholder = "*.pdf",
                 Help = "Необязательно: имя или шаблон («*» — любые символы, «?» — один символ, несколько — через «;»), " +
-                       "например {{ vars.order }}-*.pdf. Пусто — любой файл, за которым следит Pepa в этой папке.",
+                       "например {{ vars.order }}-*.pdf (значение переменной — часть имени, не шаблон). Пусто — любой файл, " +
+                       "за которым следит Pepa в этой папке.",
             },
             new FieldDescriptor
             {
@@ -88,6 +90,19 @@ public sealed class WaitFileNode(IWorkspace workspace, Func<IReadOnlyList<Folder
             if (FileNamePattern.Validate(name) is { } error)
             {
                 throw new NodeInputException(error);
+            }
+
+            // «*», «?» и «;» — только те, что написаны в самом шаблоне: значение из переменной («Ромашка; ООО») — часть имени, а
+            // в именах файлов «*» и «?» не бывает — такое значение подобрало бы чужие файлы.
+            if (configuredName is { } template && TemplateParser.HasExpressions(template))
+            {
+                var literal = string.Concat(TemplateParser.Parse(template).OfType<TemplateParser.Literal>().Select(l => l.Text));
+                if ("*?;".Any(c => name.Count(x => x == c) > literal.Count(x => x == c)))
+                {
+                    throw new NodeInputException(
+                        $"В имени файла «{name}» из переменной есть «*», «?» или «;» — такого имени файла не бывает, а как шаблон оно " +
+                        "подобрало бы чужие файлы. Проверьте значение переменной.");
+                }
             }
 
             match = $"new RegExp({JsonSerializer.Serialize(FileNamePattern.RegexSource(name))}, \"i\").test(String(event.payload.name ?? \"\"))";

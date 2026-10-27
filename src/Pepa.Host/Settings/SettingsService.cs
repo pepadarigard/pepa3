@@ -103,6 +103,9 @@ public sealed partial class SettingsService
         return new SettingsService(store, dataDirectory, settings);
     }
 
+    /// <summary>Проверить и привести к виду, в котором сохранятся (без сохранения).</summary>
+    public Task<PlatformSettings> ValidateAsync(PlatformSettings settings) => Task.FromResult(Validate(settings));
+
     public async Task<PlatformSettings> SaveAsync(PlatformSettings settings)
     {
         var normalized = Validate(settings);
@@ -245,6 +248,18 @@ public sealed partial class SettingsService
             }
 
             result.Add(watch with { Id = id, Folder = folder, Pattern = string.Join("; ", FileNamePattern.Split(watch.Pattern)) });
+        }
+
+        // Папка внутри другой, за которой следят с вложенными папками, — о каждом её файле было бы два события.
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        foreach (var outer in result.Where(w => w.Enabled && w.Subfolders))
+        {
+            if (result.FirstOrDefault(w => w.Enabled && w != outer && w.Folder.StartsWith(outer.Folder + "/", comparison)) is { } inner)
+            {
+                throw new SettingsValidationException(
+                    $"Папка «{inner.Folder}» уже входит в слежение за «{outer.Folder}» (с вложенными папками) — о каждом файле было бы два " +
+                    "события. Уберите одну из строк или снимите «И вложенные папки».");
+            }
         }
 
         return result;

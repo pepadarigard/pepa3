@@ -123,4 +123,83 @@ public sealed class FolderWatchApiTests
         Assert.Equal(200, (await f.SendAsync(HttpMethod.Put, "/api/settings", settings)).Status);
         Assert.Single((await f.GetAsync("/api/watches"))["watches"]!.AsArray());
     }
+
+    [Fact]
+    public async Task Folder_inside_a_watch_with_subfolders_is_refused()
+    {
+        await using var f = await HostFixture.StartAsync(seedSamples: false);
+        var (status, error) = await f.SendAsync(HttpMethod.Put, "/api/watches", new
+        {
+            watches = new object[] { new { folder = "входящие", pattern = "*", subfolders = true }, new { folder = "входящие/сканы", pattern = "*.pdf" } },
+        });
+        Assert.Equal(400, status);
+        Assert.Contains("уже входит в слежение", error!["error"]!.GetValue<string>());
+        // Без вложенных папок — можно: файлы разные.
+        Assert.Equal(200, (await f.SendAsync(HttpMethod.Put, "/api/watches", new
+        {
+            watches = new object[] { new { folder = "входящие", pattern = "*", subfolders = false }, new { folder = "входящие/сканы", pattern = "*.pdf" } },
+        })).Status);
+    }
+
+    [Fact]
+    public async Task Trigger_key_for_files_is_written_like_the_watch_and_must_be_watched()
+    {
+        await using var f = await HostFixture.StartAsync(seedSamples: false);
+        await f.SendAsync(HttpMethod.Put, "/api/watches", new { watches = new[] { new { folder = "входящие", pattern = "*" } } });
+        var (_, scenario) = await f.SendAsync(HttpMethod.Post, "/api/scenarios", new
+        {
+            name = "Файл",
+            nodes = new object[] { new { id = "start", type = "start" }, new { id = "end", type = "end" } },
+            edges = new object[] { new { id = "a", source = "start", sourcePort = "out", target = "end" } },
+        });
+        var scenarioId = scenario!["id"]!.GetValue<string>();
+        var (status, trigger) = await f.SendAsync(HttpMethod.Post, "/api/triggers", new
+        {
+            scenarioId, kind = "event", enabled = true, config = new { source = "files", eventType = "created", correlationKey = "входящие/" },
+        });
+        Assert.Equal(200, status);
+        Assert.Equal("входящие", trigger!["config"]!["correlationKey"]!.GetValue<string>());
+        Assert.Contains("с ключом «входящие»", trigger["description"]!.GetValue<string>());
+
+        var (refused, why) = await f.SendAsync(HttpMethod.Post, "/api/triggers", new
+        {
+            scenarioId, kind = "event", enabled = true, config = new { source = "files", correlationKey = "загрузки" },
+        });
+        Assert.Equal(400, refused);
+        Assert.Contains("не следит", why!["error"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Watch_that_a_process_waits_on_cannot_be_turned_off()
+    {
+        await using var f = await HostFixture.StartAsync(seedSamples: false);
+        await f.SendAsync(HttpMethod.Put, "/api/watches", new { watches = new[] { new { folder = "входящие", pattern = "*" } } });
+        var (_, scenario) = await f.SendAsync(HttpMethod.Post, "/api/scenarios", new
+        {
+            name = "Ждёт файл",
+            nodes = new object[]
+            {
+                new { id = "start", type = "start" },
+                new { id = "wait", type = "file.wait", config = new { folder = "входящие" } },
+                new { id = "end", type = "end" },
+            },
+            edges = new object[]
+            {
+                new { id = "a", source = "start", sourcePort = "out", target = "wait" },
+                new { id = "b", source = "wait", sourcePort = "event", target = "end" },
+            },
+        });
+        var (_, run) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{scenario!["id"]!.GetValue<string>()}/run", new { });
+        var id = run!["processId"]!.GetValue<string>();
+        await f.WaitForProcessAsync(id, p => HostFixture.Status(p) == "waiting");
+
+        var (status, error) = await f.SendAsync(HttpMethod.Put, "/api/watches", new { watches = Array.Empty<object>() });
+        Assert.Equal(409, status);
+        Assert.Contains("ждут процессы", error!["error"]!.GetValue<string>());
+        Assert.Single((await f.GetAsync("/api/watches"))["watches"]!.AsArray());
+
+        await f.SendAsync(HttpMethod.Post, $"/api/processes/{id}/cancel");
+        await f.WaitForProcessAsync(id, p => HostFixture.Status(p) == "cancelled");
+        Assert.Equal(200, (await f.SendAsync(HttpMethod.Put, "/api/watches", new { watches = Array.Empty<object>() })).Status);
+    }
 }

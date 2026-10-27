@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { BellRing, CalendarClock, Pencil, Play, Plus, Trash2 } from "lucide-react";
 import { api } from "../api/client";
 import { useTriggers } from "../api/hooks";
@@ -200,6 +200,7 @@ function TriggerEditor({ scenarioId, scenarioName, inputs, trigger, kind, onDone
   const [source, setSource] = useState(String(config.source ?? "http"));
   const [eventType, setEventType] = useState(String(config.eventType ?? ""));
   const [correlationKey, setCorrelationKey] = useState(String(config.correlationKey ?? ""));
+  const watches = useQuery({ queryKey: ["watches"], queryFn: api.watches, enabled: kind === "event" });
   const [filter, setFilter] = useState(String(config.filter ?? ""));
   const [values, setValues] = useState<Record<string, string>>(() =>
     Object.fromEntries(inputs.map((v) => {
@@ -343,7 +344,11 @@ function TriggerEditor({ scenarioId, scenarioName, inputs, trigger, kind, onDone
           </div>
           <label className="field">
             <span className="field-label">Ключ</span>
-            <input className="input" value={correlationKey} placeholder="любой" onChange={(e) => setCorrelationKey(e.target.value)} />
+            <input className="input" value={correlationKey} placeholder="любой" list={source.trim().toLowerCase() === "files" ? "watched-folders" : undefined}
+              onChange={(e) => setCorrelationKey(e.target.value)} />
+            <datalist id="watched-folders">
+              {(watches.data?.watches ?? []).map((w) => <option key={w.id} value={w.folder}>{w.pattern}</option>)}
+            </datalist>
             <span className="field-help">Необязательно. Запуск — только для событий с этим ключом (точное совпадение).</span>
           </label>
           {source.trim().toLowerCase() === "files" && (

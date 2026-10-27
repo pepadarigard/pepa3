@@ -2,7 +2,9 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
+using Pepa.Core;
 using Pepa.Core.Model;
+using Pepa.Core.Nodes;
 using Pepa.Engine;
 using Pepa.Engine.Persistence;
 using Pepa.Host.Security;
@@ -54,11 +56,29 @@ internal static class ApiEndpoints
         // Слежение за папками: новые файлы — события «files».
         api.MapGet("/watches", (SettingsService settings, Adapters.FileSystem.FolderWatcher watcher) => WatchesDto(settings, watcher));
 
-        api.MapPut("/watches", async (WatchesRequest request, SettingsService settings, Adapters.FileSystem.FolderWatcher watcher) =>
+        api.MapPut("/watches", async (WatchesRequest request, SettingsService settings, Adapters.FileSystem.FolderWatcher watcher,
+            IPepaStore store, CancellationToken ct) =>
         {
-            await settings.SaveAsync(settings.Current with { FolderWatches = request.Watches ?? [] });
+            var before = settings.Current.FolderWatches;
+            var validated = settings.Current with { FolderWatches = request.Watches ?? [] };
+            var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+            var stillWatched = (await settings.ValidateAsync(validated)).FolderWatches.Where(w => w.Enabled).Select(w => w.Folder).ToHashSet(comparer);
+            // Процесс, который ждёт файла из папки, иначе ждал бы вечно: слежение за ней сначала нужно освободить.
+            var orphaned = (await store.GetActiveSubscriptionsAsync(Adapters.FileSystem.FileEvents.Source, ct))
+                .Where(sub => sub.CorrelationKey is { } folder && before.Any(w => w.Enabled && w.Folder == folder) && !stillWatched.Contains(folder))
+                .ToList();
+            if (orphaned.Count > 0)
+            {
+                var processes = string.Join(", ", orphaned.Select(sub => $"#{sub.ProcessId[^Math.Min(6, sub.ProcessId.Length)..]}").Distinct());
+                var folders = string.Join(", ", orphaned.Select(sub => $"«{sub.CorrelationKey}»").Distinct());
+                return Results.Json(new ErrorDto($"Файлов из папки {folders} ждут процессы {processes} — без слежения они ждали бы вечно. " +
+                                                 "Остановите их (или дождитесь окончания), потом выключите слежение."),
+                    Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status409Conflict);
+            }
+
+            await settings.SaveAsync(validated);
             watcher.Configure(settings.Current.FolderWatches);
-            return WatchesDto(settings, watcher);
+            return Results.Ok(WatchesDto(settings, watcher));
         });
 
         // ───────────── Интеграции ─────────────
@@ -642,13 +662,13 @@ internal static class ApiEndpoints
             await mapper.TriggersAsync(await store.ListTriggersAsync(string.IsNullOrWhiteSpace(scenarioId) ? null : scenarioId, ct), ct));
 
         api.MapPost("/triggers", async (SaveTriggerRequest request, ProcessEngine engine, ProcessMapper mapper, IPepaStore store,
-            CancellationToken ct) => await SaveTriggerAsync(null, request, engine, mapper, store, ct));
+            SettingsService settings, CancellationToken ct) => await SaveTriggerAsync(null, request, engine, mapper, store, settings, ct));
 
         api.MapPut("/triggers/{id}", async (string id, SaveTriggerRequest request, ProcessEngine engine, ProcessMapper mapper,
-            IPepaStore store, CancellationToken ct) =>
+            IPepaStore store, SettingsService settings, CancellationToken ct) =>
             await store.GetTriggerAsync(id, ct) is null
                 ? NotFound("Запуск по расписанию или событию не найден.")
-                : Results.Ok(await SaveTriggerAsync(id, request, engine, mapper, store, ct)));
+                : Results.Ok(await SaveTriggerAsync(id, request, engine, mapper, store, settings, ct)));
 
         api.MapDelete("/triggers/{id}", async (string id, ProcessEngine engine, CancellationToken ct) =>
             await engine.DeleteTriggerAsync(id, ct)
@@ -711,8 +731,31 @@ internal static class ApiEndpoints
     }
 
     private static async Task<TriggerDto> SaveTriggerAsync(string? id, SaveTriggerRequest request, ProcessEngine engine,
-        ProcessMapper mapper, IPepaStore store, CancellationToken ct)
+        ProcessMapper mapper, IPepaStore store, SettingsService settings, CancellationToken ct)
     {
+        var config = (System.Text.Json.Nodes.JsonObject)request.Config.DeepClone();
+        if (string.Equals(config.GetString("source")?.Trim(), Adapters.FileSystem.FileEvents.Source, StringComparison.OrdinalIgnoreCase) &&
+            config.GetString("correlationKey") is { Length: > 0 } key)
+        {
+            // Ключ событий о файлах — папка слежения, записанная так же, как в слежении (иначе запуск не сработал бы никогда).
+            string relative;
+            try
+            {
+                var workspace = new Adapters.FileSystem.Workspace(settings.Current.WorkspaceRoot);
+                relative = workspace.ToRelative(workspace.Resolve(key));
+            }
+            catch (NodeInputException ex)
+            {
+                throw new SettingsValidationException($"Ключ «{key}»: {ex.Message}");
+            }
+
+            var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            var watch = settings.Current.FolderWatches.FirstOrDefault(w => string.Equals(w.Folder, relative, comparison))
+                        ?? throw new SettingsValidationException(
+                            $"За папкой «{relative}» Pepa не следит — добавьте её в «Настройки» → «Слежение за папками»: иначе запуск не сработает.");
+            config["correlationKey"] = watch.Folder;
+        }
+
         var inputs = request.Inputs?.DeepClone() as System.Text.Json.Nodes.JsonObject;
         if (id is not null && inputs is not null && await store.GetTriggerAsync(id, ct) is { Inputs: { } stored })
         {
@@ -734,7 +777,7 @@ internal static class ApiEndpoints
             Kind = request.Kind,
             Enabled = request.Enabled,
             Name = request.Name ?? "",
-            Config = (System.Text.Json.Nodes.JsonObject)request.Config.DeepClone(),
+            Config = config,
             Inputs = inputs,
             Overlap = request.Overlap ?? "skip",
             CreatedAt = default,

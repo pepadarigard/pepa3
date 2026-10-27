@@ -324,6 +324,241 @@ public sealed class FolderWatchTests : IDisposable
         Assert.Contains("не следит", stopped.StatusMessage);
     }
 
+    [Fact]
+    public async Task Empty_placeholder_next_to_a_download_is_not_reported_until_the_download_is_done()
+    {
+        await using var watcher = Create();
+        watcher.Configure([Watch("*.pdf")]);
+        watcher.Start(_time.GetUtcNow(), runLoop: false);
+        await SettleAsync(watcher);
+
+        // Firefox: пустой «report.pdf» и данные в «report.pdf.part».
+        await File.WriteAllTextAsync(Inbox("report.pdf"), "");
+        await File.WriteAllTextAsync(Inbox("report.pdf.part"), "%PDF-1.7 часть");
+        for (var i = 0; i < 15; i++)
+        {
+            await SettleAsync(watcher);
+        }
+
+        Assert.Empty(_events);
+        // Скачивание закончилось: .part переименован поверх заготовки.
+        File.Move(Inbox("report.pdf.part"), Inbox("report.pdf"), overwrite: true);
+        await SettleAsync(watcher);
+        await SettleAsync(watcher);
+        var e = Assert.Single(_events);
+        Assert.True(e.Payload!["size"]!.GetValue<long>() > 0);
+    }
+
+    [Fact]
+    public async Task Empty_file_on_its_own_is_reported_after_a_longer_wait()
+    {
+        await using var watcher = Create();
+        watcher.Configure([Watch()]);
+        watcher.Start(_time.GetUtcNow(), runLoop: false);
+        await SettleAsync(watcher);
+        await File.WriteAllTextAsync(Inbox("готово.flag"), "");
+        await SettleAsync(watcher);
+        Assert.Empty(_events);
+        _time.Advance(TimeSpan.FromSeconds(20));
+        await watcher.ScanAsync(CancellationToken.None);
+        Assert.Equal(0, Assert.Single(_events).Payload!["size"]!.GetValue<long>());
+    }
+
+    [Fact]
+    public async Task Renamed_files_and_folders_are_not_new()
+    {
+        Directory.CreateDirectory(Path.Combine(Workspace, "входящие", "2026-10"));
+        for (var i = 0; i < 5; i++)
+        {
+            await File.WriteAllTextAsync(Path.Combine(Workspace, "входящие", "2026-10", $"{i}.pdf"), $"файл {i}");
+        }
+
+        await File.WriteAllTextAsync(Inbox("a.pdf"), "a");
+        await using var watcher = Create();
+        watcher.Configure([Watch(subfolders: true)]);
+        watcher.Start(_time.GetUtcNow(), runLoop: false);
+        await SettleAsync(watcher);
+
+        Directory.Move(Path.Combine(Workspace, "входящие", "2026-10"), Path.Combine(Workspace, "входящие", "октябрь"));
+        File.Move(Inbox("a.pdf"), Inbox("a (обработан).pdf"));
+        await SettleAsync(watcher);
+        Assert.Empty(_events);
+
+        await File.WriteAllTextAsync(Inbox("новый.pdf"), "новый");
+        await SettleAsync(watcher);
+        Assert.Equal("входящие/новый.pdf", Assert.Single(_events).Payload!["path"]!.GetValue<string>());
+        Assert.Equal(7, Assert.Single(watcher.Status).Files);
+    }
+
+    [Fact]
+    public async Task Folder_hidden_and_shown_again_does_not_turn_its_files_into_events()
+    {
+        var sub = Path.Combine(Workspace, "входящие", "сканы");
+        Directory.CreateDirectory(sub);
+        await File.WriteAllTextAsync(Path.Combine(sub, "1.pdf"), "1");
+        await using var watcher = Create();
+        watcher.Configure([Watch(subfolders: true)]);
+        watcher.Start(_time.GetUtcNow(), runLoop: false);
+        await SettleAsync(watcher);
+
+        var hidden = Path.Combine(Workspace, "входящие", ".сканы");
+        Directory.Move(sub, hidden);
+        await SettleAsync(watcher);
+        Directory.Move(hidden, sub);
+        await SettleAsync(watcher);
+        Assert.Empty(_events);
+    }
+
+    [Fact]
+    public async Task Damaged_list_of_known_files_is_explained_and_does_not_stop_other_watches()
+    {
+        Directory.CreateDirectory(Path.Combine(_dir, "watches"));
+        await File.WriteAllTextAsync(Path.Combine(_dir, "watches", "watch-w1.json"), """{"key":"x","files":{"a":[null,1]}}""");
+        await File.WriteAllTextAsync(Path.Combine(_dir, "watches", "watch-w2.json"), "{не json");
+        Directory.CreateDirectory(Path.Combine(Workspace, "архив"));
+        await using var watcher = Create();
+        watcher.Configure([Watch(), Watch(folder: "архив") with { Id = "w2" }]);
+        watcher.Start(_time.GetUtcNow(), runLoop: false);
+        await SettleAsync(watcher);
+
+        Assert.Equal(2, watcher.Status.Count);
+        Assert.All(watcher.Status, s => Assert.Contains("не прочитан", s.Note));
+        Assert.All(watcher.Status, s => Assert.Null(s.Error));
+        await File.WriteAllTextAsync(Inbox("после.txt"), "x");
+        await SettleAsync(watcher);
+        Assert.Single(_events);
+    }
+
+    [Fact]
+    public async Task List_that_cannot_be_saved_keeps_its_error_until_it_is_saved()
+    {
+        // Вместо папки для списков — файл: сохранить не получится.
+        await File.WriteAllTextAsync(Path.Combine(_dir, "watches"), "не папка");
+        await using var watcher = Create();
+        watcher.Configure([Watch()]);
+        watcher.Start(_time.GetUtcNow(), runLoop: false);
+        await SettleAsync(watcher);
+        await SettleAsync(watcher);
+        Assert.Contains("Не удалось сохранить", Assert.Single(watcher.Status).Error);
+
+        File.Delete(Path.Combine(_dir, "watches"));
+        await watcher.ScanAsync(CancellationToken.None);
+        Assert.Null(Assert.Single(watcher.Status).Error);
+        Assert.True(File.Exists(Path.Combine(_dir, "watches", "watch-w1.json")));
+    }
+
+    [Fact]
+    public async Task Folder_with_too_many_entries_is_an_error_even_if_few_match()
+    {
+        for (var i = 0; i < 6; i++)
+        {
+            await File.WriteAllTextAsync(Inbox($"{i}.txt"), "x");
+        }
+
+        await using var watcher = Create(new FolderWatcherOptions { MaxEntries = 5 });
+        watcher.Configure([Watch("*.pdf")]);
+        watcher.Start(_time.GetUtcNow(), runLoop: false);
+        await SettleAsync(watcher);
+        Assert.Contains("больше 5 файлов и папок", Assert.Single(watcher.Status).Error);
+    }
+
+    [Fact]
+    public async Task Live_file_after_the_folder_came_back_is_not_dated_before_the_start()
+    {
+        await using (var first = Create())
+        {
+            first.Configure([Watch()]);
+            first.Start(_time.GetUtcNow(), runLoop: false);
+            await SettleAsync(first);
+        }
+
+        // Pepa запускается, а папки нет (сетевой диск ещё не подключён).
+        Directory.Delete(Path.Combine(Workspace, "входящие"));
+        await using var second = Create();
+        second.Configure([Watch()]);
+        var started = _time.GetUtcNow();
+        second.Start(started, runLoop: false);
+        await SettleAsync(second);
+        Directory.CreateDirectory(Path.Combine(Workspace, "входящие"));
+        await SettleAsync(second);
+        _time.Advance(TimeSpan.FromMinutes(30));
+        await File.WriteAllTextAsync(Inbox("потом.txt"), "x");
+        await SettleAsync(second);
+
+        Assert.True(Assert.Single(_events).OccurredAt >= started);
+    }
+
+    [Fact]
+    public async Task File_moved_in_while_Pepa_was_closed_reaches_the_process_that_waits_for_it()
+    {
+        var watches = new List<FolderWatchSettings> { Watch() };
+        string? root = null;
+        await using var h = await EngineHarness.CreateAsync(extraNodes: r => r.RegisterFileNodes(new Workspace(() => root!), () => watches));
+        root = Path.Combine(h.Directory, "workspace");
+        Directory.CreateDirectory(Path.Combine(root, "входящие"));
+        var state = Path.Combine(h.Directory, "watches");
+        await using (var before = new FolderWatcher(new Workspace(root), state, (input, ct) => h.Engine.PublishEventAsync(input, ct), h.Time,
+                         NullLogger.Instance))
+        {
+            before.Configure(watches);
+            before.Start(h.Engine.StartedAt, runLoop: false);
+            await before.ScanAsync(CancellationToken.None);
+            var scenario = new ScenarioBuilder("Ждём")
+                .Node("start", "start").Node("wait", WaitFileNode.TypeName, new { folder = "входящие" }).Node("end", "end")
+                .Chain("start", "wait").Edge("wait", "end", Ports.Event).Build();
+            var id = await h.RunAsync(scenario);
+            await h.WaitForAsync(id, p => p.Status == ProcessStatus.Waiting);
+            h.Time.Advance(TimeSpan.FromMinutes(1));
+            await before.ScanAsync(CancellationToken.None);
+        }
+
+        // Pepa закрыта: файл перенесли в папку — у него старое время создания и изменения.
+        var moved = Path.Combine(root, "входящие", "вчерашний.pdf");
+        await File.WriteAllTextAsync(moved, "вчера");
+        File.SetCreationTimeUtc(moved, EngineHarness.StartTime.UtcDateTime.AddDays(-1));
+        File.SetLastWriteTimeUtc(moved, EngineHarness.StartTime.UtcDateTime.AddDays(-1));
+        h.Time.Advance(TimeSpan.FromMinutes(10));
+
+        await using var after = new FolderWatcher(new Workspace(root), state, (input, ct) => h.Engine.PublishEventAsync(input, ct), h.Time,
+            NullLogger.Instance);
+        after.Configure(watches);
+        after.Start(h.Time.GetUtcNow(), runLoop: false);
+        await after.ScanAsync(CancellationToken.None);
+        h.Time.Advance(TimeSpan.FromSeconds(3));
+        await after.ScanAsync(CancellationToken.None);
+
+        var processes = await h.Store.ListProcessesAsync(new ProcessQuery { Limit = 10 });
+        await h.WaitForStatusAsync(processes.Single().Id, ProcessStatus.Completed);
+    }
+
+    [Theory]
+    [InlineData("Ромашка; ООО")]
+    [InlineData("*")]
+    public async Task Name_from_a_variable_is_never_a_pattern(string client)
+    {
+        string? root = null;
+        await using var h = await EngineHarness.CreateAsync(extraNodes: r => r.RegisterFileNodes(new Workspace(() => root!), () => [Watch()]));
+        root = Path.Combine(h.Directory, "workspace");
+        Directory.CreateDirectory(Path.Combine(root, "входящие"));
+        var scenario = new ScenarioBuilder("Ждём")
+            .Variable("client", VariableType.Text, JsonValue.Create(client))
+            .Node("start", "start")
+            .Node("wait", WaitFileNode.TypeName, new { folder = "входящие", name = "{{ vars.client }}*.pdf" })
+            .Node("end", "end")
+            .Chain("start", "wait").Edge("wait", "end", Ports.Event).Build();
+        var id = await h.RunAsync(scenario);
+        var stopped = await h.WaitForAsync(id, p => p.Status is ProcessStatus.NeedsAttention or ProcessStatus.Failed);
+        Assert.Contains("из переменной есть", stopped.StatusMessage);
+    }
+
+    [Fact]
+    public void Comma_is_part_of_a_name_not_a_separator()
+    {
+        Assert.Single(FileNamePattern.Split("Ромашка, ООО*.pdf"));
+        Assert.Matches(FileNamePattern.ToRegex("Ромашка, ООО*.pdf"), "Ромашка, ООО — счёт.pdf");
+        Assert.DoesNotMatch(FileNamePattern.ToRegex("Ромашка, ООО*.pdf"), "ООО Лютик.pdf");
+    }
+
     public void Dispose()
     {
         try
