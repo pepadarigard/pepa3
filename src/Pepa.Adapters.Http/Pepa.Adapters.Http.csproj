@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Запросы к сайтам и API по HTTP: получить данные и отправить запрос (без повтора вслепую). -->
+  <ItemGroup>
+    <ProjectReference Include="..\Pepa.Core\Pepa.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Pepa.Adapters.Http.Tests" />
+  </ItemGroup>
+</Project>

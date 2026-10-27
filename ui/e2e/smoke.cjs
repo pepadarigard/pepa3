@@ -277,9 +277,45 @@ async function main() {
     await page.waitForTimeout(200);
     await page.screenshot({ path: path.join(shots, "17b-element-picker.png") });
     await page.getByRole("dialog").getByRole("button", { name: "Закрыть" }).click();
+
+    step("Запрос к сайту: поля по виду тела");
+    await page.locator(".palette-item", { hasText: "Отправить запрос" }).click();
+    const fieldNamed = (label) => inspector.locator(".field").filter({ has: page.locator(".field-label", { hasText: label }) });
+    await fieldNamed(/^Данные/).waitFor();
+    await fieldNamed(/^Тело запроса/).locator("select").selectOption({ label: "Текст" });
+    await fieldNamed(/^Данные/).waitFor({ state: "detached" });
+    await fieldNamed(/^Текст/).locator("textarea").waitFor();
+    await page.screenshot({ path: path.join(shots, "17d-http-send.png") });
     // Блок не сохраняем: уход без сохранения подтверждается (диалоги в проверке принимаются).
     await page.goto(`${base}/#/scenarios`);
     await page.getByRole("button", { name: "Новый сценарий" }).waitFor();
+
+    step("Запрос к сайту: «Получить по адресу» в процессе");
+    const httpScenario = await (await fetch(`${base}/api/scenarios`, {
+      method: "POST",
+      headers: { "X-Pepa-Token": token, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "E2E: получить страницу",
+        variables: [{ name: "page", type: "any" }],
+        nodes: [
+          { id: "start", type: "start", position: { x: 0, y: 0 } },
+          { id: "get", type: "http.get", position: { x: 260, y: 0 }, config: { url: `${base}/`, saveTo: "page" } },
+          { id: "end", type: "end", position: { x: 520, y: 0 }, config: { message: "страница получена: {{ vars.page.includes('<html') ? 'да' : 'нет' }}" } },
+        ],
+        edges: [
+          { id: "e1", source: "start", sourcePort: "out", target: "get" },
+          { id: "e2", source: "get", sourcePort: "out", target: "end" },
+        ],
+      }),
+    })).json();
+    const httpRun = await (await fetch(`${base}/api/scenarios/${httpScenario.id}/run`, {
+      method: "POST",
+      headers: { "X-Pepa-Token": token, "Content-Type": "application/json" },
+      body: "{}",
+    })).json();
+    await page.goto(`${base}/#/process/${httpRun.processId}`);
+    await page.locator(".badge", { hasText: "Завершён" }).first().waitFor({ timeout: 15000 });
+    await page.getByText("страница получена: да").first().waitFor();
 
     step("Отладка: пошаговый запуск");
     await page.goto(`${base}/#/editor/${saved.id}`);

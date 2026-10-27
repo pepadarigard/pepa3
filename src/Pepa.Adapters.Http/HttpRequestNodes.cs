@@ -1,0 +1,346 @@
+using System.Net;
+using System.Text;
+using System.Text.Json.Nodes;
+using Pepa.Core;
+using Pepa.Core.Model;
+using Pepa.Core.Nodes;
+
+namespace Pepa.Adapters.Http;
+
+/// <summary>
+/// Получить страницу или данные API (GET). Только читает: при сбое повтор безопасен. Перенаправления проходит сам
+/// (заголовки доступа на другой сайт не передаются).
+/// </summary>
+public sealed class HttpGetNode(HttpClient client) : INodeExecutor
+{
+    public const string TypeName = "http.get";
+    private const int MaxRedirects = 10;
+
+    public NodeTypeDescriptor Descriptor { get; } = new()
+    {
+        Type = TypeName,
+        Category = HttpNodes.Category.Id,
+        Title = "Получить по адресу",
+        Description = "Загружает данные по адресу (GET) — ответ API, страницу — и сохраняет в переменную. Только читает: " +
+                      "при сбое запрос безопасно повторяется.",
+        Icon = "cloud-download",
+        Effect = NodeEffect.ReadOnly,
+        SummaryField = "url",
+        Outputs = [HttpNodes.Next, HttpNodes.Error],
+        Fields =
+        [
+            HttpNodes.UrlField,
+            HttpNodes.QueryField,
+            HttpNodes.HeadersField,
+            HttpNodes.AcceptField,
+            HttpNodes.SaveField,
+            HttpNodes.SaveToField(required: true),
+        ],
+    };
+
+    public IEnumerable<NodeConfigIssue> Validate(NodeDefinition node) => HttpNodes.ValidateCommon(node);
+
+    public async ValueTask<NodeResult> ExecuteAsync(NodeExecutionContext context, CancellationToken cancellationToken)
+    {
+        if (!StatusSet.TryParse(context.GetString("accept"), out var accept, out var problem))
+        {
+            throw new NodeInputException(problem!);
+        }
+
+        var saveTo = context.RequireString("saveTo");
+        using var first = HttpNodes.BuildRequest(context, HttpMethod.Get, null);
+        var request = first;
+        var origin = first.RequestUri!;
+        HttpResponseMessage? response = null;
+        try
+        {
+            for (var hop = 0; ; hop++)
+            {
+                try
+                {
+                    response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                }
+                catch (HttpRequestException ex)
+                {
+                    return NodeResult.Fail($"Не удалось получить «{HttpNodes.Display(request.RequestUri!)}»: {HttpNodes.Describe(ex)}.",
+                        retryable: ex.HttpRequestError != HttpRequestError.SecureConnectionError);
+                }
+
+                if (!IsRedirect(response.StatusCode) || response.Headers.Location is not { } location)
+                {
+                    break;
+                }
+
+                if (hop == MaxRedirects)
+                {
+                    return NodeResult.Fail($"«{HttpNodes.Display(origin)}» перенаправляет больше {MaxRedirects} раз подряд.", retryable: false);
+                }
+
+                var next = location.IsAbsoluteUri ? location : new Uri(request.RequestUri!, location);
+                if (next.Scheme is not ("http" or "https"))
+                {
+                    return NodeResult.Fail($"«{HttpNodes.Display(request.RequestUri!)}» перенаправляет на «{next}» — это не адрес сайта.", retryable: false);
+                }
+
+                var redirected = new HttpRequestMessage(HttpMethod.Get, next);
+                foreach (var (name, values) in first.Headers)
+                {
+                    // Ключи доступа — только тому сайту, которому их дали.
+                    if (!SameOrigin(origin, next) && IsCredential(name))
+                    {
+                        continue;
+                    }
+
+                    redirected.Headers.TryAddWithoutValidation(name, values);
+                }
+
+                response.Dispose();
+                response = null;
+                if (!ReferenceEquals(request, first))
+                {
+                    request.Dispose();
+                }
+
+                request = redirected;
+            }
+
+            var read = await HttpNodes.ReadAsync(response, request.RequestUri!, cancellationToken);
+            var address = HttpNodes.Display(read.Url);
+            if (!accept.Contains(read.Status))
+            {
+                var retryable = read.Status is >= 500 or 408 or 429;
+                return NodeResult.Fail($"«{address}» ответил {HttpNodes.StatusText(read)}{HttpNodes.Excerpt(read)}", retryable);
+            }
+
+            if (read.TooLarge || read.Binary)
+            {
+                return NodeResult.Fail($"«{address}» ответил {HttpNodes.StatusText(read)}.{HttpNodes.BodyNote(read)}", retryable: false);
+            }
+
+            return NodeResult.Ok(Ports.Out, new Dictionary<string, JsonNode?> { [saveTo] = HttpNodes.Saved(context, read) },
+                HttpNodes.Output(HttpMethod.Get, read), $"GET {address} → {HttpNodes.StatusText(read)}");
+        }
+        finally
+        {
+            response?.Dispose();
+            if (!ReferenceEquals(request, first))
+            {
+                request.Dispose();
+            }
+        }
+    }
+
+    private static bool IsRedirect(HttpStatusCode status) => status is HttpStatusCode.MovedPermanently or HttpStatusCode.Found or
+        HttpStatusCode.SeeOther or HttpStatusCode.TemporaryRedirect or HttpStatusCode.PermanentRedirect;
+
+    private static bool SameOrigin(Uri a, Uri b) =>
+        a.Scheme == b.Scheme && string.Equals(a.Host, b.Host, StringComparison.OrdinalIgnoreCase) && a.Port == b.Port;
+
+    private static bool IsCredential(string header) =>
+        header.Equals("Authorization", StringComparison.OrdinalIgnoreCase) || header.Equals("Cookie", StringComparison.OrdinalIgnoreCase) ||
+        header.Equals("Proxy-Authorization", StringComparison.OrdinalIgnoreCase) || header.Contains("key", StringComparison.OrdinalIgnoreCase) ||
+        header.Contains("token", StringComparison.OrdinalIgnoreCase);
+}
+
+/// <summary>
+/// Отправить запрос (POST, PUT, PATCH, DELETE): создать заказ, отправить данные. Меняет что-то на сервере — поэтому
+/// без ответа запрос сам не повторяется: решает пользователь. Исключение — сервер с ключом от повтора
+/// (Idempotency-Key): повтор с тем же ключом сервер второй раз не выполнит, поэтому потерянный ответ и ошибка сервера
+/// — обычная ошибка с повтором по настройкам блока. Проверить сам результат блок не умеет (у сервера не спросить).
+/// </summary>
+public sealed class HttpSendNode(HttpClient client) : INodeExecutor
+{
+    public const string TypeName = "http.send";
+    public const string IdempotencyHeader = "Idempotency-Key";
+
+    public NodeTypeDescriptor Descriptor { get; } = new()
+    {
+        Type = TypeName,
+        Category = HttpNodes.Category.Id,
+        Title = "Отправить запрос",
+        Description = "Отправляет запрос к сайту или API (POST, PUT, PATCH, DELETE) — например, создать заказ. Если ответ " +
+                      "не получен, запрос сам не повторяется: выполнил ли его сервер, решаете вы.",
+        Icon = "cloud-upload",
+        Effect = NodeEffect.External,
+        SummaryField = "url",
+        Outputs = [HttpNodes.Next, HttpNodes.Error],
+        Fields =
+        [
+            new FieldDescriptor
+            {
+                Name = "method", Label = "Метод", Kind = FieldKind.Select, Default = "POST",
+                Options = [new("POST", "POST — создать, отправить"), new("PUT", "PUT — заменить"), new("PATCH", "PATCH — изменить"), new("DELETE", "DELETE — удалить")],
+            },
+            HttpNodes.UrlField,
+            HttpNodes.QueryField,
+            HttpNodes.HeadersField,
+            new FieldDescriptor
+            {
+                Name = "bodyType", Label = "Тело запроса", Kind = FieldKind.Select, Default = "json",
+                Options = [new("json", "JSON"), new("form", "Форма (как с сайта)"), new("text", "Текст"), new("none", "Без тела")],
+            },
+            new FieldDescriptor
+            {
+                Name = "body", Label = "Данные", Kind = FieldKind.Expression,
+                Placeholder = "({ name: vars.name, amount: 100 })",
+                Help = "Выражение: объект или список. Для формы — объект «имя: значение».",
+                VisibleWhen = new FieldCondition("bodyType", ["json", "form"]),
+            },
+            new FieldDescriptor
+            {
+                Name = "text", Label = "Текст", Kind = FieldKind.MultilineTemplate,
+                VisibleWhen = new FieldCondition("bodyType", ["text"]),
+            },
+            HttpNodes.AcceptField,
+            new FieldDescriptor
+            {
+                Name = "idempotent", Label = "Сервер принимает ключ от повтора (Idempotency-Key)", Kind = FieldKind.Boolean, Default = false,
+                Help = "Включайте, только если сервер это поддерживает (например, платёжные API). Тогда после сбоя Pepa " +
+                       "повторит запрос с тем же ключом, и сервер не выполнит его второй раз. Без этого после сбоя решаете вы.",
+            },
+            HttpNodes.SaveField,
+            HttpNodes.SaveToField(required: false),
+        ],
+    };
+
+    public IEnumerable<NodeConfigIssue> Validate(NodeDefinition node) => HttpNodes.ValidateCommon(node);
+
+    /// <summary>
+    /// Ключ от повтора — один на все попытки одного и того же запроса (иначе сервер принял бы повтор за новый запрос).
+    /// Если запрос изменился (другой адрес или данные), ключ новый: с прежним сервер ответил бы итогом прежнего.
+    /// </summary>
+    public ValueTask<JsonObject?> PrepareAsync(NodeExecutionContext context, CancellationToken cancellationToken)
+    {
+        if (!context.GetBoolean("idempotent"))
+        {
+            return ValueTask.FromResult<JsonObject?>(null);
+        }
+
+        var fingerprint = HttpNodes.Hash(string.Join("\n", Method(context).Method, context.GetString("url"),
+            context.Input["query"]?.ToJsonString(), context.GetString("bodyType"), context.Input["body"]?.ToJsonString(), context.GetString("text")));
+        var previous = context.PreviousCheckpoint;
+        var key = previous?.GetString("request") == fingerprint && previous.GetString("key") is { Length: > 0 } kept
+            ? kept
+            : Guid.NewGuid().ToString("D");
+        return ValueTask.FromResult<JsonObject?>(new JsonObject { ["key"] = key, ["request"] = fingerprint });
+    }
+
+    public async ValueTask<NodeResult> ExecuteAsync(NodeExecutionContext context, CancellationToken cancellationToken)
+    {
+        if (!StatusSet.TryParse(context.GetString("accept"), out var accept, out var problem))
+        {
+            throw new NodeInputException(problem!);
+        }
+
+        var method = Method(context);
+        var idempotent = context.GetBoolean("idempotent");
+        using var request = HttpNodes.BuildRequest(context, method, Content(context));
+        if (idempotent && !request.Headers.Contains(IdempotencyHeader))
+        {
+            var key = context.Checkpoint?.GetString("key") ?? throw new NodeInputException("Нет ключа от повтора.");
+            request.Headers.TryAddWithoutValidation(IdempotencyHeader, key);
+        }
+
+        var address = HttpNodes.Display(request.RequestUri!);
+        HttpResponseMessage response;
+        try
+        {
+            response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        }
+        catch (HttpRequestException ex) when (HttpNodes.NotSent(ex))
+        {
+            return NodeResult.Fail($"Запрос к «{address}» не отправлен: {HttpNodes.Describe(ex)}.",
+                retryable: ex.HttpRequestError != HttpRequestError.SecureConnectionError);
+        }
+        catch (HttpRequestException ex)
+        {
+            return Unknown($"Запрос к «{address}» отправлен, но ответ не получен ({HttpNodes.Describe(ex)}) — выполнил ли его сервер, неизвестно.");
+        }
+
+        using (response)
+        {
+            HttpNodes.Response read;
+            var note = "";
+            try
+            {
+                read = await HttpNodes.ReadAsync(response, request.RequestUri!, cancellationToken);
+                note = HttpNodes.BodyNote(read);
+            }
+            catch (Exception ex) when (ex is HttpRequestException or IOException)
+            {
+                // Код ответа уже известен — сервер запрос обработал; не дочитано только тело.
+                read = new HttpNodes.Response((int)response.StatusCode, response.ReasonPhrase ?? response.StatusCode.ToString(),
+                    request.RequestUri!, new JsonObject(), null, null, 0, false, false, response.Content.Headers.ContentType?.MediaType);
+                note = $" Тело ответа не дочитано ({ex.Message}) — не сохранено.";
+            }
+
+            var status = HttpNodes.StatusText(read);
+            if (accept.Contains(read.Status))
+            {
+                var updates = new Dictionary<string, JsonNode?>();
+                if (context.GetString("saveTo") is { Length: > 0 } saveTo)
+                {
+                    updates[saveTo] = HttpNodes.Saved(context, read);
+                }
+
+                return new NodeResult.Success(Ports.Out, updates, HttpNodes.Output(method, read), $"{method.Method} {address} → {status}.{note}",
+                    note.Length > 0 ? MessageLevel.Warning : MessageLevel.Info);
+            }
+
+            var location = response.Headers.Location is { } l ? HttpNodes.Display(l.IsAbsoluteUri ? l : new Uri(request.RequestUri!, l)) : "?";
+            return read.Status switch
+            {
+                307 or 308 => NodeResult.Fail(
+                    $"Сервер ответил {status}: запрос нужно отправлять на «{location}». Запрос не выполнен — исправьте адрес.", retryable: false),
+                >= 300 and < 400 => new NodeResult.Unknown(
+                        $"Сервер ответил перенаправлением {status} на «{location}» — так обычно отвечают после выполненного запроса. " +
+                        $"Если это ожидаемый ответ, добавьте {read.Status} в «Успешные ответы».")
+                    { AlreadyChecked = true },
+                408 or 429 => NodeResult.Fail($"Сервер не принял запрос сейчас: {status}{HttpNodes.Excerpt(read)}"),
+                < 500 => NodeResult.Fail($"Сервер отклонил запрос: {status}{HttpNodes.Excerpt(read)}", retryable: false),
+                _ => Unknown($"Сервер ответил ошибкой {status}{HttpNodes.Excerpt(read)} — выполнил ли он запрос, неизвестно."),
+            };
+        }
+
+        // Неизвестный итог: без ключа от повтора — решает пользователь; с ключом повтор безопасен (сервер не выполнит
+        // запрос второй раз) — это ошибка с повтором по настройкам блока.
+        NodeResult Unknown(string reason) => idempotent
+            ? NodeResult.Fail(reason + " Повтор безопасен: запрос уйдёт с тем же ключом от повтора.")
+            : new NodeResult.Unknown(reason + " Проверьте на сайте и решите: повторить или считать выполненным.");
+    }
+
+    private static HttpMethod Method(NodeExecutionContext context) => context.GetString("method")?.ToUpperInvariant() switch
+    {
+        null or "" or "POST" => HttpMethod.Post,
+        "PUT" => HttpMethod.Put,
+        "PATCH" => HttpMethod.Patch,
+        "DELETE" => HttpMethod.Delete,
+        var other => throw new NodeInputException($"Метод «{other}» не поддерживается: POST, PUT, PATCH или DELETE."),
+    };
+
+    private static HttpContent? Content(NodeExecutionContext context)
+    {
+        switch (context.GetString("bodyType") ?? "json")
+        {
+            case "none":
+                return null;
+            case "text":
+                return new StringContent(context.GetString("text") ?? "", Encoding.UTF8, "text/plain");
+            case "form":
+                if (context.Input["body"] is not JsonObject form)
+                {
+                    throw new NodeInputException("Для формы «Данные» должны быть объектом: ({ имя: 'значение' }).");
+                }
+
+                return new FormUrlEncodedContent(form.Where(p => p.Value is not null)
+                    .SelectMany(p => (p.Value is JsonArray list ? list.ToArray() : [p.Value]).OfType<JsonNode>()
+                        .Select(v => new KeyValuePair<string, string>(p.Key, HttpNodes.Scalar(v)))).ToList());
+            case "json":
+                return context.Input["body"] is { } json
+                    ? new StringContent(json.ToJsonString(), Encoding.UTF8, "application/json")
+                    : null;
+            case var other:
+                throw new NodeInputException($"Неизвестный вид тела запроса «{other}».");
+        }
+    }
+}

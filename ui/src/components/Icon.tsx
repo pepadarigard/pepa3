@@ -10,6 +10,8 @@ import {
   Box,
   Camera,
   CircleX,
+  CloudDownload,
+  CloudUpload,
   Download,
   Fingerprint,
   Globe,
@@ -89,6 +91,8 @@ const nodeIcons: Record<string, LucideIcon> = {
   camera: Camera,
   "circle-x": CircleX,
   download: Download,
+  "cloud-download": CloudDownload,
+  "cloud-upload": CloudUpload,
 };
 
 export function NodeIcon({ name, ...props }: { name: string } & LucideProps) {
@@ -106,6 +110,8 @@ export function categoryColor(category: string): string {
       return "var(--cat-flow)";
     case "browser":
       return "var(--cat-browser)";
+    case "web":
+      return "var(--cat-web)";
     case "telegram":
       return "var(--cat-telegram)";
     case "desktop":
