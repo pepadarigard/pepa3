@@ -317,6 +317,40 @@ async function main() {
     await page.locator(".badge", { hasText: "Завершён" }).first().waitFor({ timeout: 15000 });
     await page.getByText("страница получена: да").first().waitFor();
 
+    step("Спросить пользователя: вопрос на «Главной» и ответ кнопкой");
+    const askScenario = await (await fetch(`${base}/api/scenarios`, {
+      method: "POST",
+      headers: { "X-Pepa-Token": token, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "E2E: вопрос",
+        variables: [{ name: "answer", type: "any" }],
+        nodes: [
+          { id: "start", type: "start", position: { x: 0, y: 0 } },
+          { id: "ask", type: "user.ask", position: { x: 260, y: 0 }, config: { question: "Оплатить заказ E2E-1?", options: "Оплатить\nОтменить", saveTo: "answer" } },
+          { id: "end", type: "end", position: { x: 520, y: 0 }, config: { message: "выбрано: {{ vars.answer }}" } },
+        ],
+        edges: [
+          { id: "e1", source: "start", sourcePort: "out", target: "ask" },
+          { id: "e2", source: "ask", sourcePort: "event", target: "end" },
+        ],
+      }),
+    })).json();
+    const askRun = await (await fetch(`${base}/api/scenarios/${askScenario.id}/run`, {
+      method: "POST",
+      headers: { "X-Pepa-Token": token, "Content-Type": "application/json" },
+      body: "{}",
+    })).json();
+    await page.goto(`${base}/#/`);
+    const questionCard = page.getByTestId("question").filter({ hasText: "Оплатить заказ E2E-1?" });
+    await questionCard.waitFor({ timeout: 15000 });
+    await page.screenshot({ path: path.join(shots, "17e-question.png") });
+    await questionCard.getByRole("button", { name: "Оплатить" }).click();
+    await page.getByText("Ответ отправлен.").waitFor();
+    await questionCard.waitFor({ state: "detached", timeout: 15000 });
+    await page.goto(`${base}/#/process/${askRun.processId}`);
+    await page.locator(".badge", { hasText: "Завершён" }).first().waitFor({ timeout: 15000 });
+    await page.getByText("выбрано: Оплатить").first().waitFor();
+
     step("Отладка: пошаговый запуск");
     await page.goto(`${base}/#/editor/${saved.id}`);
     await page.getByRole("button", { name: "Пошагово" }).click();

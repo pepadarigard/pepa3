@@ -191,7 +191,7 @@ public sealed partial class ProcessEngine
 
                 if (IsPlatformSource(input.Source))
                 {
-                    return NodeResult.Fail($"Источник «{EventSources.Platform}» служебный — его события создаёт только сама Pepa.", retryable: false);
+                    return NodeResult.Fail($"Источник «{input.Source.Trim()}» служебный — его события создаёт только сама Pepa.", retryable: false);
                 }
 
                 // Секреты отправителя в событии (данные, ключ) событие помнит: при показе они скрыты, получателю — секретны.
@@ -334,6 +334,19 @@ public sealed partial class ProcessEngine
                     : NodeResult.Fail(
                         $"Вызванный сценарий завершился {(status == "cancelled" ? "остановкой" : "с ошибкой")}" +
                         (string.IsNullOrWhiteSpace(childMessage) ? "." : $": {childMessage}"), retryable: false);
+            }
+            else if (subscription.Purpose == SubscriptionPurpose.Question)
+            {
+                // Ответ на вопрос — сам ответ, а не событие целиком (секретный ответ скрыт в тексте — он секрет события).
+                var answer = (record.Payload as JsonObject)?["answer"];
+                var updates = new Dictionary<string, JsonNode?>();
+                if (subscription.SaveTo is { } saveTo)
+                {
+                    updates[saveTo] = answer?.DeepClone();
+                }
+
+                result = NodeResult.Ok(Ports.Event, updates, new JsonObject { ["answer"] = answer?.DeepClone() },
+                    $"Получен ответ: «{answer.AsString()}».");
             }
             else
             {

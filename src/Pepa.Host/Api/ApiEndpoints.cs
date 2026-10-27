@@ -17,6 +17,8 @@ internal static class ApiEndpoints
     private static readonly ProcessStatus[] ActiveStatuses =
         [ProcessStatus.Running, ProcessStatus.Waiting, ProcessStatus.Paused, ProcessStatus.NeedsAttention];
 
+    private const long MaxQuestionImageBytes = 20 * 1024 * 1024;
+
     private static readonly ProcessStatus[] FinishedStatuses =
         [ProcessStatus.Completed, ProcessStatus.Failed, ProcessStatus.Cancelled];
 
@@ -637,6 +639,64 @@ internal static class ApiEndpoints
             };
             var records = await store.ListEventsAsync(new EventQuery { States = states, Limit = Math.Clamp(limit ?? 200, 1, 1000) }, ct);
             return await mapper.EventsAsync(records, ct);
+        });
+
+        // ───────────── Вопросы процессов («Спросить пользователя») ─────────────
+        api.MapGet("/questions", async (string? processId, ProcessEngine engine, CancellationToken ct) =>
+            (await engine.ListQuestionsAsync(string.IsNullOrWhiteSpace(processId) ? null : processId, ct)).Select(ProcessMapper.Question).ToList());
+
+        api.MapPost("/questions/{id:long}/answer", async (long id, AnswerRequest request, ProcessEngine engine, CancellationToken ct) =>
+        {
+            var answer = request.Answer;
+            if (request.Option is { } option)
+            {
+                var question = await engine.GetQuestionAsync(id, ct);
+                answer = question is not null && option >= 0 && option < question.Options.Count
+                    ? question.Options[option]
+                    : throw new EngineOperationException("Такого варианта ответа нет.");
+            }
+
+            return new AnswerResponse((await engine.AnswerQuestionAsync(id, answer, ct)).Duplicate);
+        });
+
+        api.MapGet("/questions/{id:long}/image", async (long id, ProcessEngine engine, Adapters.FileSystem.IWorkspace workspace, CancellationToken ct) =>
+        {
+            if (await engine.GetQuestionAsync(id, ct) is not { Image: { } image })
+            {
+                return Results.NotFound(new ErrorDto("У вопроса нет картинки."));
+            }
+
+            string path;
+            try
+            {
+                path = workspace.Resolve(image);
+            }
+            catch (NodeInputException ex)
+            {
+                return Results.NotFound(new ErrorDto(ex.Message));
+            }
+
+            var type = Path.GetExtension(path).ToLowerInvariant() switch
+            {
+                ".png" => "image/png",
+                ".jpg" or ".jpeg" => "image/jpeg",
+                ".gif" => "image/gif",
+                ".webp" => "image/webp",
+                ".bmp" => "image/bmp",
+                _ => null,
+            };
+            if (type is null)
+            {
+                return Results.NotFound(new ErrorDto($"«{image}» — не картинка: нужен PNG, JPEG, GIF, WebP или BMP."));
+            }
+
+            var file = new FileInfo(path);
+            if (!file.Exists || file.Length > MaxQuestionImageBytes)
+            {
+                return Results.NotFound(new ErrorDto(file.Exists ? "Картинка больше 20 МБ." : $"Файла «{image}» нет в рабочей папке."));
+            }
+
+            return Results.File(path, type);
         });
 
         api.MapPost("/events", async (PublishEventRequest request, ProcessEngine engine, CancellationToken ct) =>

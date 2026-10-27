@@ -164,7 +164,11 @@ public sealed class PepaHost : IAsyncDisposable
             "Запись действий в окнах Windows доступна только в приложении Pepa для Windows (Pepa.exe), а сейчас Pepa запущена без окна."));
         builder.Services.AddSingleton(desktopRecorder);
         builder.Services.AddSingleton(sp => new Notifications.AttentionNotifier((id, ct) => store.GetProcessAsync(id, ct), telegram,
-            () => settings.Current.NotifyTelegram, options.DesktopAlerts, sp.GetRequiredService<ILogger<Notifications.AttentionNotifier>>()));
+            () => settings.Current.NotifyTelegram, options.DesktopAlerts, sp.GetRequiredService<ILogger<Notifications.AttentionNotifier>>(),
+            question: async (process, ct) =>
+                (await sp.GetRequiredService<ProcessEngine>().ListQuestionsAsync(process.Id, ct)).FirstOrDefault() is { } asked
+                    ? ProcessMapper.Question(asked).Text
+                    : null));
         builder.Services.AddSingleton(sp => new Backups.HistoryRetention(store, () => settings.Current.HistoryDays, TimeProvider.System,
             sp.GetRequiredService<ILogger<Backups.HistoryRetention>>()));
         builder.Services.AddSingleton(sp => new Backups.DatabaseBackups(store, TimeProvider.System, sp.GetRequiredService<ILogger<Backups.DatabaseBackups>>()));
@@ -250,7 +254,10 @@ public sealed class PepaHost : IAsyncDisposable
         }, cancellationToken);
         browsers.Prune(unfinished.Select(p => p.Id).ToList());
         // Уже ждавшие решения до запуска — не новость (их видно на «Главной»); после перезапуска — одно общее сообщение.
-        notifier.Start(unfinished.Where(p => p.Status == ProcessStatus.NeedsAttention), hostContext.Recovery);
+        // Вопросы, заданные до запуска, — тоже не новость (они на «Главной»).
+        var asked = (await engine.ListQuestionsAsync(cancellationToken: cancellationToken))
+            .GroupBy(q => q.Process.Id).Select(g => KeyValuePair.Create(g.Key, ProcessMapper.Question(g.First()).Text)).ToList();
+        notifier.Start(unfinished.Where(p => p.Status == ProcessStatus.NeedsAttention), hostContext.Recovery, asked);
         // Подключение к уже авторизованному Telegram — в фоне, чтобы не задерживать запуск окна.
         _ = Task.Run(async () =>
         {

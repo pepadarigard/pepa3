@@ -16,6 +16,7 @@ import { attentionAdvice, explainProcess, isActive, processTone, type Tone } fro
 import { navigate } from "../router";
 import { canvasNodeTypes } from "./editor/GroupNodes";
 import { FlowContext, type NodeRunState } from "./editor/NodeCard";
+import { QuestionsCard } from "../components/questions";
 
 const toneColor: Record<Tone, string> = {
   info: "var(--info)",
@@ -104,6 +105,8 @@ export function ProcessPage({ id }: { id: string }) {
           {p.allowedActions.length > 0 && <div style={{ marginTop: 6 }}><ProcessActions process={p} /></div>}
         </div>
       </div>
+
+      {isActive(p.status) && <QuestionsCard processId={p.id} />}
 
       <Relations data={data} />
 

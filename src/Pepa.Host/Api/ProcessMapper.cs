@@ -108,6 +108,11 @@ internal sealed class ProcessMapper(ProcessEngine engine, IPepaStore store)
                 }
 
                 var later = process.Status is ProcessStatus.Paused or ProcessStatus.NeedsAttention ? " — применится после возобновления" : "";
+                if (subscription.Purpose == SubscriptionPurpose.Question)
+                {
+                    return subscription.State == SubscriptionState.Fulfilled ? "ответ получен" + later : "ответа на вопрос";
+                }
+
                 if (subscription.Purpose == SubscriptionPurpose.ChildProcess)
                 {
                     return subscription.State == SubscriptionState.Fulfilled
@@ -202,6 +207,23 @@ internal sealed class ProcessMapper(ProcessEngine engine, IPepaStore store)
         }
 
         return result;
+    }
+
+    // ───────────── Вопросы ─────────────
+
+    public static QuestionDto Question(QuestionInfo question)
+    {
+        // Вопрос может содержать секрет (подставленный из переменной) — как и всё, что показывается о процессе.
+        var masker = new SecretMasker(question.Process, question.Definition);
+        var note = question.Process.Status switch
+        {
+            ProcessStatus.Paused => "Процесс приостановлен — ответ применится после «Продолжить».",
+            ProcessStatus.NeedsAttention => "Процесс ждёт решения — ответ применится, когда он продолжит работу.",
+            _ => null,
+        };
+        return new QuestionDto(question.Subscription.Id, Ref(question.Process), masker.Text(question.Text) ?? "",
+            question.Options.Select(o => masker.Text(o) ?? "").ToList(), question.FreeText, question.Secret, question.Image is not null,
+            question.Subscription.CreatedAt, question.Subscription.ExpiresAt, note);
     }
 
     // ───────────── Ресурсы ─────────────

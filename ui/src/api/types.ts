@@ -217,6 +217,20 @@ export interface ProcessRef {
 
 export type SubscriptionState = "active" | "fulfilled" | "expired" | "cancelled";
 
+/** Вопрос процесса («Спросить пользователя»), который ждёт ответа. Варианты отвечаются номером. */
+export interface Question {
+  id: number;
+  process: ProcessRef;
+  text: string;
+  options: string[];
+  freeText: boolean;
+  secret: boolean;
+  hasImage: boolean;
+  askedAt: string;
+  expiresAt: string | null;
+  note: string | null;
+}
+
 export interface Wait {
   id: number;
   nodeId: string;

@@ -20,7 +20,8 @@ public static class FlowNodes
         .Register(new CallScenarioNode())
         .Register(new RunScenarioNode())
         .Register(new ParallelNode())
-        .Register(new JoinNode());
+        .Register(new JoinNode())
+        .Register(new AskUserNode());
 
     internal static readonly PortDescriptor TimeoutPort = new(Ports.Timeout, "Тайм-аут", PortKind.Optional);
 
@@ -102,6 +103,11 @@ public sealed class WaitEventNode : INodeExecutor
         {
             throw new NodeInputException(
                 $"Ключ сопоставления «{configuredKey}» получился пустым — без ключа процесс принял бы чужое событие. Проверьте переменные.");
+        }
+
+        if (string.Equals(context.GetString("source")?.Trim(), EventSources.Question, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new NodeInputException($"Источник «{EventSources.Question}» служебный: ответы на вопросы ждёт блок «Спросить пользователя».");
         }
 
         var spec = new EventSubscriptionSpec

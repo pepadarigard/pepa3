@@ -700,6 +700,11 @@ public sealed partial class ProcessEngine
                     journal.Add((JournalLevel.Info, $"Ожидание события {DescribeSpec(spec)}" +
                                                     (waitEvent.TimeoutAt is { } until ? $" до {FormatLocal(until)}." : ".")));
                 }
+                else if (spec.Purpose == SubscriptionPurpose.Question)
+                {
+                    journal.Add((JournalLevel.Info, "Вопрос пользователю — ответ ждёт на «Главной» и на странице процесса" +
+                                                    (waitEvent.TimeoutAt is { } until ? $" до {FormatLocal(until)}." : ".")));
+                }
 
                 effects.Reclaim.Add(new ReclaimRequest(NormalizeSource(spec.Source),
                     string.IsNullOrWhiteSpace(spec.EventType) ? null : spec.EventType,

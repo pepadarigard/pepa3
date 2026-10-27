@@ -26,6 +26,7 @@ export function startEventStream(queryClient: QueryClient, onState: (state: Conn
       // Ресурсы и события меняются вместе с процессами (занят/освобождён, событие применено).
       queryClient.invalidateQueries({ queryKey: ["resources"] });
       queryClient.invalidateQueries({ queryKey: ["events"] });
+      queryClient.invalidateQueries({ queryKey: ["questions"] });
       if (event.id) {
         queryClient.invalidateQueries({ queryKey: ["process", event.id] });
       }

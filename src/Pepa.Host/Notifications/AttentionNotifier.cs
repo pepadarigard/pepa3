@@ -27,6 +27,7 @@ public sealed class AttentionNotifier : IAsyncDisposable
     private const int MaxListed = 8;
 
     private readonly Func<string, CancellationToken, Task<ProcessRecord?>> _load;
+    private readonly Func<ProcessRecord, CancellationToken, Task<string?>>? _question;
     private readonly ITelegramGateway _telegram;
     private readonly Func<bool> _telegramEnabled;
     private readonly IDesktopAlerts? _desktop;
@@ -45,9 +46,12 @@ public sealed class AttentionNotifier : IAsyncDisposable
     /// <param name="telegramEnabled">Включено ли уведомление в Telegram (настройка может меняться на ходу).</param>
     /// <param name="batchDelay">Сколько собирать изменения в одну пачку.</param>
     /// <param name="retryDelay">Через сколько снова прочитать процесс, если чтение не удалось.</param>
+    /// <param name="question">Вопрос, которого ждёт процесс («Спросить пользователя»), уже без секретов; null — не ждёт.</param>
     public AttentionNotifier(Func<string, CancellationToken, Task<ProcessRecord?>> load, ITelegramGateway telegram, Func<bool> telegramEnabled,
-        IDesktopAlerts? desktop, ILogger logger, TimeSpan? batchDelay = null, TimeSpan? retryDelay = null)
+        IDesktopAlerts? desktop, ILogger logger, TimeSpan? batchDelay = null, TimeSpan? retryDelay = null,
+        Func<ProcessRecord, CancellationToken, Task<string?>>? question = null)
     {
+        _question = question;
         _retryDelay = retryDelay ?? TimeSpan.FromSeconds(30);
         _load = load;
         _telegram = telegram;
@@ -64,11 +68,18 @@ public sealed class AttentionNotifier : IAsyncDisposable
 
     /// <param name="waitingAtStart">Процессы, которые ждали решения ещё до запуска: о них отдельно не сообщается.</param>
     /// <param name="recovery">Итог восстановления: если после перезапуска процессы ждут решения — одно сообщение об этом.</param>
-    public void Start(IEnumerable<ProcessRecord> waitingAtStart, RecoveryReport? recovery)
+    /// <param name="askedAtStart">Вопросы, заданные ещё до запуска (процесс → вопрос): о них тоже не сообщается снова.</param>
+    public void Start(IEnumerable<ProcessRecord> waitingAtStart, RecoveryReport? recovery,
+        IEnumerable<KeyValuePair<string, string>>? askedAtStart = null)
     {
         foreach (var process in waitingAtStart)
         {
             _notified[process.Id] = Signature(process);
+        }
+
+        foreach (var (processId, question) in askedAtStart ?? [])
+        {
+            _notified[processId] = QuestionSignature(question);
         }
 
         _background.Add(Task.Run(() => LoopAsync(_stop.Token)));
@@ -95,7 +106,7 @@ public sealed class AttentionNotifier : IAsyncDisposable
                     ids.Add(id);
                 }
 
-                var fresh = new List<ProcessRecord>();
+                var fresh = new List<Notice>();
                 foreach (var id in ids)
                 {
                     ProcessRecord? process;
@@ -120,18 +131,32 @@ public sealed class AttentionNotifier : IAsyncDisposable
 
                     _failedReads.Remove(id);
 
-                    if (process is not { Status: ProcessStatus.NeedsAttention })
+                    // Процесс задал вопрос — о нём тоже сообщается (без ответа процесс дальше не пойдёт).
+                    string? question = null;
+                    if (process is { Status: ProcessStatus.Waiting } && _question is not null)
+                    {
+                        try
+                        {
+                            question = await _question(process, stop);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            _logger.LogWarning(ex, "Не удалось прочитать вопрос процесса {Id} для уведомления.", id);
+                        }
+                    }
+
+                    if (process is null || (process.Status != ProcessStatus.NeedsAttention && question is null))
                     {
                         // Решение принято (или процесс удалён) — следующая остановка снова будет новостью.
                         _notified.Remove(id);
                         continue;
                     }
 
-                    var signature = Signature(process);
+                    var signature = question is null ? Signature(process) : QuestionSignature(question);
                     if (_notified.GetValueOrDefault(id) != signature)
                     {
                         _notified[id] = signature;
-                        fresh.Add(process);
+                        fresh.Add(new Notice(process, question));
                     }
                 }
 
@@ -170,9 +195,9 @@ public sealed class AttentionNotifier : IAsyncDisposable
         }
     }
 
-    private async Task NotifyAsync(IReadOnlyList<ProcessRecord> processes, CancellationToken stop)
+    private async Task NotifyAsync(IReadOnlyList<Notice> notices, CancellationToken stop)
     {
-        var text = Message(processes);
+        var text = Message(notices);
         try
         {
             _desktop?.RequestAttention(text);
@@ -259,34 +284,50 @@ public sealed class AttentionNotifier : IAsyncDisposable
 
     private static string Signature(ProcessRecord process) => $"{(int)process.Attention}|{process.AttentionStepId}|{process.StatusMessage}";
 
-    internal static string Message(IReadOnlyList<ProcessRecord> processes)
+    private static string QuestionSignature(string question) => "?" + question;
+
+    /// <summary>О чём сообщить: процесс ждёт решения или (если есть вопрос) ответа на вопрос.</summary>
+    internal sealed record Notice(ProcessRecord Process, string? Question);
+
+    internal static string Message(IReadOnlyList<ProcessRecord> processes) => Message(processes.Select(p => new Notice(p, null)).ToList());
+
+    internal static string Message(IReadOnlyList<Notice> notices)
     {
         var text = new StringBuilder();
-        if (processes.Count == 1)
+        var asks = notices.All(n => n.Question is not null);
+        if (notices.Count == 1)
         {
-            var p = processes[0];
-            text.AppendLine("Pepa: процесс ждёт вашего решения.");
-            text.AppendLine($"«{p.ScenarioName}» (#{Short(p.Id)}) — {Title(p.Attention)}.");
-            if (!string.IsNullOrWhiteSpace(p.StatusMessage))
+            var (p, question) = notices[0];
+            if (question is not null)
             {
-                text.AppendLine(Cut(p.StatusMessage, 600));
+                text.AppendLine("Pepa: процесс задаёт вопрос.");
+                text.AppendLine($"«{p.ScenarioName}» (#{Short(p.Id)}): {Cut(question, 600)}");
+            }
+            else
+            {
+                text.AppendLine("Pepa: процесс ждёт вашего решения.");
+                text.AppendLine($"«{p.ScenarioName}» (#{Short(p.Id)}) — {Title(p.Attention)}.");
+                if (!string.IsNullOrWhiteSpace(p.StatusMessage))
+                {
+                    text.AppendLine(Cut(p.StatusMessage, 600));
+                }
             }
         }
         else
         {
-            text.AppendLine($"Pepa: процессов ждут вашего решения — {processes.Count}.");
-            foreach (var p in processes.Take(MaxListed))
+            text.AppendLine(asks ? $"Pepa: процессы задают вопросы — {notices.Count}." : $"Pepa: процессов ждут вашего решения — {notices.Count}.");
+            foreach (var (p, question) in notices.Take(MaxListed))
             {
-                text.AppendLine($"• «{p.ScenarioName}» (#{Short(p.Id)}) — {Title(p.Attention)}");
+                text.AppendLine($"• «{p.ScenarioName}» (#{Short(p.Id)}) — " + (question is null ? Title(p.Attention) : "вопрос: " + Cut(question, 120)));
             }
 
-            if (processes.Count > MaxListed)
+            if (notices.Count > MaxListed)
             {
-                text.AppendLine($"…и ещё {processes.Count - MaxListed}.");
+                text.AppendLine($"…и ещё {notices.Count - MaxListed}.");
             }
         }
 
-        text.Append("Подробности — в Pepa на странице «Выполнение».");
+        text.Append(notices.Any(n => n.Question is not null) ? "Ответить — в Pepa на «Главной»." : "Подробности — в Pepa на странице «Выполнение».");
         return text.ToString();
     }
 

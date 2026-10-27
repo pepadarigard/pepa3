@@ -141,6 +141,25 @@ public sealed record PublishEventRequest(string Source, string? Type, string? Co
 
 public sealed record PublishEventResponse(long EventId, bool Duplicate);
 
+// ───────────── Вопросы процессов ─────────────
+
+/// <summary>Вопрос, который ждёт ответа («Спросить пользователя»). Варианты отвечаются номером (их текст может быть скрыт).</summary>
+public sealed record QuestionDto(
+    long Id,
+    ProcessRefDto Process,
+    string Text,
+    IReadOnlyList<string> Options,
+    bool FreeText,
+    bool Secret,
+    bool HasImage,
+    DateTimeOffset AskedAt,
+    DateTimeOffset? ExpiresAt,
+    string? Note);
+
+public sealed record AnswerRequest(string? Answer, int? Option);
+
+public sealed record AnswerResponse(bool Duplicate);
+
 public sealed record ResolveEventRequest(long? SubscriptionId);
 
 // ───────────── Ресурсы ─────────────

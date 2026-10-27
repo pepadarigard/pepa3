@@ -19,6 +19,7 @@ import type {
   NodeTypes,
   Plugins,
   PepaEvent,
+  Question,
   Resource,
   SaveTrigger,
   Trigger,
@@ -149,6 +150,20 @@ export const api = {
   resolveEvent: (id: number, subscriptionId: number | null) =>
     request<{ message: string }>("POST", `/events/${id}/resolve`, { subscriptionId }),
   rerouteEvent: (id: number) => request<{ message: string }>("POST", `/events/${id}/reroute`),
+
+  questions: (processId?: string) =>
+    request<Question[]>("GET", `/questions${processId ? `?processId=${encodeURIComponent(processId)}` : ""}`),
+  answer: (id: number, answer: { answer?: string; option?: number }) =>
+    request<{ duplicate: boolean }>("POST", `/questions/${id}/answer`, answer),
+  /** Картинка к вопросу — адресом в памяти браузера (запрос с ключом доступа, обычной ссылкой не открыть). */
+  questionImage: async (id: number): Promise<string> => {
+    const response = await fetch(`/api/questions/${id}/image`, { headers: { "X-Pepa-Token": memoryToken ?? "" } });
+    if (!response.ok) {
+      const body = safeParse(await response.text()) as { error?: string } | undefined;
+      throw new ApiError(body?.error ?? `Ошибка ${response.status}`, response.status);
+    }
+    return URL.createObjectURL(await response.blob());
+  },
 
   resources: () => request<Resource[]>("GET", "/resources"),
   releaseResource: (key: string) => request<{ message: string }>("POST", "/resources/release", { key }),

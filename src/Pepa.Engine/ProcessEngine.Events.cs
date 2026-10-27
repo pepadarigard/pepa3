@@ -43,9 +43,10 @@ public sealed partial class ProcessEngine
         Manual,
     }
 
-    /// <summary>Источник служебных событий платформы: снаружи его отправить нельзя.</summary>
+    /// <summary>Источник служебных событий платформы (завершение процессов, ответы на вопросы): снаружи его отправить нельзя.</summary>
     internal static bool IsPlatformSource(string? source) =>
-        string.Equals(source?.Trim(), EventSources.Platform, StringComparison.OrdinalIgnoreCase);
+        string.Equals(source?.Trim(), EventSources.Platform, StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(source?.Trim(), EventSources.Question, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Принять событие. Повтор с тем же внешним идентификатором не создаёт новое событие.</summary>
     public async Task<PublishResult> PublishEventAsync(EventInput input, CancellationToken cancellationToken = default)
@@ -58,7 +59,7 @@ public sealed partial class ProcessEngine
 
         if (IsPlatformSource(input.Source))
         {
-            throw new EngineOperationException($"Источник «{EventSources.Platform}» служебный — его события создаёт только сама Pepa.");
+            throw new EngineOperationException($"Источник «{input.Source.Trim()}» служебный — его события создаёт только сама Pepa.");
         }
 
         if ((input.Type?.Length ?? 0) > 100)

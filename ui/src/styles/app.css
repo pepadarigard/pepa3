@@ -2080,3 +2080,32 @@ pre.json {
   border-radius: var(--radius-sm, 8px);
   padding: 10px 12px;
 }
+
+/* Вопросы процессов («Спросить пользователя»). */
+.questions-card {
+  border-color: var(--attention);
+}
+.question {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.question + .question {
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+.question-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-weight: 500;
+}
+.question-image {
+  max-width: min(100%, 480px);
+  max-height: 320px;
+  object-fit: contain;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2, transparent);
+  align-self: flex-start;
+}
+

@@ -3,6 +3,7 @@ import { useInfo, useOverview, useScenarios } from "../api/hooks";
 import { ProcessActions, ProcessStatusBadge, ProcessTable } from "../components/process";
 import { useRunScenario } from "../components/RunDialog";
 import { Button, Callout, Card, Empty, ErrorState, Loading } from "../components/ui";
+import { QuestionsCard } from "../components/questions";
 import { TriggerRow } from "../components/triggers";
 import { formatMoment, plural, relative } from "../lib/format";
 import { native } from "../lib/native";
@@ -46,6 +47,8 @@ export function HomePage() {
             Что они сделали после копии, Pepa не знает — проверьте во внешних программах.</>}
         </Callout>
       )}
+
+      <QuestionsCard />
 
       {data.eventConflicts > 0 && (
         <Callout

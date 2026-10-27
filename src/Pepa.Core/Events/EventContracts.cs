@@ -57,6 +57,9 @@ public enum SubscriptionPurpose
 {
     Event,
     ChildProcess,
+
+    /// <summary>Ответ пользователя на вопрос процесса («Спросить пользователя»).</summary>
+    Question,
 }
 
 public static class EventSources
@@ -67,4 +70,7 @@ public static class EventSources
 
     /// <summary>Служебные события платформы (например, завершение дочернего процесса).</summary>
     public const string Platform = "pepa.process";
+
+    /// <summary>Ответы пользователя на вопросы процессов — только из интерфейса Pepa.</summary>
+    public const string Question = "pepa.question";
 }

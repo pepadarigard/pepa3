@@ -92,12 +92,20 @@ public sealed partial class ProcessEngine
     }
 
     /// <summary>
-    /// Записи значения в JSON: как есть, с экранированием .NET (обычным и без экранирования не-ASCII) и как его записывает
-    /// JSON.stringify в выражениях — экранируются только кавычка, обратная косая черта и управляющие символы.
+    /// Записи значения: как есть и без пробелов по краям (тексты часто обрезают), в JSON — с экранированием .NET (обычным и
+    /// без экранирования не-ASCII) и как его записывает JSON.stringify в выражениях (экранируются только кавычка, обратная
+    /// косая черта и управляющие символы).
     /// </summary>
-    private static IEnumerable<string> Forms(string secret) =>
-        new[] { secret, JsonEncodedText.Encode(secret).Value, JsonEncodedText.Encode(secret, RelaxedEncoder).Value, JsonStringify(secret) }
-            .Distinct(StringComparer.Ordinal);
+    private static IEnumerable<string> Forms(string secret)
+    {
+        var trimmed = secret.Trim();
+        return new[]
+            {
+                secret, JsonEncodedText.Encode(secret).Value, JsonEncodedText.Encode(secret, RelaxedEncoder).Value, JsonStringify(secret),
+                trimmed, JsonEncodedText.Encode(trimmed).Value, JsonStringify(trimmed),
+            }
+            .Where(form => form.Length >= MinSecretLength).Distinct(StringComparer.Ordinal);
+    }
 
     /// <summary>Строка так, как её записывает JSON.stringify (без внешних кавычек).</summary>
     internal static string JsonStringify(string value)

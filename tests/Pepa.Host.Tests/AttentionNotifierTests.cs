@@ -242,4 +242,43 @@ public sealed class AttentionNotifierTests
         Assert.True(saved!["notifyTelegram"]!.GetValue<bool>());
         Assert.True((await f.GetAsync("/api/settings"))["notifyTelegram"]!.GetValue<bool>());
     }
+
+    [Fact]
+    public async Task Question_of_a_waiting_process_is_reported_once_with_its_text()
+    {
+        var processes = new ConcurrentDictionary<string, ProcessRecord>();
+        var questions = new ConcurrentDictionary<string, string>();
+        var telegram = new SavedMessages();
+        await using var notifier = new AttentionNotifier((id, _) => Task.FromResult(processes.GetValueOrDefault(id)), telegram, () => true,
+            null, NullLogger.Instance, TimeSpan.FromMilliseconds(30),
+            question: (process, _) => Task.FromResult(questions.GetValueOrDefault(process.Id)));
+        var old = Process("old", ProcessStatus.Waiting);
+        processes[old.Id] = old;
+        questions[old.Id] = "Вопрос до запуска";
+        notifier.Start([], recovery: null, [KeyValuePair.Create(old.Id, "Вопрос до запуска")]);
+
+        var asking = Process("q", ProcessStatus.Waiting);
+        processes[asking.Id] = asking;
+        questions[asking.Id] = "Оплатить заказ A-17 на 900 ₽?";
+        notifier.OnProcessChanged(old.Id);
+        notifier.OnProcessChanged(asking.Id);
+        await Eventually(() => telegram.Messages.Count == 1);
+        notifier.OnProcessChanged(asking.Id);
+        await Task.Delay(150);
+
+        var message = Assert.Single(telegram.Messages);
+        Assert.Contains("процесс задаёт вопрос", message);
+        Assert.Contains("«Заказ q» (#cess-q): Оплатить заказ A-17 на 900 ₽?", message);
+        Assert.Contains("Ответить — в Pepa на «Главной»", message);
+        Assert.DoesNotContain("до запуска", message);
+
+        // Ответили — новый вопрос того же процесса снова новость.
+        questions.TryRemove(asking.Id, out _);
+        notifier.OnProcessChanged(asking.Id);
+        await Task.Delay(150);
+        questions[asking.Id] = "А теперь — код из SMS?";
+        notifier.OnProcessChanged(asking.Id);
+        await Eventually(() => telegram.Messages.Count == 2);
+    }
 }
+

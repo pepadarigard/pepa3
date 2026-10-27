@@ -47,6 +47,9 @@ export const useSettings = () => useQuery({ queryKey: ["settings"], queryFn: api
 export const useEvents = (view: "open" | "conflict" | "unmatched" | "all" = "all") =>
   useQuery({ queryKey: ["events", view], queryFn: () => api.events(view), refetchInterval: 15_000 });
 
+export const useQuestions = (processId?: string) =>
+  useQuery({ queryKey: ["questions", processId ?? ""], queryFn: () => api.questions(processId), refetchInterval: 15_000 });
+
 export const useResources = () => useQuery({ queryKey: ["resources"], queryFn: api.resources, refetchInterval: 15_000 });
 
 export const useTelegram = () => useQuery({ queryKey: ["telegram"], queryFn: api.telegram, refetchInterval: 60_000 });
