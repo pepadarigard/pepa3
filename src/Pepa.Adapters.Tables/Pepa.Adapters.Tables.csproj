@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Таблицы Excel (.xlsx) и CSV в рабочей папке: прочитать, найти строку, добавить и изменить строку с проверкой. -->
+  <ItemGroup>
+    <ProjectReference Include="..\Pepa.Core\Pepa.Core.csproj" />
+    <ProjectReference Include="..\Pepa.Adapters.FileSystem\Pepa.Adapters.FileSystem.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="DocumentFormat.OpenXml" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Pepa.Adapters.Tables.Tests" />
+  </ItemGroup>
+</Project>

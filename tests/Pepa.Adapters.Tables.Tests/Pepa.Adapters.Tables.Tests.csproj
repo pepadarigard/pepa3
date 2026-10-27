@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Pepa.Adapters.Tables\Pepa.Adapters.Tables.csproj" />
+    <ProjectReference Include="..\..\src\Pepa.Engine\Pepa.Engine.csproj" />
+    <ProjectReference Include="..\..\src\Pepa.Storage.Sqlite\Pepa.Storage.Sqlite.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
+    <PackageReference Include="DocumentFormat.OpenXml" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Общая тестовая инфраструктура движка (настоящий SQLite, управляемое время, внедрение сбоев). -->
+    <Compile Include="..\Pepa.Engine.Tests\Infrastructure\**\*.cs" LinkBase="Infrastructure" />
+  </ItemGroup>
+</Project>

@@ -5,6 +5,7 @@
     <Project Path="src/Pepa.Adapters.Desktop.Windows/Pepa.Adapters.Desktop.Windows.csproj" />
     <Project Path="src/Pepa.Adapters.FileSystem/Pepa.Adapters.FileSystem.csproj" />
     <Project Path="src/Pepa.Adapters.Http/Pepa.Adapters.Http.csproj" />
+    <Project Path="src/Pepa.Adapters.Tables/Pepa.Adapters.Tables.csproj" />
     <Project Path="src/Pepa.Adapters.Telegram/Pepa.Adapters.Telegram.csproj" />
     <Project Path="src/Pepa.Assistant/Pepa.Assistant.csproj" />
     <Project Path="src/Pepa.Core/Pepa.Core.csproj" />
