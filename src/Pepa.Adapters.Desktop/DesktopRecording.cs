@@ -405,6 +405,7 @@ public sealed class DesktopRecorder(IDesktopInputMonitor monitor)
 
     private void OnClick(DesktopClickInput click)
     {
+        RememberPasswordField(click.Target);
         if (click.WithModifiers)
         {
             // Ctrl/Shift+щелчок (выделить несколько, открыть в новой вкладке) блоки не умеют — простой щелчок сделал бы другое.
@@ -470,6 +471,7 @@ public sealed class DesktopRecorder(IDesktopInputMonitor monitor)
 
     private void OnKey(DesktopKeyInput key)
     {
+        RememberPasswordField(key.Target);
         // Буквы и цифры одна за другой вне поля ввода — это набор текста (пароль в удалённом рабочем столе, поле, о котором
         // Windows не сообщает). Нажатиями его не записываем: пароль оказался бы в сценарии открытым текстом. Пока набор
         // продолжается (в том числе исправления: Backspace, стрелки, символы с AltGr), не записывается ничего.
@@ -487,16 +489,29 @@ public sealed class DesktopRecorder(IDesktopInputMonitor monitor)
         if (IsTypedChar(key.Keys) && _entries.Count > 0 && _entries[^1] is { Kind: EntryKind.Keys, Keys: { } last } previous &&
             IsTypedChar(last) && previous.Target.Window.Handle == window)
         {
-            // Набор начался раньше: убрать и его начало (буквы и исправления), их пояснения — к следующему шагу.
-            while (_entries.Count > 0 && _entries[^1] is { Kind: EntryKind.Keys, Keys: { } k } typedKey && typedKey.Target.Window.Handle == window &&
+            // Набор начался раньше: убрать и его начало (буквы и исправления между ними), их пояснения — к следующему шагу.
+            // Backspace до первой буквы — не исправление, а своё действие («назад» в проводнике): он остаётся.
+            var from = _entries.Count;
+            while (from > 0 && _entries[from - 1] is { Kind: EntryKind.Keys, Keys: { } k } typedKey && typedKey.Target.Window.Handle == window &&
                    (IsTypedChar(k) || k == "Backspace"))
             {
-                _entries.RemoveAt(_entries.Count - 1);
-                if (Carry(typedKey.Step.Note) is { } carriedNote)
+                from--;
+            }
+
+            while (from < _entries.Count && _entries[from].Keys == "Backspace")
+            {
+                from++;
+            }
+
+            foreach (var removed in _entries.Skip(from).ToList())
+            {
+                if (Carry(removed.Step.Note) is { } carriedNote)
                 {
                     AddPendingNote(carriedNote);
                 }
             }
+
+            _entries.RemoveRange(from, _entries.Count - from);
 
             _outsideTypingWindow = window;
             AddPendingNote(OutsideTyping);
@@ -554,8 +569,10 @@ public sealed class DesktopRecorder(IDesktopInputMonitor monitor)
     private void OnText(DesktopTextInput input)
     {
         var target = input.Target;
-        // Поле, которое было полем пароля, остаётся им до конца записи, даже если пароль показали («глаз» рядом с полем).
-        var secret = target.IsPassword || _passwordFields.Any(t => SameElement(t, target));
+        // Поле, которое было полем пароля (хоть раз, даже до набора), остаётся им до конца записи, даже если пароль
+        // показали («глаз» рядом с полем). Поле с «пароль» в подписи — тоже.
+        RememberPasswordField(target);
+        var secret = target.IsPassword || _passwordFields.Any(t => SameElement(t, target)) || LooksLikePassword(target);
         var variable = secret ? PasswordVariable(target) : null;
         var text = secret ? $"{{{{ vars.{variable} }}}}" : input.Text ?? "";
         var unread = !secret && input.Text is null ? UnreadNote : null;
@@ -610,6 +627,21 @@ public sealed class DesktopRecorder(IDesktopInputMonitor monitor)
     private static bool Continues(string text, string previous, bool tab) =>
         text.Length > previous.Length && text.StartsWith(previous, StringComparison.Ordinal) &&
         (tab ? text[previous.Length] == '\t' : text[previous.Length] is '\n' or '\r');
+
+    private void RememberPasswordField(DesktopTarget target)
+    {
+        if (target is { IsPassword: true, Element: not null } && !_passwordFields.Any(t => SameElement(t, target)))
+        {
+            _passwordFields.Add(target);
+        }
+    }
+
+    /// <summary>Поле ввода с подписью «Пароль», «Password», «PIN» — пароль, даже если Windows не отмечает его так.</summary>
+    private static bool LooksLikePassword(DesktopTarget target) =>
+        target.Element is { ControlType: "Edit" or "Document" or "" } e && PasswordName.IsMatch(e.Name);
+
+    private static readonly System.Text.RegularExpressions.Regex PasswordName = new(@"парол|password|passwd|\bpin\b|\bпин\b",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
     /// <summary>У каждого поля пароля — своя переменная (старый и новый пароль — разные значения).</summary>
     private string PasswordVariable(DesktopTarget target)

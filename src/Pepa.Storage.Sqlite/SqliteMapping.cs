@@ -89,6 +89,7 @@ internal static class SqliteMapping
         CreatedAt = DateOf(r, "created_at")!.Value,
         UpdatedAt = DateOf(r, "updated_at")!.Value,
         FinishedAt = DateOf(r, "finished_at"),
+        Secrets = SecretsOf(r),
     };
 
     public static TokenRecord ReadToken(SqliteDataReader r) => new()
@@ -157,7 +158,11 @@ internal static class SqliteMapping
         StartedProcesses = ArrayOf(r, "started_processes"),
         Note = Str(r, "note"),
         HandledAt = DateOf(r, "handled_at"),
+        Secrets = SecretsOf(r),
     };
+
+    private static IReadOnlyList<string>? SecretsOf(SqliteDataReader r) =>
+        Str(r, "secrets") is { } json ? System.Text.Json.JsonSerializer.Deserialize<List<string>>(json) : null;
 
     public static SubscriptionRecord ReadSubscription(SqliteDataReader r) => new()
     {

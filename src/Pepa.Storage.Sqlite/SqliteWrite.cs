@@ -51,10 +51,10 @@ internal sealed class SqliteWrite(SqliteConnection connection, SqliteTransaction
         RunAsync("""
                  INSERT INTO processes (id, scenario_id, scenario_name, scenario_version, definition, status, attention,
                      pause_reason, status_message, attention_step_id, attention_token_id, variables, last_error, memory, debug, parent_process_id,
-                     origin_key, depth, step_count, step_budget, created_at, updated_at, finished_at)
+                     origin_key, depth, step_count, step_budget, created_at, updated_at, finished_at, secrets)
                  VALUES ($id, $scenario_id, $scenario_name, $scenario_version, $definition, $status, $attention,
                      $pause_reason, $status_message, $attention_step_id, $attention_token_id, $variables, $last_error, $memory, $debug, $parent_process_id,
-                     $origin_key, $depth, $step_count, $step_budget, $created_at, $updated_at, $finished_at);
+                     $origin_key, $depth, $step_count, $step_budget, $created_at, $updated_at, $finished_at, $secrets);
                  """, c => BindProcess(c, process));
 
     public async Task UpdateProcessAsync(ProcessRecord process)
@@ -65,7 +65,7 @@ internal sealed class SqliteWrite(SqliteConnection connection, SqliteTransaction
                                          attention_token_id = $attention_token_id,
                                          variables = $variables, last_error = $last_error, memory = $memory, debug = $debug,
                                          step_count = $step_count, step_budget = $step_budget, updated_at = $updated_at,
-                                         finished_at = $finished_at
+                                         finished_at = $finished_at, secrets = $secrets
                                      WHERE id = $id;
                                      """, c => BindProcess(c, process));
         if (changed == 0)
@@ -189,9 +189,9 @@ internal sealed class SqliteWrite(SqliteConnection connection, SqliteTransaction
 
         await using var command = Command("""
                                           INSERT INTO events (source, type, external_id, correlation_key, payload, received_at, occurred_at,
-                                              state, process_id, subscription_id, candidates, started_processes, note, handled_at)
+                                              state, process_id, subscription_id, candidates, started_processes, note, handled_at, secrets)
                                           VALUES ($source, $type, $external_id, $correlation_key, $payload, $received_at, $occurred_at,
-                                              $state, $process_id, $subscription_id, $candidates, $started_processes, $note, $handled_at)
+                                              $state, $process_id, $subscription_id, $candidates, $started_processes, $note, $handled_at, $secrets)
                                           RETURNING id;
                                           """);
         BindEvent(command, record);
@@ -467,6 +467,7 @@ internal sealed class SqliteWrite(SqliteConnection connection, SqliteTransaction
         c.Parameters.AddWithValue("$last_error", JsonOrNull(p.LastError));
         c.Parameters.AddWithValue("$memory", JsonOrNull(p.Memory));
         c.Parameters.AddWithValue("$debug", p.Debug is null ? DBNull.Value : System.Text.Json.JsonSerializer.Serialize(p.Debug));
+        c.Parameters.AddWithValue("$secrets", Secrets(p.Secrets));
         c.Parameters.AddWithValue("$parent_process_id", OrNull(p.ParentProcessId));
         c.Parameters.AddWithValue("$origin_key", OrNull(p.OriginKey));
         c.Parameters.AddWithValue("$depth", p.Depth);
@@ -514,5 +515,9 @@ internal sealed class SqliteWrite(SqliteConnection connection, SqliteTransaction
         c.Parameters.AddWithValue("$started_processes", JsonOrNull(e.StartedProcesses));
         c.Parameters.AddWithValue("$note", OrNull(e.Note));
         c.Parameters.AddWithValue("$handled_at", DateOrNull(e.HandledAt));
+        c.Parameters.AddWithValue("$secrets", Secrets(e.Secrets));
     }
+
+    private static object Secrets(IReadOnlyList<string>? values) =>
+        values is null || values.Count == 0 ? DBNull.Value : System.Text.Json.JsonSerializer.Serialize(values);
 }

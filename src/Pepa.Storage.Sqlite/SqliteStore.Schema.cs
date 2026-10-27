@@ -214,5 +214,10 @@ public sealed partial class SqliteStore
         DROP TABLE resource_waiters;
         ALTER TABLE resource_waiters_v5 RENAME TO resource_waiters;
         """,
+        // 6: секретные значения процесса (прежние значения секретных переменных, пришедшие от других процессов) и события.
+        """
+        ALTER TABLE processes ADD COLUMN secrets TEXT NULL;
+        ALTER TABLE events ADD COLUMN secrets TEXT NULL;
+        """,
     ];
 }

@@ -184,7 +184,12 @@ public sealed partial class ProcessEngine
                     return NodeResult.Fail($"Источник «{EventSources.Platform}» служебный — его события создаёт только сама Pepa.", retryable: false);
                 }
 
-                var id = await write.TryInsertEventAsync(NewEventRecord(input, now));
+                // Секреты отправителя в событии (данные, ключ) событие помнит: при показе они скрыты, получателю — секретны.
+                var senderSecrets = RawSecretValues(process, Graph(process).Definition);
+                var carried = senderSecrets.Count == 0
+                    ? null
+                    : Remember(null, SecretsIn(senderSecrets, input.Payload, JsonValue.Create(input.CorrelationKey), JsonValue.Create(input.ExternalId)));
+                var id = await write.TryInsertEventAsync(NewEventRecord(input, now) with { Secrets = carried });
                 long eventId;
                 var duplicate = false;
                 if (id is null)
@@ -335,7 +340,7 @@ public sealed partial class ProcessEngine
                     $"Получено событие «{record.Source}" + (record.Type.Length > 0 ? $" / {record.Type}" : "") + $"» #{record.Id}.");
             }
 
-            return await ApplyResultAsync(process, graph, token, node, descriptor, step, result, null,
+            return await ApplyResultAsync(process, graph, token, node, descriptor, step, result, null, acquired: record.Secrets,
                 extraWrites: async (write, _, final, effects) =>
                 {
                     if (final is NodeResult.Success)
@@ -692,23 +697,23 @@ public sealed partial class ProcessEngine
                 ProcessStatus.Cancelled => "cancelled",
                 _ => "failed",
             };
-            // Секретные переменные в результат не попадают: событие видно на странице «События», а результат сохраняется в
-            // обычную переменную вызвавшего процесса.
+            // Итог — настоящие значения (вызвавший работает с ними); секреты в нём событие помнит: при показе они скрыты, а
+            // вызвавший процесс получает их как свои секретные.
             var definition = PepaJson.Deserialize<ScenarioDefinition>(process.DefinitionJson);
-            var secrets = SecretValues(process, definition);
+            var payload = new JsonObject
+            {
+                ["status"] = status,
+                ["message"] = process.StatusMessage,
+                ["variables"] = process.Variables.DeepClone(),
+            };
             await write.TryInsertEventAsync(NewEventRecord(new EventInput
             {
                 Source = EventSources.Platform,
                 Type = "finished",
                 ExternalId = $"finished:{process.Id}",
                 CorrelationKey = process.Id,
-                Payload = new JsonObject
-                {
-                    ["status"] = status,
-                    ["message"] = Redact(process.StatusMessage, secrets),
-                    ["variables"] = Redact(MaskSecretVariables(process.Variables, definition), secrets),
-                },
-            }, now));
+                Payload = payload,
+            }, now) with { Secrets = Remember(null, SecretsIn(RawSecretValues(process, definition), payload)) });
             effects.RouteEvents = true;
         }
 
@@ -767,7 +772,11 @@ public sealed partial class ProcessEngine
     // ───────────────────────────── Дочерние процессы ─────────────────────────────
 
     /// <summary>Проверенный сценарий и начальные данные процесса, готовые к записи.</summary>
-    internal sealed record PreparedStart(StoredScenario Scenario, ScenarioDefinition Definition, JsonObject Variables, NodeDefinition Start);
+    internal sealed record PreparedStart(StoredScenario Scenario, ScenarioDefinition Definition, JsonObject Variables, NodeDefinition Start)
+    {
+        /// <summary>Секретные значения, пришедшие с запуском (из вызвавшего процесса или события).</summary>
+        public IReadOnlyList<string>? Secrets { get; init; }
+    }
 
     private async Task<(PreparedStart? Prepared, NodeResult? Problem)> PrepareChildAsync(ProcessRecord parent, NodeResult.StartChild start)
     {
@@ -823,6 +832,7 @@ public sealed partial class ProcessEngine
             OriginKey = originKey,
             CreatedAt = now,
             UpdatedAt = now,
+            Secrets = Remember(null, prepared.Secrets ?? []),
         };
         var token = new TokenRecord
         {

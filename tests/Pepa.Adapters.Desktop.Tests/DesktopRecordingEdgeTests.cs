@@ -367,4 +367,55 @@ public sealed class DesktopRecordingEdgeTests
         Assert.Equal("a\nb\n", Text(steps[0]));
         Assert.Equal("Enter", Text(steps[1], "keys"));
     }
+
+    [Fact]
+    public async Task Password_shown_before_typing_is_still_a_password()
+    {
+        var d = new FakeDesktop();
+        var window = d.AddWindow("Вход");
+        var field = window.Add("Ключ доступа", type: "Edit", hasValue: true);
+        var eye = window.Add("Показать");
+        var (recorder, monitor) = await StartAsync();
+        // Нажали в поле пароля, затем «глаз» — и только потом набрали: Windows уже не считает поле полем пароля.
+        monitor.Send(new DesktopClickInput(At(0), Target(window, field, password: true), 300, 400, MouseButtonKind.Left));
+        monitor.Send(new DesktopClickInput(At(1), Target(window, eye), 400, 400, MouseButtonKind.Left));
+        monitor.Send(new DesktopTextInput(At(2), Target(window, field), "S3cr3t-Pa55"));
+        var steps = await recorder.StopAsync(CancellationToken.None);
+
+        var fill = steps.Single(s => s.Type == "desktop.fill");
+        Assert.True(fill.Secret);
+        Assert.DoesNotContain(steps, s => s.Config.ToJsonString().Contains("S3cr3t", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("Пароль")]
+    [InlineData("Подтверждение пароля")]
+    [InlineData("Password")]
+    [InlineData("PIN")]
+    public async Task Field_named_like_a_password_is_a_password(string name)
+    {
+        var d = new FakeDesktop();
+        var window = d.AddWindow("Вход");
+        var field = window.Add(name, type: "Edit", hasValue: true);
+        var (recorder, monitor) = await StartAsync();
+        monitor.Send(new DesktopTextInput(At(0), Target(window, field), "S3cr3t-Pa55"));
+        var step = Assert.Single(await recorder.StopAsync(CancellationToken.None));
+        Assert.True(step.Secret);
+    }
+
+    [Fact]
+    public async Task Backspace_before_typing_outside_a_field_is_kept()
+    {
+        var d = new FakeDesktop();
+        var window = d.AddWindow("Проводник");
+        var (recorder, monitor) = await StartAsync();
+        // Backspace — «назад» в проводнике, затем набор имени для перехода к файлу и Enter.
+        monitor.Send(new DesktopKeyInput(At(0), Target(window, null), "Backspace"));
+        monitor.Send(new DesktopKeyInput(At(1), Target(window, null), "D"));
+        monitor.Send(new DesktopKeyInput(At(1.1), Target(window, null), "O"));
+        monitor.Send(new DesktopKeyInput(At(2), Target(window, null), "Enter"));
+        var steps = await recorder.StopAsync(CancellationToken.None);
+
+        Assert.Equal(["Backspace", "Enter"], steps.Select(s => Text(s, "keys")));
+    }
 }

@@ -399,11 +399,11 @@ public sealed partial class ProcessEngine
     private async Task<bool> ApplyResultAsync(ProcessRecord process, ScenarioGraph graph, TokenRecord token,
         NodeDefinition node, NodeTypeDescriptor descriptor, StepRecord step, NodeResult result, string? resolution,
         StepState successState = StepState.Succeeded, Func<IStoreWrite, Task<NodeResult?>>? decide = null,
-        Func<IStoreWrite, long, NodeResult, CommitEffects, Task>? extraWrites = null)
+        Func<IStoreWrite, long, NodeResult, CommitEffects, Task>? extraWrites = null, IReadOnlyList<string>? acquired = null)
     {
         var effects = new CommitEffects();
         var committed = await CommitResultAsync(process, graph, token, node, descriptor, step, result, resolution, successState,
-            decide, extraWrites, effects);
+            decide, extraWrites, effects, acquired);
         if (committed is null)
         {
             return false;
@@ -418,7 +418,7 @@ public sealed partial class ProcessEngine
     private async Task<ProcessRecord?> CommitResultAsync(ProcessRecord process, ScenarioGraph graph, TokenRecord token,
         NodeDefinition node, NodeTypeDescriptor descriptor, StepRecord step, NodeResult result, string? resolution,
         StepState successState, Func<IStoreWrite, Task<NodeResult?>>? decide, Func<IStoreWrite, long, NodeResult, CommitEffects, Task>? extraWrites,
-        CommitEffects effects)
+        CommitEffects effects, IReadOnlyList<string>? acquired = null)
     {
         var label = Label(node, descriptor);
 
@@ -448,8 +448,11 @@ public sealed partial class ProcessEngine
             result = decided;
         }
 
-        // Секреты — до проверок: сообщение о неверном типе содержит присвоенное значение.
-        var secrets = SecretValues(process, graph.Definition, result);
+        // Секреты — до проверок: сообщение о неверном типе содержит присвоенное значение. С ними — секреты полученного
+        // события (секреты отправителя становятся секретами этого процесса).
+        var rawSecrets = RawSecretValues(process, graph.Definition, result);
+        rawSecrets.AddRange(acquired ?? []);
+        var secrets = Expand(rawSecrets);
         result = CheckVariableTypes(result, graph.Definition, descriptor);
         result = await ResolveIntentAsync(write, process, token, label, result, effects, now);
 
@@ -531,7 +534,12 @@ public sealed partial class ProcessEngine
         }
 
         var isNew = step.Id == 0;
-        var p = process with { UpdatedAt = now, StepCount = isNew ? process.StepCount + 1 : process.StepCount };
+        // Процесс помнит все значения, которые были секретными: и прежнее значение секретной переменной (его видно в
+        // параметрах прошлых шагов) остаётся скрытым.
+        var p = process with
+        {
+            UpdatedAt = now, StepCount = isNew ? process.StepCount + 1 : process.StepCount, Secrets = Remember(process.Secrets, rawSecrets),
+        };
         var t = token;
         var journal = new List<(JournalLevel Level, string Message)>();
 
@@ -913,7 +921,8 @@ public sealed partial class ProcessEngine
             var declared = definition.Variables.FirstOrDefault(v => v.Name == name);
             if (declared is not null && !ScenarioValidator.MatchesType(value, declared.Type))
             {
-                var preview = value?.ToJsonString() ?? "null";
+                // Значение секретной переменной не показывается даже в сообщении об ошибке.
+                var preview = declared.Secret ? SecretMask : value?.ToJsonString() ?? "null";
                 if (preview.Length > 60)
                 {
                     preview = preview[..60] + "…";

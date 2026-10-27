@@ -168,7 +168,9 @@ Windows-сервере без включённого ПК пользовател
 
 Один файл `pepa.db` в папке данных (`%LOCALAPPDATA%\Pepa`). Таблицы `scenarios`, `processes`, `tokens`, `steps`,
 `journal`, `settings`, `events`, `subscriptions`, `resources`, `resource_waiters`, `triggers`. WAL, `synchronous=FULL`, внешние ключи, все записи — через один замок. Схема
-версионируется `PRAGMA user_version`; база более новой версии не открывается старым приложением.
+версионируется `PRAGMA user_version`; база более новой версии не открывается старым приложением. Секретные значения
+процесса и события (`processes.secrets`, `events.secrets`, D-055) хранятся настоящими, как переменные, и скрываются
+только при показе.
 
 Обслуживание (в фоне, в `Pepa.Host`):
 - `DatabaseBackups` — копии базы в `backups/`: раз в сутки, по кнопке, перед обновлением схемы. В каждой копии —

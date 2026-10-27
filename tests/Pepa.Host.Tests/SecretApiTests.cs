@@ -83,4 +83,47 @@ public sealed class SecretApiTests
         Assert.Equal("S3cr3t-Pa55", saved!.Inputs!["password"]!.GetValue<string>());
         Assert.Equal("petr", saved.Inputs["login"]!.GetValue<string>());
     }
+
+    [Fact]
+    public async Task Events_page_does_not_show_secrets_sent_by_a_process_or_returned_by_a_called_scenario()
+    {
+        await using var f = await HostFixture.StartAsync(seedSamples: false);
+        var (_, child) = await f.SendAsync(HttpMethod.Post, "/api/scenarios", new
+        {
+            name = "Вызванный",
+            variables = new object[] { new { name = "password", type = "text", isInput = true } },
+            nodes = new object[] { new { id = "start", type = "start" }, new { id = "end", type = "end" } },
+            edges = new object[] { new { id = "a", source = "start", sourcePort = "out", target = "end" } },
+        });
+        var (_, sender) = await f.SendAsync(HttpMethod.Post, "/api/scenarios", new
+        {
+            name = "Отправитель",
+            variables = new object[] { new { name = "password", type = "text", isInput = true, secret = true } },
+            nodes = new object[]
+            {
+                new { id = "start", type = "start" },
+                new
+                {
+                    id = "send", type = "event.send",
+                    config = new { source = "process", eventType = "credentials", payload = "({ password: vars.password })", correlationKey = "{{ vars.password }}" },
+                },
+                new { id = "call", type = "scenario.call", config = new { scenario = child!["id"]!.GetValue<string>(), inputs = "({ password: vars.password })" } },
+                new { id = "end", type = "end" },
+            },
+            edges = new object[]
+            {
+                new { id = "a", source = "start", sourcePort = "out", target = "send" },
+                new { id = "b", source = "send", sourcePort = "out", target = "call" },
+                new { id = "c", source = "call", sourcePort = "done", target = "end" },
+            },
+        });
+        var (_, run) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{sender!["id"]!.GetValue<string>()}/run",
+            new { inputs = new { password = "S3cr3t-Pa55" } });
+        await f.WaitForProcessAsync(run!["processId"]!.GetValue<string>(), p => HostFixture.Status(p) == "completed");
+
+        var events = await f.Client.GetStringAsync("/api/events");
+        Assert.Contains("credentials", events);
+        Assert.Contains("finished", events);
+        Assert.DoesNotContain("S3cr3t-Pa55", events);
+    }
 }

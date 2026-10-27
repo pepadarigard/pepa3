@@ -101,6 +101,12 @@ public sealed record ProcessRecord
     /// <summary>Память блоков (позиция циклов и т.п.): ключ — идентификатор блока.</summary>
     public JsonObject? Memory { get; init; }
 
+    /// <summary>
+    /// Значения, которые в этом процессе секретны и не показываются: начальные и прежние значения секретных переменных,
+    /// секреты вызвавшего процесса, переданные в этот, и секреты из полученных событий.
+    /// </summary>
+    public IReadOnlyList<string>? Secrets { get; init; }
+
     /// <summary>Отладка (null — обычный запуск).</summary>
     public DebugState? Debug { get; init; }
 
@@ -321,6 +327,9 @@ public sealed record EventRecord
 
     public string? Note { get; init; }
     public DateTimeOffset? HandledAt { get; init; }
+
+    /// <summary>Секретные значения внутри события (от процесса, который его отправил): при показе — «••••», получателю — тоже секретны.</summary>
+    public IReadOnlyList<string>? Secrets { get; init; }
 }
 
 public sealed record EventQuery

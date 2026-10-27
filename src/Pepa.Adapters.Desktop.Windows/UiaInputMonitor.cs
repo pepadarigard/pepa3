@@ -80,7 +80,7 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
         private nint _keyboardHook;
 
         // Состояние потока разбора (только из него).
-        private bool _alt, _altAlone;
+        private bool _altAlone;
         private Typing? _typing;
         private readonly Dictionary<MouseButtonKind, (Raw Down, DesktopTarget? Target, AutomationElement? Window, bool Modifiers)> _down = [];
 
@@ -355,7 +355,6 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
                     OnKeyDown(raw);
                     break;
                 case RawKind.KeyUp:
-                    UpdateModifiers(raw.Vk, down: false);
                     if (_typing is { } typed && !DesktopKeyRules.IsModifier(raw.Vk))
                     {
                         // Прочитать поле, когда программа уже приняла клавишу: если после Enter она сразу очистит поле,
@@ -380,8 +379,9 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
         {
             if (DesktopKeyRules.IsModifier(raw.Vk))
             {
-                var wasDown = _alt;
-                UpdateModifiers(raw.Vk, down: true);
+                // Alt уже был зажат (это повтор), если состояние клавиатуры до этого нажатия говорит так. Не по нажатиям:
+                // после Ctrl+Alt+Del отпускание Alt перехватчик не видит.
+                var wasDown = (raw.Modifiers & Mods.Alt) != 0;
                 if (raw.Vk is 0x12 or 0xA4 or 0xA5)
                 {
                     // Повтор зажатого Alt не сбрасывает «нажат один Alt»; Alt вместе с Ctrl — это AltGr или сочетание.
@@ -406,7 +406,8 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
 
         /// <summary>Элементы-«пункты»: сдвинутое в их пределах нажатие — всё ещё нажатие на них.</summary>
         private static readonly HashSet<string> ItemTypes = new(
-            ["Button", "SplitButton", "MenuItem", "Hyperlink", "CheckBox", "RadioButton", "TabItem", "ListItem", "TreeItem", "HeaderItem"],
+            ["Button", "SplitButton", "MenuItem", "Hyperlink", "CheckBox", "RadioButton", "TabItem", "ListItem", "TreeItem", "HeaderItem",
+             "ComboBox", "DataItem"],
             StringComparer.Ordinal);
 
         /// <summary>
@@ -471,14 +472,6 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
             }
         }
 
-        /// <summary>Зажат ли Alt — только чтобы узнать отдельное нажатие Alt (меню); сочетания берут состояние из события.</summary>
-        private void UpdateModifiers(int vk, bool down)
-        {
-            if (vk is 0x12 or 0xA4 or 0xA5)
-            {
-                _alt = down;
-            }
-        }
 
         /// <summary>Запомнить текущее значение поля во время набора (не дольше <see cref="SlowRead"/>).</summary>
         private static void Remember(Typing typing)
@@ -490,14 +483,24 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
 
             var started = System.Diagnostics.Stopwatch.GetTimestamp();
             var text = TryRead(typing);
-            if (System.Diagnostics.Stopwatch.GetElapsedTime(started) > SlowRead || text is { Length: > MaxReadLength })
+            if (text is { Length: > MaxReadLength })
             {
                 typing.SkipReads = true;
                 typing.LastSeen = null;
                 return;
             }
 
-            typing.LastSeen = text ?? typing.LastSeen;
+            // Медленное чтение (первое обращение к Electron, Chromium) годится, но дальше поле во время набора не читаем.
+            if (System.Diagnostics.Stopwatch.GetElapsedTime(started) > SlowRead)
+            {
+                typing.SkipReads = true;
+            }
+
+            // Пустое поле не заменяет прочитанный текст, если его не стирали: значит, программа его уже очистила (отправила).
+            if (!string.IsNullOrEmpty(text) || typing.LastKeyErased)
+            {
+                typing.LastSeen = text ?? typing.LastSeen;
+            }
         }
 
         private void FlushTyping(DateTimeOffset at)

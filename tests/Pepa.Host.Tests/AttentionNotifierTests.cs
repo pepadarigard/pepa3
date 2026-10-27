@@ -202,7 +202,8 @@ public sealed class AttentionNotifierTests
         // Временная ошибка прошла — следующая остановка сообщается как обычно.
         processes["process-b"] = Process("b", ProcessStatus.NeedsAttention);
         notifier.OnProcessChanged("process-b");
-        await Eventually(() => alerts.Count > 0);
+        // Окно мигает раньше, чем уходит сообщение в Telegram, — ждём само сообщение.
+        await Eventually(() => !telegram.Messages.IsEmpty);
         Assert.Contains("«Заказ b»", telegram.Messages.Single());
     }
 
@@ -222,7 +223,7 @@ public sealed class AttentionNotifierTests
         processes["process-a"] = Process("a", ProcessStatus.NeedsAttention);
         // Остановившийся процесс больше не меняется — уведомление о нём приходит после повторного чтения.
         notifier.OnProcessChanged("process-a");
-        await Eventually(() => alerts.Count > 0);
+        await Eventually(() => !telegram.Messages.IsEmpty);
         Assert.Contains("«Заказ a»", telegram.Messages.Single());
     }
 

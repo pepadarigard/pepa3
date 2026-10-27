@@ -1,8 +1,9 @@
+using System.Text.Encodings.Web;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Pepa.Core.Model;
 using Pepa.Core.Nodes;
-using Pepa.Core.Serialization;
 using Pepa.Engine.Persistence;
 
 namespace Pepa.Engine;
@@ -12,16 +13,32 @@ namespace Pepa.Engine;
 /// шаге (сообщение, ошибка, пояснение, результат), проходят через замену значений на «••••» — так блокам (в том числе
 /// расширениям) не нужно помнить, что им передали пароль. Параметры шага и сами переменные хранятся настоящими (по ним
 /// процесс продолжается и проверяет результат), а при показе их скрывает <see cref="SecretMasker"/>.
+/// <para>
+/// Секретные значения путешествуют вместе с данными: процесс помнит все значения, которые были у него секретными
+/// (<see cref="ProcessRecord.Secrets"/>: прежние значения секретных переменных, переданные вызвавшим процессом,
+/// полученные с событиями), а событие — секреты, которые в нём есть (<see cref="EventRecord.Secrets"/>). Сами данные не
+/// меняются: получатель работает с настоящими значениями, скрываются они только при показе.
+/// </para>
 /// </summary>
 public sealed partial class ProcessEngine
 {
     public const string SecretMask = "••••";
 
-    /// <summary>Значения секретных переменных процесса (короче трёх знаков не скрываются: такие встречаются в любом тексте).</summary>
-    /// <param name="result">Итог шага: значения, которые он присваивает секретным переменным, тоже секретны.</param>
-    public static IReadOnlyList<string> SecretValues(ProcessRecord process, ScenarioDefinition definition, NodeResult? result = null)
+    /// <summary>Сколько секретных значений помнит процесс (при большем — самые старые забываются).</summary>
+    private const int MaxRememberedSecrets = 500;
+
+    /// <summary>Значения короче не скрываются: такие встречаются в любом тексте.</summary>
+    private const int MinSecretLength = 3;
+
+    private static readonly JavaScriptEncoder RelaxedEncoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping;
+
+    /// <summary>
+    /// Значения, секретные для процесса: секретных переменных сейчас, запомненные раньше и (если передан итог шага) те, что
+    /// шаг присваивает секретным переменным. Без вариантов записи — их добавляет <see cref="SecretValues"/>.
+    /// </summary>
+    internal static List<string> RawSecretValues(ProcessRecord process, ScenarioDefinition definition, NodeResult? result = null)
     {
-        var secrets = new List<string>();
+        var secrets = new List<string>(process.Secrets ?? []);
         var updates = (result as NodeResult.Success)?.VariableUpdates;
         foreach (var variable in definition.Variables.Where(v => v.Secret))
         {
@@ -32,8 +49,33 @@ public sealed partial class ProcessEngine
             }
         }
 
-        // Длинные — первыми: значение, которое содержит другое, скрывается целиком.
-        return secrets.Distinct(StringComparer.Ordinal).OrderByDescending(s => s.Length).ToList();
+        return secrets.Distinct(StringComparer.Ordinal).ToList();
+    }
+
+    /// <summary>
+    /// Что скрывать в текстах процесса: секретные значения и их записи в JSON (с экранированием — так их показывают
+    /// предпросмотры значений). Длинные — первыми: значение, которое содержит другое, скрывается целиком.
+    /// </summary>
+    public static IReadOnlyList<string> SecretValues(ProcessRecord process, ScenarioDefinition definition, NodeResult? result = null) =>
+        Expand(RawSecretValues(process, definition, result));
+
+    /// <summary>Значения и их записи в JSON (обычная и без экранирования не-ASCII), длинные — первыми.</summary>
+    public static IReadOnlyList<string> Expand(IEnumerable<string>? values)
+    {
+        var result = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var value in values ?? [])
+        {
+            if (value.Length < MinSecretLength)
+            {
+                continue;
+            }
+
+            result.Add(value);
+            result.Add(JsonEncodedText.Encode(value).Value);
+            result.Add(JsonEncodedText.Encode(value, RelaxedEncoder).Value);
+        }
+
+        return result.OrderByDescending(s => s.Length).ToList();
     }
 
     /// <summary>Строки и числа внутри значения (у секретного списка или объекта секретно каждое значение).</summary>
@@ -57,11 +99,69 @@ public sealed partial class ProcessEngine
                 break;
             case JsonValue value:
                 var text = value.TryGetValue<string>(out var s) ? s : value.ToJsonString();
-                if (text is { Length: >= 3 } && text is not ("true" or "false" or "null"))
+                if (text is { Length: >= MinSecretLength } && text is not ("true" or "false" or "null"))
                 {
                     secrets.Add(text);
                 }
 
+                break;
+        }
+    }
+
+    /// <summary>Запомнить секретные значения процесса (новые — в конец; лишние старые забываются).</summary>
+    internal static IReadOnlyList<string>? Remember(IReadOnlyList<string>? known, IEnumerable<string> values)
+    {
+        var list = new List<string>(known ?? []);
+        foreach (var value in values)
+        {
+            if (value.Length >= MinSecretLength && !list.Contains(value, StringComparer.Ordinal))
+            {
+                list.Add(value);
+            }
+        }
+
+        if (list.Count > MaxRememberedSecrets)
+        {
+            list.RemoveRange(0, list.Count - MaxRememberedSecrets);
+        }
+
+        return list.Count == 0 ? null : list;
+    }
+
+    /// <summary>Какие из секретных значений есть внутри данных (целым значением или частью строки).</summary>
+    internal static List<string> SecretsIn(IReadOnlyList<string> secrets, params JsonNode?[] data)
+    {
+        var strings = new List<string>();
+        foreach (var node in data)
+        {
+            Strings(node, strings);
+        }
+
+        // Короткое значение (ПИН-код) — только если совпадает целиком: иначе «1234» нашлось бы в номере заказа «A-12345».
+        return secrets.Where(secret => strings.Any(s => s == secret || (secret.Length >= 6 && s.Contains(secret, StringComparison.Ordinal))))
+            .ToList();
+    }
+
+    private static void Strings(JsonNode? node, List<string> into)
+    {
+        switch (node)
+        {
+            case JsonObject obj:
+                foreach (var (_, value) in obj)
+                {
+                    Strings(value, into);
+                }
+
+                break;
+            case JsonArray array:
+                foreach (var item in array)
+                {
+                    Strings(item, into);
+                }
+
+                break;
+            case JsonValue value:
+                into.Add(value.TryGetValue<string>(out var s) ? s : value.ToJsonString());
                 break;
         }
     }
@@ -75,7 +175,52 @@ public sealed partial class ProcessEngine
 
         foreach (var secret in secrets)
         {
-            text = text.Replace(secret, SecretMask, StringComparison.Ordinal);
+            // Короткое значение (ПИН-код) — только отдельным словом: «1234» в номере заказа «A-12345» — не ПИН.
+            text = secret.Length >= ShortSecretLength
+                ? text.Replace(secret, SecretMask, StringComparison.Ordinal)
+                : Regex.Replace(text, @"(?<![\p{L}\p{N}])" + Regex.Escape(secret) + @"(?![\p{L}\p{N}])", SecretMask, RegexOptions.CultureInvariant);
+        }
+
+        return RedactPreviews(text, secrets);
+    }
+
+    /// <summary>Значения короче скрываются только отдельным словом.</summary>
+    private const int ShortSecretLength = 6;
+
+    /// <summary>
+    /// Блоки сокращают длинные значения в сообщениях («tok_9f8e…»): начало секрета перед «…» — тоже секрет.
+    /// </summary>
+    private static string RedactPreviews(string text, IReadOnlyList<string> secrets)
+    {
+        const int MinPrefix = ShortSecretLength;
+        foreach (var ellipsis in new[] { "…", "..." })
+        {
+            var at = text.IndexOf(ellipsis, StringComparison.Ordinal);
+            while (at >= MinPrefix)
+            {
+                var cut = 0;
+                foreach (var secret in secrets)
+                {
+                    for (var length = Math.Min(secret.Length - 1, at); length >= MinPrefix; length--)
+                    {
+                        if (string.CompareOrdinal(text, at - length, secret, 0, length) == 0)
+                        {
+                            cut = Math.Max(cut, length);
+                            break;
+                        }
+                    }
+                }
+
+                if (cut > 0)
+                {
+                    text = string.Concat(text.AsSpan(0, at - cut), SecretMask, text.AsSpan(at + ellipsis.Length));
+                    at = text.IndexOf(ellipsis, at - cut + SecretMask.Length, StringComparison.Ordinal);
+                }
+                else
+                {
+                    at = text.IndexOf(ellipsis, at + ellipsis.Length, StringComparison.Ordinal);
+                }
+            }
         }
 
         return text;
@@ -83,6 +228,9 @@ public sealed partial class ProcessEngine
 
     public static JsonObject? Redact(JsonObject? json, IReadOnlyList<string> secrets) =>
         json is null || secrets.Count == 0 ? json : (JsonObject)RedactNode(json.DeepClone(), secrets)!;
+
+    public static JsonNode? Redact(JsonNode? json, IReadOnlyList<string> secrets) =>
+        json is null || secrets.Count == 0 ? json : RedactNode(json.DeepClone(), secrets);
 
     private static JsonNode? RedactNode(JsonNode? node, IReadOnlyList<string> secrets)
     {
@@ -144,57 +292,27 @@ public sealed partial class ProcessEngine
     }
 
     /// <summary>
-    /// Значения, переданные вызванному сценарию из секретных переменных, секретны и в нём (даже если там переменная не
-    /// отмечена): отметка ставится в копии сценария, с которой работает дочерний процесс.
+    /// Секреты вызвавшего процесса, переданные вызванному сценарию: они секретны и в нём (даже если там переменная не
+    /// отмечена секретной), а сами значения остаются настоящими.
     /// </summary>
     internal static PreparedStart InheritSecrets(ProcessRecord parent, PreparedStart prepared)
     {
-        var parentSecrets = SecretValues(parent, PepaJson.Deserialize<ScenarioDefinition>(parent.DefinitionJson));
-        if (parentSecrets.Count == 0)
-        {
-            return prepared;
-        }
-
-        var changed = false;
-        var variables = prepared.Definition.Variables.Select(v =>
-        {
-            if (v.Secret || !ContainsAny(prepared.Variables[v.Name], parentSecrets))
-            {
-                return v;
-            }
-
-            changed = true;
-            return v with { Secret = true };
-        }).ToList();
-        if (!changed)
-        {
-            return prepared;
-        }
-
-        var definition = prepared.Definition with { Variables = variables };
-        return prepared with { Definition = definition, Scenario = prepared.Scenario with { DefinitionJson = PepaJson.Serialize(definition) } };
+        var parentSecrets = RawSecretValues(parent, Core.Serialization.PepaJson.Deserialize<ScenarioDefinition>(parent.DefinitionJson));
+        return parentSecrets.Count == 0 ? prepared : prepared with { Secrets = SecretsIn(parentSecrets, prepared.Variables) };
     }
-
-    private static bool ContainsAny(JsonNode? node, IReadOnlyList<string> secrets) => node switch
-    {
-        JsonObject obj => obj.Any(p => ContainsAny(p.Value, secrets)),
-        JsonArray array => array.Any(item => ContainsAny(item, secrets)),
-        JsonValue value => (value.TryGetValue<string>(out var text) ? text : value.ToJsonString()) is var s &&
-                           secrets.Any(secret => s.Contains(secret, StringComparison.Ordinal)),
-        _ => false,
-    };
 }
 
 /// <summary>
 /// Как показать процесс, не раскрывая секретов: секретные переменные — «••••»; в параметрах шага — каждое поле, в котором
 /// блок использовал секретную переменную (так скрыто и прежнее значение, если переменную потом поменяли); везде остальное —
-/// по значениям.
+/// по значениям (все значения, которые были секретными в этом процессе).
 /// </summary>
-public sealed partial class SecretMasker
+public sealed class SecretMasker
 {
     private readonly ScenarioDefinition _definition;
     private readonly IReadOnlyList<string> _secretNames;
     private readonly Dictionary<string, NodeDefinition> _nodes;
+    private readonly Regex? _usesSecret;
 
     public SecretMasker(ProcessRecord process, ScenarioDefinition definition)
     {
@@ -202,11 +320,19 @@ public sealed partial class SecretMasker
         _secretNames = definition.Variables.Where(v => v.Secret).Select(v => v.Name).ToList();
         _nodes = definition.Nodes.GroupBy(n => n.Id).ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
         Values = ProcessEngine.SecretValues(process, definition);
+        if (_secretNames.Count > 0)
+        {
+            // vars.password, vars?.password, vars["password"], vars?.['password'] — в шаблонах и выражениях.
+            var names = string.Join("|", _secretNames.Select(Regex.Escape));
+            _usesSecret = new Regex(
+                @"\bvars\s*(?:\?\.|\.)\s*(?:" + names + @")(?![\p{L}\p{N}_$])|\bvars\s*(?:\?\.)?\[\s*(['""`])(?:" + names + @")\1\s*\]",
+                RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+        }
     }
 
     public IReadOnlyList<string> Values { get; }
 
-    public bool Any => _secretNames.Count > 0;
+    public bool Any => _secretNames.Count > 0 || Values.Count > 0;
 
     public string? Text(string? text) => ProcessEngine.Redact(text, Values);
 
@@ -216,7 +342,7 @@ public sealed partial class SecretMasker
         ProcessEngine.Redact(ProcessEngine.MaskSecretVariables(variables, _definition), Values)!;
 
     /// <summary>Сценарий для показа: значения по умолчанию секретных переменных скрыты.</summary>
-    public ScenarioDefinition Definition() => !Any
+    public ScenarioDefinition Definition() => _secretNames.Count == 0
         ? _definition
         : _definition with
         {
@@ -231,11 +357,11 @@ public sealed partial class SecretMasker
         }
 
         var input = step.Input is null ? null : (JsonObject)step.Input.DeepClone();
-        if (input is not null && _nodes.TryGetValue(step.NodeId, out var node))
+        if (input is not null && _usesSecret is not null && _nodes.TryGetValue(step.NodeId, out var node))
         {
             foreach (var (field, value) in node.Config)
             {
-                if (input.ContainsKey(field) && value is not null && UsesSecret(value.ToJsonString()))
+                if (input.ContainsKey(field) && UsesSecret(value))
                 {
                     input[field] = ProcessEngine.SecretMask;
                 }
@@ -257,7 +383,12 @@ public sealed partial class SecretMasker
         };
     }
 
-    /// <summary>В поле блока есть обращение к секретной переменной: vars.password или vars["password"].</summary>
-    private bool UsesSecret(string config) => _secretNames.Any(name =>
-        Regex.IsMatch(config, @"vars\s*(\.\s*" + Regex.Escape(name) + @"(?![\p{L}\p{N}_$])|\[\s*\\?['""`]" + Regex.Escape(name) + @"\\?['""`]\s*\])"));
+    /// <summary>В поле блока (в любой его строке) есть обращение к секретной переменной.</summary>
+    private bool UsesSecret(JsonNode? value) => value switch
+    {
+        JsonObject obj => obj.Any(p => UsesSecret(p.Value)),
+        JsonArray array => array.Any(UsesSecret),
+        JsonValue v when v.TryGetValue<string>(out var text) => _usesSecret!.IsMatch(text),
+        _ => false,
+    };
 }

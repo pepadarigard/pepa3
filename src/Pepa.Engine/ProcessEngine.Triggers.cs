@@ -212,6 +212,8 @@ public sealed partial class ProcessEngine
                 }
 
                 prepared = await PrepareStartAsync(trigger.ScenarioId, inputs, cancellationToken);
+                // Секреты из события секретны и в запущенном процессе.
+                prepared = prepared with { Secrets = record.Secrets };
             }
             catch (Exception ex) when (ex is ExpressionException or EngineOperationException or ScenarioInvalidException)
             {

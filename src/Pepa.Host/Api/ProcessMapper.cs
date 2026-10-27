@@ -174,8 +174,11 @@ internal sealed class ProcessMapper(ProcessEngine engine, IPepaStore store)
                     subscription?.State == SubscriptionState.Active && !process.IsTerminal));
             }
 
-            result.Add(new EventDto(record.Id, record.Source, record.Type, record.ExternalId, record.CorrelationKey,
-                record.Payload?.DeepClone(), record.ReceivedAt, record.State, owner is null ? null : Ref(owner), candidates,
+            // Секреты процесса-отправителя (пароль в данных события, итог вызванного сценария) не показываются.
+            var secrets = ProcessEngine.Expand(record.Secrets);
+            result.Add(new EventDto(record.Id, record.Source, record.Type, ProcessEngine.Redact(record.ExternalId, secrets),
+                ProcessEngine.Redact(record.CorrelationKey, secrets), ProcessEngine.Redact(record.Payload, secrets), record.ReceivedAt,
+                record.State, owner is null ? null : Ref(owner), candidates,
                 record.StartedProcesses?.Select(n => n?.GetValue<string>()).OfType<string>().ToList() ?? [],
                 record.Note, record.HandledAt));
         }
