@@ -73,6 +73,7 @@ export type PortKind = "normal" | "error" | "optional";
 export type FieldKind =
   | "text"
   | "template"
+  | "url"
   | "multilineTemplate"
   | "path"
   | "expression"

@@ -111,6 +111,56 @@ public sealed class JintExpressionEvaluator(ExpressionLimits? limits = null) : I
         return builder.ToString();
     }
 
+    public string RenderUrl(string template, ExpressionScope scope)
+    {
+        var segments = TemplateParser.Parse(template);
+        if (segments.All(s => s is TemplateParser.Literal))
+        {
+            return template;
+        }
+
+        var engine = CreateEngine(scope);
+        var builder = new System.Text.StringBuilder();
+        foreach (var segment in segments)
+        {
+            switch (segment)
+            {
+                case TemplateParser.Literal literal:
+                    builder.Append(literal.Text);
+                    break;
+                case TemplateParser.Expression expression:
+                    var value = Stringify(engine, Run(engine, expression.Code));
+                    if (InScheme(builder))
+                    {
+                        // Начало адреса или сайт (https://{{ vars.base }}) — как есть.
+                        builder.Append(value);
+                    }
+                    else if (value.Length == 0)
+                    {
+                        throw new ExpressionException(
+                            $"Подстановка «{{{{ {expression.Code} }}}}» в адресе получилась пустой — адрес стал бы другим " +
+                            "(например, без номера заказа). Проверьте переменные.");
+                    }
+                    else
+                    {
+                        builder.Append(Uri.EscapeDataString(value));
+                    }
+
+                    break;
+            }
+        }
+
+        return builder.ToString();
+    }
+
+    /// <summary>Подстановка ещё до пути: адрес не начат или пока только «схема://сайт».</summary>
+    private static bool InScheme(System.Text.StringBuilder built)
+    {
+        var text = built.ToString();
+        var scheme = text.IndexOf("://", StringComparison.Ordinal);
+        return scheme < 0 || text.IndexOfAny(['/', '?', '#'], scheme + 3) < 0;
+    }
+
     private Engine CreateEngine(ExpressionScope scope)
     {
         var engine = new Engine(options => options

@@ -330,6 +330,7 @@ internal sealed class ScenarioPrompt
         FieldKind.Scenario => "id другого сценария — оставь пустым и спроси",
         FieldKind.Seconds => "секунды",
         FieldKind.Code => "код",
+        FieldKind.Url => "адрес сайта (шаблон; подставленное в путь и параметры кодируется само)",
         _ => kind.ToString(),
     };
 

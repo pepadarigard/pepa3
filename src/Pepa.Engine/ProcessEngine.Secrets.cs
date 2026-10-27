@@ -94,15 +94,17 @@ public sealed partial class ProcessEngine
     /// <summary>
     /// Записи значения: как есть и без пробелов по краям (тексты часто обрезают), в JSON — с экранированием .NET (обычным и
     /// без экранирования не-ASCII) и как его записывает JSON.stringify в выражениях (экранируются только кавычка, обратная
-    /// косая черта и управляющие символы).
+    /// косая черта и управляющие символы), в адресе — закодированным (ключ доступа в параметрах запроса).
     /// </summary>
     private static IEnumerable<string> Forms(string secret)
     {
         var trimmed = secret.Trim();
+        var escaped = Uri.EscapeDataString(secret);
         return new[]
             {
                 secret, JsonEncodedText.Encode(secret).Value, JsonEncodedText.Encode(secret, RelaxedEncoder).Value, JsonStringify(secret),
                 trimmed, JsonEncodedText.Encode(trimmed).Value, JsonStringify(trimmed),
+                escaped, escaped.Replace("%20", "+", StringComparison.Ordinal),
             }
             .Where(form => form.Length >= MinSecretLength).Distinct(StringComparer.Ordinal);
     }

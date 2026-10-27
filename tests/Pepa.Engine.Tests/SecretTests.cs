@@ -505,4 +505,11 @@ public sealed class SecretTests
 
         Assert.True(h.Engine.DisplayGraphCount <= 64);
     }
+
+    [Theory]
+    [InlineData("https://api.example/me?access_token=Ab%2Bc%2Fd%3DXYZ123", "https://api.example/me?access_token=••••")]
+    [InlineData("token=Ab%2Bc%2Fd%3DXYZ123&x=1", "token=••••&x=1")]
+    public void Secret_written_into_an_address_is_hidden(string text, string expected) =>
+        Assert.Equal(expected, ProcessEngine.Redact(text, ProcessEngine.Expand(["Ab+c/d=XYZ123"])));
 }
+

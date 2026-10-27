@@ -1,7 +1,6 @@
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -35,7 +34,12 @@ public static class HttpNodes
             AllowAutoRedirect = false,
             AutomaticDecompression = DecompressionMethods.All,
             PooledConnectionLifetime = TimeSpan.FromMinutes(5),
-            ConnectTimeout = TimeSpan.FromSeconds(30),
+            ConnectTimeout = ConnectTimeout,
+            // Клиент общий для всех процессов: куки одного процесса не должны уходить с запросами другого. Нужна кука —
+            // заголовок Cookie в блоке.
+            UseCookies = false,
+            // Прокси организации с входом по учётной записи Windows.
+            DefaultProxyCredentials = CredentialCache.DefaultCredentials,
         })
         {
             Timeout = Timeout.InfiniteTimeSpan,
@@ -44,14 +48,23 @@ public static class HttpNodes
         return client;
     }
 
+    private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(30);
+
+    internal const string ConnectTimeoutText = "сервер не ответил на подключение за 30 секунд";
+
+    /// <summary>Не удалось подключиться за отведённое время (а не остановка процесса или тайм-аут шага).</summary>
+    internal static bool ConnectTimedOut(OperationCanceledException ex, CancellationToken stepCancellation) =>
+        !stepCancellation.IsCancellationRequested && ex.InnerException is TimeoutException;
+
     internal static readonly PortDescriptor Next = new(Ports.Out, "Далее");
     internal static readonly PortDescriptor Error = new(Ports.Error, "Ошибка", PortKind.Error);
 
     internal static FieldDescriptor UrlField => new()
     {
-        Name = "url", Label = "Адрес", Kind = FieldKind.Template, Required = true,
+        Name = "url", Label = "Адрес", Kind = FieldKind.Url, Required = true,
         Placeholder = "https://example.com/api/orders/{{ vars.id }}",
-        Help = "Полный адрес с https://. Значения для поиска лучше передать в «Параметрах адреса» — они закодируются сами.",
+        Help = "Полный адрес с https://. Подставленное в путь и параметры кодируется само (пустое — ошибка, а не другой адрес); " +
+               "адрес целиком из переменной — {{ vars.url }} в начале.",
     };
 
     internal static FieldDescriptor QueryField => new()
@@ -114,7 +127,15 @@ public static class HttpNodes
 
         if (!Uri.TryCreate(trimmed, UriKind.Absolute, out var parsed) || parsed.Scheme is not ("http" or "https"))
         {
-            problem = $"«{trimmed}» — не адрес сайта: нужен полный адрес, начинающийся с https:// (или http://).";
+            // Без параметров: в них бывают ключи доступа.
+            var shown = trimmed.Split('?', '#')[0];
+            problem = $"«{(shown.Length > 120 ? shown[..120] + "…" : shown)}» — не адрес сайта: нужен полный адрес, начинающийся с https:// (или http://).";
+            return false;
+        }
+
+        if (parsed.UserInfo.Length > 0)
+        {
+            problem = "Имя и пароль в адресе (https://имя:пароль@сайт) не передаются — задайте заголовок Authorization.";
             return false;
         }
 
@@ -122,8 +143,9 @@ public static class HttpNodes
         return true;
     }
 
-    /// <summary>Адрес для сообщений: без параметров (в них бывают ключи доступа).</summary>
-    internal static string Display(Uri uri) => uri.GetLeftPart(UriPartial.Path);
+    /// <summary>Адрес для сообщений и истории: без параметров и имени с паролем (в них бывают ключи доступа).</summary>
+    internal static string Display(Uri uri) =>
+        uri.IsAbsoluteUri ? new UriBuilder(uri) { UserName = "", Password = "", Query = "", Fragment = "" }.Uri.GetLeftPart(UriPartial.Path) : "?";
 
     /// <summary>Готовый запрос: адрес с параметрами и заголовки (проверены до отправки).</summary>
     internal static HttpRequestMessage BuildRequest(NodeExecutionContext context, HttpMethod method, HttpContent? content)
@@ -160,6 +182,12 @@ public static class HttpNodes
                     if (text.Contains('\r') || text.Contains('\n'))
                     {
                         throw new NodeInputException($"Значение заголовка «{name}» содержит перевод строки.");
+                    }
+
+                    if (text.Any(c => c > 126 || (c < 32 && c != '\t')))
+                    {
+                        throw new NodeInputException($"Значение заголовка «{name}» содержит не латинские знаки (например, кириллицу) — " +
+                                                     "заголовки их не передают. Закодируйте значение: encodeURIComponent(...).");
                     }
 
                     if (!request.Headers.TryAddWithoutValidation(name, text))
@@ -232,7 +260,7 @@ public static class HttpNodes
 
     /// <summary>Ответ, прочитанный целиком (или null в Body, если он больше предела или не текст).</summary>
     internal sealed record Response(int Status, string Reason, Uri Url, JsonObject Headers, JsonNode? Body, string? Text,
-        long Bytes, bool TooLarge, bool Binary, string? ContentType);
+        long Bytes, bool TooLarge, bool Binary, string? ContentType, bool InvalidJson = false);
 
     internal static async Task<Response> ReadAsync(HttpResponseMessage response, Uri url, CancellationToken cancellationToken)
     {
@@ -274,8 +302,9 @@ public static class HttpNodes
             return new Response(status, reason, url, headers, null, null, total, false, true, media);
         }
 
-        var text = Decode(buffer.ToArray(), contentType?.CharSet);
+        var text = Decode(buffer.ToArray(), contentType?.CharSet, media);
         JsonNode? body = text;
+        var invalidJson = false;
         if (media is not null && (media.EndsWith("/json", StringComparison.Ordinal) || media.EndsWith("+json", StringComparison.Ordinal)) &&
             text.Length > 0)
         {
@@ -286,10 +315,11 @@ public static class HttpNodes
             catch (JsonException)
             {
                 body = text;
+                invalidJson = true;
             }
         }
 
-        return new Response(status, reason, url, headers, body, text, total, false, false, media);
+        return new Response(status, reason, url, headers, body, text, total, false, false, media, invalidJson);
     }
 
     private static bool IsText(string media) =>
@@ -297,22 +327,54 @@ public static class HttpNodes
         media.EndsWith("+json", StringComparison.Ordinal) || media.EndsWith("/xml", StringComparison.Ordinal) ||
         media.EndsWith("+xml", StringComparison.Ordinal) || media is "application/javascript" or "application/x-www-form-urlencoded";
 
-    private static string Decode(byte[] bytes, string? charset)
+    /// <summary>
+    /// Текст ответа: кодировка из заголовка, иначе — по метке в начале (BOM), а у страниц и XML — из
+    /// &lt;meta charset&gt; или &lt;?xml encoding?&gt;; иначе UTF-8.
+    /// </summary>
+    private static string Decode(byte[] bytes, string? charset, string? media)
     {
-        var encoding = Encoding.UTF8;
-        if (!string.IsNullOrWhiteSpace(charset))
+        var encoding = Named(charset) ?? Bom(bytes) ?? (media is not null && (media.Contains("html") || media.Contains("xml")) ? Declared(bytes) : null)
+            ?? Encoding.UTF8;
+        var text = encoding.GetString(bytes);
+        return text.Length > 0 && text[0] == '\uFEFF' ? text[1..] : text;
+    }
+
+    private static Encoding? Named(string? charset)
+    {
+        if (string.IsNullOrWhiteSpace(charset))
         {
-            try
-            {
-                encoding = Encoding.GetEncoding(charset.Trim('"', ' '));
-            }
-            catch (ArgumentException)
-            {
-            }
+            return null;
         }
 
-        var text = encoding.GetString(bytes);
-        return text.Length > 0 && text[0] == '﻿' ? text[1..] : text;
+        try
+        {
+            return Encoding.GetEncoding(charset.Trim('"', '\'', ' '));
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    private static Encoding? Bom(byte[] bytes) => bytes switch
+    {
+        [0xEF, 0xBB, 0xBF, ..] => Encoding.UTF8,
+        [0xFF, 0xFE, ..] => Encoding.Unicode,
+        [0xFE, 0xFF, ..] => Encoding.BigEndianUnicode,
+        _ => null,
+    };
+
+    private static readonly System.Text.RegularExpressions.Regex DeclaredCharset = new(
+        @"<meta[^>]+charset\s*=\s*[""']?\s*([A-Za-z0-9_.:-]+)|<\?xml[^>]+encoding\s*=\s*[""']([A-Za-z0-9_.:-]+)",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant,
+        TimeSpan.FromSeconds(1));
+
+    /// <summary>Кодировка, объявленная в начале страницы (первые 2 КБ, как у браузеров — в пределах ASCII).</summary>
+    private static Encoding? Declared(byte[] bytes)
+    {
+        var head = Encoding.Latin1.GetString(bytes, 0, Math.Min(bytes.Length, 2048));
+        var match = DeclaredCharset.Match(head);
+        return match.Success ? Named(match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value) : null;
     }
 
     /// <summary>Что сохранить в переменную: тело или ответ целиком.</summary>
@@ -322,7 +384,7 @@ public static class HttpNodes
             {
                 ["status"] = response.Status,
                 ["ok"] = response.Status is >= 200 and < 300,
-                ["url"] = response.Url.ToString(),
+                ["url"] = Display(response.Url),
                 ["headers"] = response.Headers,
                 ["body"] = response.Body?.DeepClone(),
             }
@@ -354,7 +416,9 @@ public static class HttpNodes
         ? $" Тело ответа больше {MaxResponseBytes / 1024 / 1024} МБ — не сохранено."
         : response.Binary
             ? $" Тело ответа — не текст ({response.ContentType}, {response.Bytes} байт) — не сохранено."
-            : "";
+            : response.InvalidJson
+                ? " Ответ назван JSON, но не разбирается — сохранён текстом."
+                : "";
 
     internal static string StatusText(Response response) => $"{response.Status} {response.Reason}";
 
@@ -371,7 +435,6 @@ public static class HttpNodes
     internal static bool NotSent(HttpRequestException ex) => ex.HttpRequestError is HttpRequestError.NameResolutionError
         or HttpRequestError.ConnectionError or HttpRequestError.SecureConnectionError or HttpRequestError.ProxyTunnelError;
 
-    internal static string Hash(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)))[..16];
 }
 
 /// <summary>Набор кодов ответа: «2xx», «200-299», «404», «*» — через запятую.</summary>

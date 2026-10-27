@@ -102,4 +102,22 @@ public sealed class ExpressionTests
         Assert.Equal("p1", _evaluator.Evaluate("process.id", scope)!.GetValue<string>());
         Assert.Null(_evaluator.Evaluate("lastError", Scope()));
     }
+
+    [Fact]
+    public void Url_template_encodes_values_in_the_path_and_query_but_not_the_site()
+    {
+        var scope = Scope(new JsonObject
+        {
+            ["base"] = "https://api.example", ["id"] = "1?admin=true#", ["up"] = "../../admin", ["text"] = "кот & пёс", ["empty"] = "",
+        });
+
+        Assert.Equal("https://api.example/orders/1%3Fadmin%3Dtrue%23", _evaluator.RenderUrl("{{ vars.base }}/orders/{{ vars.id }}", scope));
+        Assert.Equal("https://api.example/orders/..%2F..%2Fadmin", _evaluator.RenderUrl("https://api.example/orders/{{ vars.up }}", scope));
+        Assert.Equal("https://api.example/find?q=%D0%BA%D0%BE%D1%82%20%26%20%D0%BF%D1%91%D1%81",
+            _evaluator.RenderUrl("https://api.example/find?q={{ vars.text }}", scope));
+        var error = Assert.Throws<ExpressionException>(() => _evaluator.RenderUrl("https://api.example/items/{{ vars.missing }}", scope));
+        Assert.Contains("пустой", error.Message);
+        Assert.Throws<ExpressionException>(() => _evaluator.RenderUrl("https://api.example/items/{{ vars.empty }}", scope));
+    }
 }
+

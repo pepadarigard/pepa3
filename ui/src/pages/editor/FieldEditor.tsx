@@ -109,10 +109,10 @@ export function FieldEditor({ field, value, onChange, variables, onCreateVariabl
       control = (
         <WithInserts field={field} variables={variables} onInsert={(snippet) => onChange(text + snippet)}>
           <input
-            className={`input${field.kind === "path" ? " mono" : ""}${invalid}`}
+            className={`input${field.kind === "path" || field.kind === "url" ? " mono" : ""}${invalid}`}
             value={text}
             placeholder={field.placeholder ?? undefined}
-            spellCheck={field.kind !== "path"}
+            spellCheck={field.kind !== "path" && field.kind !== "url"}
             onChange={(e) => onChange(e.target.value)}
           />
         </WithInserts>
@@ -139,7 +139,7 @@ export function FieldEditor({ field, value, onChange, variables, onCreateVariabl
 /** Подсказки-вставки переменных для шаблонов и выражений. */
 function WithInserts({ field, variables, onInsert, children }: { field: FieldDescriptor; variables: VariableDefinition[]; onInsert: (snippet: string) => void; children: React.ReactNode }) {
   const isExpression = field.kind === "expression" || field.kind === "condition" || field.kind === "matchCondition" || field.kind === "code";
-  const isTemplate = field.kind === "template" || field.kind === "multilineTemplate" || field.kind === "path";
+  const isTemplate = field.kind === "template" || field.kind === "multilineTemplate" || field.kind === "path" || field.kind === "url";
   const eventChips = field.kind === "matchCondition" ? ["event.payload", "event.correlationKey", "event.type"] : [];
   if ((!isExpression && !isTemplate) || (variables.length === 0 && eventChips.length === 0)) return <>{children}</>;
   return (

@@ -20,6 +20,9 @@ public interface IExpressionEvaluator
     bool EvaluateCondition(string expression, ExpressionScope scope);
 
     string RenderTemplate(string template, ExpressionScope scope);
+
+    /// <summary>Подставить значения в адрес (см. <see cref="Nodes.FieldKind.Url"/>).</summary>
+    string RenderUrl(string template, ExpressionScope scope);
 }
 
 /// <summary>

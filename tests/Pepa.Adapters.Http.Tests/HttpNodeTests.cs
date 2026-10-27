@@ -13,21 +13,22 @@ namespace Pepa.Adapters.Http.Tests;
 /// <summary>Поведение блоков «Получить по адресу» и «Отправить запрос»: что отправляется и как понимается ответ.</summary>
 public sealed class HttpNodeTests
 {
-    private static NodeExecutionContext Context(object input, JsonObject? checkpoint = null, JsonObject? previous = null) => new()
+    private static NodeExecutionContext Context(object input, JsonObject? checkpoint = null, JsonObject? previous = null,
+        int retries = 0, int attempt = 1) => new()
     {
         ProcessId = "p",
-        Node = new NodeDefinition { Id = "n", Type = "test" },
+        Node = new NodeDefinition { Id = "n", Type = "test", Settings = new NodeSettings { RetryCount = retries } },
         Input = (JsonObject)JsonSerializer.SerializeToNode(input, PepaJson.Options)!,
         Checkpoint = checkpoint,
         PreviousCheckpoint = previous,
         Variables = new JsonObject(),
-        Attempt = 1,
+        Attempt = attempt,
         Time = TimeProvider.System,
     };
 
-    private static async Task<NodeResult> Run(INodeExecutor node, object input, JsonObject? previous = null)
+    private static async Task<NodeResult> Run(INodeExecutor node, object input, JsonObject? previous = null, int retries = 0, int attempt = 1)
     {
-        var context = Context(input, previous: previous);
+        var context = Context(input, previous: previous, retries: retries, attempt: attempt);
         var checkpoint = await node.PrepareAsync(context, CancellationToken.None);
         return await node.ExecuteAsync(context with { Checkpoint = checkpoint }, CancellationToken.None);
     }
@@ -86,14 +87,83 @@ public sealed class HttpNodeTests
             "a.example" => FakeHttp.Redirect(HttpStatusCode.Found, "https://cdn.example/file.txt"),
             _ => FakeHttp.Text("данные"),
         });
-        var ok = Assert.IsType<NodeResult.Success>(await Run(new HttpGetNode(Client(fake)),
-            new { url = "https://a.example/old", headers = new { Authorization = "Bearer secret", Accept_Language = "ru" }, saveTo = "x" }));
+        var ok = Assert.IsType<NodeResult.Success>(await Run(new HttpGetNode(Client(fake)), new
+        {
+            url = "https://a.example/old",
+            headers = new Dictionary<string, string> { ["Authorization"] = "Bearer secret", ["X-Api-Secret"] = "s-1", ["Accept-Language"] = "ru" },
+            saveTo = "x",
+        }));
 
         Assert.Equal("данные", ok.VariableUpdates["x"]!.GetValue<string>());
         Assert.Equal(["/old", "/new", "/file.txt"], fake.Requests.Select(r => r.Uri.AbsolutePath));
         Assert.Equal("Bearer secret", fake.Requests[1].Headers["Authorization"]);
+        Assert.Equal("s-1", fake.Requests[1].Headers["X-Api-Secret"]);
+        // На другой сайт — только безобидные заголовки: ключ мог быть под любым именем.
         Assert.False(fake.Requests[2].Headers.ContainsKey("Authorization"));
-        Assert.Equal("ru", fake.Requests[2].Headers["Accept_Language"]);
+        Assert.False(fake.Requests[2].Headers.ContainsKey("X-Api-Secret"));
+        Assert.Equal("ru", fake.Requests[2].Headers["Accept-Language"]);
+    }
+
+    [Fact]
+    public async Task Get_does_not_follow_a_redirect_from_https_to_http()
+    {
+        var fake = new FakeHttp((request, _) => request.RequestUri!.Scheme == "https"
+            ? FakeHttp.Redirect(HttpStatusCode.Found, "http://a.example/plain")
+            : FakeHttp.Text("открыто"));
+        var fail = Assert.IsType<NodeResult.Failure>(await Run(new HttpGetNode(Client(fake)), new { url = "https://a.example/secure", saveTo = "x" }));
+        Assert.Contains("незащищённый", fail.Error);
+        Assert.Single(fake.Requests);
+    }
+
+    [Fact]
+    public async Task Saved_address_has_no_query_and_messages_have_no_user_name()
+    {
+        var fake = new FakeHttp((_, _) => FakeHttp.Json("{}"));
+        var ok = Assert.IsType<NodeResult.Success>(await Run(new HttpGetNode(Client(fake)),
+            new { url = "https://api.example/me", query = new { access_token = "Ab+c/d=XYZ123" }, save = "full", saveTo = "x" }));
+        Assert.Equal("https://api.example/me", ok.VariableUpdates["x"]!["url"]!.GetValue<string>());
+        Assert.DoesNotContain("XYZ123", ok.Output!.ToJsonString());
+
+        var error = await Assert.ThrowsAsync<NodeInputException>(() =>
+            Run(new HttpGetNode(Client(fake)), new { url = "https://user:p%40ss@host.example/path", saveTo = "x" }));
+        Assert.DoesNotContain("p%40ss", error.Message);
+    }
+
+    [Fact]
+    public async Task Page_charset_from_meta_and_invalid_json_warning()
+    {
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        var page = new FakeHttp((_, _) => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(Encoding.GetEncoding(1251).GetBytes("<html><head><meta charset=\"windows-1251\"></head><body>Привет</body></html>"))
+            {
+                Headers = { ContentType = new("text/html") },
+            },
+        });
+        var ok = Assert.IsType<NodeResult.Success>(await Run(new HttpGetNode(Client(page)), new { url = "https://a.example/", saveTo = "x" }));
+        Assert.Contains("<body>Привет</body>", ok.VariableUpdates["x"]!.GetValue<string>());
+
+        var broken = new FakeHttp((_, _) => FakeHttp.Json("{\"a\":"));
+        ok = Assert.IsType<NodeResult.Success>(await Run(new HttpGetNode(Client(broken)), new { url = "https://a.example/api", saveTo = "x" }));
+        Assert.Equal(MessageLevel.Warning, ok.Level);
+        Assert.Contains("не разбирается", ok.Message);
+        Assert.Equal("{\"a\":", ok.VariableUpdates["x"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Connect_timeout_and_non_ascii_header_mean_nothing_was_sent()
+    {
+        var slow = new FakeHttp((_, _) => throw new TaskCanceledException("The operation was canceled.", new TimeoutException("connect")));
+        var fail = Assert.IsType<NodeResult.Failure>(await Run(new HttpSendNode(Client(slow)), new { url = "https://a.example/orders", body = new { a = 1 } }));
+        Assert.True(fail.Retryable);
+        Assert.Contains("не отправлен", fail.Error);
+        Assert.IsType<NodeResult.Failure>(await Run(new HttpGetNode(Client(slow)), new { url = "https://a.example/list", saveTo = "x" }));
+
+        var fake = new FakeHttp((_, _) => FakeHttp.Json("{}"));
+        var error = await Assert.ThrowsAsync<NodeInputException>(() =>
+            Run(new HttpSendNode(Client(fake)), new { url = "https://a.example/orders", headers = new { X_Name = "Пепа" } }));
+        Assert.Contains("кириллицу", error.Message);
+        Assert.Empty(fake.Requests);
     }
 
     [Theory]
@@ -267,9 +337,25 @@ public sealed class HttpNodeTests
         Assert.Contains("ответ не получен", unknown.Reason);
         Assert.False(node.Descriptor.SupportsVerification);
 
-        var safe = Assert.IsType<NodeResult.Failure>(await Run(node, new { url = "https://a.example/orders", body = new { a = 1 }, idempotent = true }));
+        // С ключом от повтора — повтор, пока он остался по настройкам блока; последняя попытка — снова «итог неизвестен»:
+        // обычная ошибка увела бы процесс по выходу «Ошибка», будто запрос точно не выполнен.
+        var safe = Assert.IsType<NodeResult.Failure>(await Run(node, new { url = "https://a.example/orders", body = new { a = 1 }, idempotent = true }, retries: 1));
         Assert.True(safe.Retryable);
         Assert.Contains("Повтор безопасен", safe.Error);
+        var last = Assert.IsType<NodeResult.Unknown>(await Run(node, new { url = "https://a.example/orders", body = new { a = 1 }, idempotent = true }, retries: 1, attempt: 2));
+        Assert.Contains("Повтор безопасен", last.Reason);
+        Assert.IsType<NodeResult.Unknown>(await Run(node, new { url = "https://a.example/orders", body = new { a = 1 }, idempotent = true }));
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Conflict)]
+    [InlineData(HttpStatusCode.UnprocessableEntity)]
+    public async Task With_an_idempotency_key_409_and_422_are_unknown_not_rejected(HttpStatusCode status)
+    {
+        var node = new HttpSendNode(Client(new FakeHttp((_, _) => FakeHttp.Json("""{"error":"key in use"}""", status))));
+        var unknown = Assert.IsType<NodeResult.Unknown>(await Run(node, new { url = "https://pay.example/charges", body = new { a = 1 }, idempotent = true }));
+        Assert.Contains("ключ", unknown.Reason);
+        Assert.False(Assert.IsType<NodeResult.Failure>(await Run(node, new { url = "https://pay.example/charges", body = new { a = 1 } })).Retryable);
     }
 
     [Fact]
@@ -282,12 +368,29 @@ public sealed class HttpNodeTests
         await node.ExecuteAsync(Context(input, first), CancellationToken.None);
         var second = await node.PrepareAsync(Context(input, previous: first), CancellationToken.None);
         await node.ExecuteAsync(Context(input, second), CancellationToken.None);
-        var changed = new { url = "https://pay.example/charges", body = new { amount = 200 }, idempotent = true };
+        // Данные посчитались иначе (время, случайное число) — ключ тот же: новый сервер принял бы за новый запрос.
+        var changed = new { url = "https://pay.example/charges", body = new { amount = 100, at = DateTime.UtcNow.Ticks }, idempotent = true };
         var third = await node.PrepareAsync(Context(changed, previous: second), CancellationToken.None);
 
         var keys = fake.Requests.Select(r => r.Headers[HttpSendNode.IdempotencyHeader]).ToList();
         Assert.Equal(keys[0], keys[1]);
-        Assert.NotEqual(keys[0], third!.GetString("key"));
+        Assert.Equal(keys[0], third!.GetString("key"));
+        // Новый заход в блок (не повтор) — новый ключ.
+        Assert.NotEqual(keys[0], (await node.PrepareAsync(Context(input), CancellationToken.None))!.GetString("key"));
+    }
+
+    [Fact]
+    public async Task Cookies_of_one_request_do_not_go_with_the_next()
+    {
+        using var server = await LocalServer.StartAsync(request => request.Contains("GET /login", StringComparison.Ordinal)
+            ? "HTTP/1.1 200 OK\r\nSet-Cookie: sid=USER-A\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok"
+            : "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok");
+        var client = HttpNodes.CreateClient();
+        await Run(new HttpGetNode(client), new { url = $"{server.Url}/login", saveTo = "x" });
+        await Run(new HttpGetNode(client), new { url = $"{server.Url}/me", saveTo = "x" });
+
+        Assert.Equal(2, server.Requests.Count);
+        Assert.DoesNotContain("sid=USER-A", server.Requests[1]);
     }
 
     // ───────────── Проверка схемы ─────────────

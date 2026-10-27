@@ -8,8 +8,8 @@ using Pepa.Core.Nodes;
 namespace Pepa.Adapters.Http;
 
 /// <summary>
-/// Получить страницу или данные API (GET). Только читает: при сбое повтор безопасен. Перенаправления проходит сам
-/// (заголовки доступа на другой сайт не передаются).
+/// Получить страницу или данные API (GET). Только читает: при сбое повтор безопасен. Перенаправления проходит сам:
+/// на другой сайт — без заголовков (кроме безобидных), с https на http — не переходит.
 /// </summary>
 public sealed class HttpGetNode(HttpClient client) : INodeExecutor
 {
@@ -63,7 +63,11 @@ public sealed class HttpGetNode(HttpClient client) : INodeExecutor
                 catch (HttpRequestException ex)
                 {
                     return NodeResult.Fail($"Не удалось получить «{HttpNodes.Display(request.RequestUri!)}»: {HttpNodes.Describe(ex)}.",
-                        retryable: ex.HttpRequestError != HttpRequestError.SecureConnectionError);
+                        retryable: ex.HttpRequestError is not (HttpRequestError.SecureConnectionError or HttpRequestError.ProxyTunnelError));
+                }
+                catch (OperationCanceledException ex) when (HttpNodes.ConnectTimedOut(ex, cancellationToken))
+                {
+                    return NodeResult.Fail($"Не удалось получить «{HttpNodes.Display(request.RequestUri!)}»: {HttpNodes.ConnectTimeoutText}.");
                 }
 
                 if (!IsRedirect(response.StatusCode) || response.Headers.Location is not { } location)
@@ -79,14 +83,22 @@ public sealed class HttpGetNode(HttpClient client) : INodeExecutor
                 var next = location.IsAbsoluteUri ? location : new Uri(request.RequestUri!, location);
                 if (next.Scheme is not ("http" or "https"))
                 {
-                    return NodeResult.Fail($"«{HttpNodes.Display(request.RequestUri!)}» перенаправляет на «{next}» — это не адрес сайта.", retryable: false);
+                    return NodeResult.Fail($"«{HttpNodes.Display(request.RequestUri!)}» перенаправляет не на адрес сайта (схема «{next.Scheme}»).",
+                        retryable: false);
+                }
+
+                if (request.RequestUri!.Scheme == "https" && next.Scheme == "http")
+                {
+                    return NodeResult.Fail($"«{HttpNodes.Display(request.RequestUri)}» перенаправляет на незащищённый адрес «{HttpNodes.Display(next)}» " +
+                                           "— Pepa туда не переходит: заголовки и ответ можно было бы подсмотреть.", retryable: false);
                 }
 
                 var redirected = new HttpRequestMessage(HttpMethod.Get, next);
                 foreach (var (name, values) in first.Headers)
                 {
-                    // Ключи доступа — только тому сайту, которому их дали.
-                    if (!SameOrigin(origin, next) && IsCredential(name))
+                    // Заголовки (а в них бывают ключи доступа под любым именем) — только тому сайту, которому их дали; другому —
+                    // только безобидные.
+                    if (!SameOrigin(origin, next) && !IsHarmless(name))
                     {
                         continue;
                     }
@@ -117,8 +129,10 @@ public sealed class HttpGetNode(HttpClient client) : INodeExecutor
                 return NodeResult.Fail($"«{address}» ответил {HttpNodes.StatusText(read)}.{HttpNodes.BodyNote(read)}", retryable: false);
             }
 
-            return NodeResult.Ok(Ports.Out, new Dictionary<string, JsonNode?> { [saveTo] = HttpNodes.Saved(context, read) },
-                HttpNodes.Output(HttpMethod.Get, read), $"GET {address} → {HttpNodes.StatusText(read)}");
+            var note = HttpNodes.BodyNote(read);
+            return new NodeResult.Success(Ports.Out, new Dictionary<string, JsonNode?> { [saveTo] = HttpNodes.Saved(context, read) },
+                HttpNodes.Output(HttpMethod.Get, read), $"GET {address} → {HttpNodes.StatusText(read)}{(note.Length > 0 ? "." + note : "")}",
+                note.Length > 0 ? MessageLevel.Warning : MessageLevel.Info);
         }
         finally
         {
@@ -136,10 +150,12 @@ public sealed class HttpGetNode(HttpClient client) : INodeExecutor
     private static bool SameOrigin(Uri a, Uri b) =>
         a.Scheme == b.Scheme && string.Equals(a.Host, b.Host, StringComparison.OrdinalIgnoreCase) && a.Port == b.Port;
 
-    private static bool IsCredential(string header) =>
-        header.Equals("Authorization", StringComparison.OrdinalIgnoreCase) || header.Equals("Cookie", StringComparison.OrdinalIgnoreCase) ||
-        header.Equals("Proxy-Authorization", StringComparison.OrdinalIgnoreCase) || header.Contains("key", StringComparison.OrdinalIgnoreCase) ||
-        header.Contains("token", StringComparison.OrdinalIgnoreCase);
+    private static readonly HashSet<string> HarmlessHeaders = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Accept", "Accept-Language", "Accept-Encoding", "User-Agent", "Cache-Control", "Pragma",
+    };
+
+    private static bool IsHarmless(string header) => HarmlessHeaders.Contains(header);
 }
 
 /// <summary>
@@ -206,8 +222,9 @@ public sealed class HttpSendNode(HttpClient client) : INodeExecutor
     public IEnumerable<NodeConfigIssue> Validate(NodeDefinition node) => HttpNodes.ValidateCommon(node);
 
     /// <summary>
-    /// Ключ от повтора — один на все попытки одного и того же запроса (иначе сервер принял бы повтор за новый запрос).
-    /// Если запрос изменился (другой адрес или данные), ключ новый: с прежним сервер ответил бы итогом прежнего.
+    /// Ключ от повтора — один на все попытки этого шага, даже если данные запроса посчитались иначе (время, случайное
+    /// число): новый ключ сервер принял бы за новый запрос и выполнил его второй раз. Тот же ключ с другими данными сервер
+    /// отклонит (это «итог неизвестен» — решаете вы), но дважды не выполнит.
     /// </summary>
     public ValueTask<JsonObject?> PrepareAsync(NodeExecutionContext context, CancellationToken cancellationToken)
     {
@@ -216,13 +233,8 @@ public sealed class HttpSendNode(HttpClient client) : INodeExecutor
             return ValueTask.FromResult<JsonObject?>(null);
         }
 
-        var fingerprint = HttpNodes.Hash(string.Join("\n", Method(context).Method, context.GetString("url"),
-            context.Input["query"]?.ToJsonString(), context.GetString("bodyType"), context.Input["body"]?.ToJsonString(), context.GetString("text")));
-        var previous = context.PreviousCheckpoint;
-        var key = previous?.GetString("request") == fingerprint && previous.GetString("key") is { Length: > 0 } kept
-            ? kept
-            : Guid.NewGuid().ToString("D");
-        return ValueTask.FromResult<JsonObject?>(new JsonObject { ["key"] = key, ["request"] = fingerprint });
+        var key = context.PreviousCheckpoint?.GetString("key") is { Length: > 0 } kept ? kept : Guid.NewGuid().ToString("D");
+        return ValueTask.FromResult<JsonObject?>(new JsonObject { ["key"] = key });
     }
 
     public async ValueTask<NodeResult> ExecuteAsync(NodeExecutionContext context, CancellationToken cancellationToken)
@@ -250,7 +262,11 @@ public sealed class HttpSendNode(HttpClient client) : INodeExecutor
         catch (HttpRequestException ex) when (HttpNodes.NotSent(ex))
         {
             return NodeResult.Fail($"Запрос к «{address}» не отправлен: {HttpNodes.Describe(ex)}.",
-                retryable: ex.HttpRequestError != HttpRequestError.SecureConnectionError);
+                retryable: ex.HttpRequestError is not (HttpRequestError.SecureConnectionError or HttpRequestError.ProxyTunnelError));
+        }
+        catch (OperationCanceledException ex) when (HttpNodes.ConnectTimedOut(ex, cancellationToken))
+        {
+            return NodeResult.Fail($"Запрос к «{address}» не отправлен: {HttpNodes.ConnectTimeoutText}.");
         }
         catch (HttpRequestException ex)
         {
@@ -266,12 +282,14 @@ public sealed class HttpSendNode(HttpClient client) : INodeExecutor
                 read = await HttpNodes.ReadAsync(response, request.RequestUri!, cancellationToken);
                 note = HttpNodes.BodyNote(read);
             }
-            catch (Exception ex) when (ex is HttpRequestException or IOException)
+            catch (Exception ex) when (ex is HttpRequestException or IOException or OperationCanceledException)
             {
-                // Код ответа уже известен — сервер запрос обработал; не дочитано только тело.
+                // Код ответа уже известен — сервер запрос обработал; не дочитано только тело (оборвалось или вышло время).
                 read = new HttpNodes.Response((int)response.StatusCode, response.ReasonPhrase ?? response.StatusCode.ToString(),
                     request.RequestUri!, new JsonObject(), null, null, 0, false, false, response.Content.Headers.ContentType?.MediaType);
-                note = $" Тело ответа не дочитано ({ex.Message}) — не сохранено.";
+                note = ex is OperationCanceledException
+                    ? " Тело ответа не дочитано (время шага вышло) — не сохранено."
+                    : $" Тело ответа не дочитано ({ex.Message}) — не сохранено.";
             }
 
             var status = HttpNodes.StatusText(read);
@@ -297,16 +315,24 @@ public sealed class HttpSendNode(HttpClient client) : INodeExecutor
                         $"Если это ожидаемый ответ, добавьте {read.Status} в «Успешные ответы».")
                     { AlreadyChecked = true },
                 408 or 429 => NodeResult.Fail($"Сервер не принял запрос сейчас: {status}{HttpNodes.Excerpt(read)}"),
+                // С ключом от повтора 409 — «запрос с этим ключом ещё выполняется», 422 — «ключ уже был с другими данными».
+                409 when idempotent => Unknown($"Сервер ответил {status}{HttpNodes.Excerpt(read)} — запрос с этим ключом от повтора, " +
+                                               "похоже, ещё выполняется."),
+                422 when idempotent => new NodeResult.Unknown($"Сервер ответил {status}{HttpNodes.Excerpt(read)} — возможно, ключ от " +
+                                                              "повтора уже был с другими данными. Проверьте на сайте и решите."),
                 < 500 => NodeResult.Fail($"Сервер отклонил запрос: {status}{HttpNodes.Excerpt(read)}", retryable: false),
                 _ => Unknown($"Сервер ответил ошибкой {status}{HttpNodes.Excerpt(read)} — выполнил ли он запрос, неизвестно."),
             };
         }
 
-        // Неизвестный итог: без ключа от повтора — решает пользователь; с ключом повтор безопасен (сервер не выполнит
-        // запрос второй раз) — это ошибка с повтором по настройкам блока.
-        NodeResult Unknown(string reason) => idempotent
+        // Неизвестный итог: без ключа от повтора — решает пользователь. С ключом повтор безопасен (сервер не выполнит
+        // запрос второй раз) — ошибка с повтором, пока по настройкам блока остались повторы. Последняя попытка — снова
+        // «итог неизвестен»: обычная ошибка увела бы процесс по выходу «Ошибка», будто запрос точно не выполнен.
+        NodeResult Unknown(string reason) => idempotent && context.Attempt <= context.Node.Settings.RetryCount
             ? NodeResult.Fail(reason + " Повтор безопасен: запрос уйдёт с тем же ключом от повтора.")
-            : new NodeResult.Unknown(reason + " Проверьте на сайте и решите: повторить или считать выполненным.");
+            : new NodeResult.Unknown(reason + (idempotent
+                ? " Повтор безопасен (тот же ключ от повтора) — повторите или проверьте на сайте."
+                : " Проверьте на сайте и решите: повторить или считать выполненным."));
     }
 
     private static HttpMethod Method(NodeExecutionContext context) => context.GetString("method")?.ToUpperInvariant() switch

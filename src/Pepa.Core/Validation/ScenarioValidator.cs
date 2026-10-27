@@ -300,7 +300,7 @@ public sealed partial class ScenarioValidator(NodeRegistry registry, IExpression
 
             switch (field.Kind)
             {
-                case FieldKind.Template or FieldKind.MultilineTemplate or FieldKind.Path:
+                case FieldKind.Template or FieldKind.MultilineTemplate or FieldKind.Path or FieldKind.Url:
                     if (expressions.CheckTemplate(text!) is { } templateError)
                     {
                         error("field.template", $"{name}, поле «{field.Label}»: {templateError}", node.Id, null, field.Name);

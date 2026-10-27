@@ -32,6 +32,8 @@ internal static class InputResolver
             {
                 FieldKind.Template or FieldKind.MultilineTemplate or FieldKind.Path when value.AsString() is { } text =>
                     JsonValue.Create(expressions.RenderTemplate(text, scope)),
+                FieldKind.Url when value.AsString() is { } url =>
+                    JsonValue.Create(expressions.RenderUrl(url, scope)),
                 FieldKind.Expression when value.AsString() is { Length: > 0 } code =>
                     expressions.Evaluate(code, scope),
                 FieldKind.Condition when value.AsString() is { Length: > 0 } code =>
