@@ -401,6 +401,11 @@ public sealed partial class ProcessEngine
         StepState successState = StepState.Succeeded, Func<IStoreWrite, Task<NodeResult?>>? decide = null,
         Func<IStoreWrite, long, NodeResult, CommitEffects, Task>? extraWrites = null)
     {
+        // Тексты для истории — без значений секретных переменных. Параметры шага (Input) остаются настоящими: по ним
+        // проверяется результат после перезапуска; при показе их скрывает API.
+        var secrets = SecretValues(process, graph.Definition);
+        result = Redact(result, secrets);
+        resolution = Redact(resolution, secrets);
         var effects = new CommitEffects();
         var committed = await CommitResultAsync(process, graph, token, node, descriptor, step, result, resolution, successState,
             decide, extraWrites, effects);
@@ -685,7 +690,8 @@ public sealed partial class ProcessEngine
                     WaitRef = acquire.Key,
                 };
                 journal.Add((JournalLevel.Info,
-                    $"Ресурс «{acquire.Key}» занят" + (holder is null ? "" : $" процессом #{holder[^6..]}") +
+                    $"Ресурс «{acquire.Key}» занят" +
+                    (ExternalHolderTitle(holder) is { } by ? $" ({by})" : holder is null ? "" : $" процессом #{holder[^Math.Min(6, holder.Length)..]}") +
                     " — процесс встал в очередь" + (acquire.TimeoutAt is { } until ? $" (не дольше чем до {FormatLocal(until)})." : ".")));
                 break;
             }

@@ -43,7 +43,7 @@ public sealed class HistoryRetention(SqliteStore store, Func<int> days, TimeProv
                 {
                     await RunOnceAsync(_stop.Token);
                 }
-                catch (Microsoft.Data.Sqlite.SqliteException ex)
+                catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     // История подождёт до следующего раза — работе процессов это не мешает.
                     logger.LogWarning(ex, "Не удалось очистить историю.");
@@ -65,7 +65,15 @@ public sealed class HistoryRetention(SqliteStore store, Func<int> days, TimeProv
         }
 
         await _stop.CancelAsync();
-        await _loop;
+        try
+        {
+            await _loop;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Очистка истории остановилась с ошибкой.");
+        }
+
         _stop.Dispose();
     }
 }

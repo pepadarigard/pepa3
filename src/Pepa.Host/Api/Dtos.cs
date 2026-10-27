@@ -147,13 +147,15 @@ public sealed record ResolveEventRequest(long? SubscriptionId);
 
 public sealed record ResourceWaiterDto(ProcessRefDto Process, DateTimeOffset RequestedAt);
 
+/// <param name="HeldBy">Ресурс заняла сама Pepa, а не процесс (например, «запись действий в окнах»).</param>
 public sealed record ResourceDto(
     string Key,
     string Title,
     ProcessRefDto? Holder,
     DateTimeOffset? AcquiredAt,
     DateTimeOffset UpdatedAt,
-    IReadOnlyList<ResourceWaiterDto> Queue);
+    IReadOnlyList<ResourceWaiterDto> Queue,
+    string? HeldBy = null);
 
 public sealed record ReleaseResourceRequest(string Key);
 

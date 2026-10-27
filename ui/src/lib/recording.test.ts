@@ -27,7 +27,7 @@ describe("запись → блоки", () => {
     expect(blocks.nodes[2].config).toEqual({ selector: "input[name=\"pass\"]", text: "{{ vars.password }}" });
     expect(blocks.nodes[3].label).toBe("Нажать «Войти»");
     expect(blocks.nodes[5].config).toEqual({ selector: "#news", state: "uncheck" });
-    expect(blocks.variables.map((v) => [v.name, v.isInput])).toEqual([["password", true]]);
+    expect(blocks.variables.map((v) => [v.name, v.isInput, v.secret])).toEqual([["password", true, true]]);
     expect(blocks.edges).toHaveLength(blocks.nodes.length - 1);
     expect(blocks.edges.every((e, i) => e.source === blocks.nodes[i].id && e.target === blocks.nodes[i + 1].id)).toBe(true);
   });
@@ -36,6 +36,19 @@ describe("запись → блоки", () => {
     const blocks = recordingToBlocks([action("click", { selector: "#go" })], { browser: "adspower", profileId: "k1abc" });
     expect(blocks.nodes[0]).toMatchObject({ type: "adspower.open", config: { profileId: "k1abc" } });
     expect(blocks.nodes[1]).toMatchObject({ type: "browser.click", config: { selector: "#go" } });
+  });
+
+  it("у каждого поля пароля своя секретная переменная, повторный ввод в то же поле — та же", () => {
+    const blocks = recordingToBlocks(
+      [
+        action("fill", { selector: "#old", secret: true }),
+        action("fill", { selector: "#new", secret: true }),
+        action("fill", { selector: "#old", secret: true }),
+      ],
+      { browser: "pepa", profileId: null },
+    );
+    expect(blocks.nodes.slice(1).map((n) => n.config.text)).toEqual(["{{ vars.password }}", "{{ vars.password2 }}", "{{ vars.password }}"]);
+    expect(blocks.variables.map((v) => [v.name, v.secret])).toEqual([["password", true], ["password2", true]]);
   });
 });
 
@@ -50,7 +63,19 @@ describe("запись в окнах Windows → блоки", () => {
       ["desktop.fill", "Ввести пароль", null],
     ]);
     expect(blocks.edges).toEqual([{ id: "rec-e1", source: "rec1", sourcePort: "out", target: "rec2" }]);
-    expect(blocks.variables.map((v) => [v.name, v.isInput])).toEqual([["password", true]]);
+    expect(blocks.variables.map((v) => [v.name, v.isInput, v.secret])).toEqual([["password", true, true]]);
     expect(desktopRecordingToBlocks([]).variables).toEqual([]);
+  });
+
+  it("два поля пароля — две секретные переменные", () => {
+    const fill = (name: string, variable: string) => ({
+      type: "desktop.fill", config: { window: "Смена пароля", name, text: `{{ vars.${variable} }}` }, label: "Ввести пароль", note: null,
+      secret: true, secretVariable: variable,
+    });
+    const blocks = desktopRecordingToBlocks([fill("Старый пароль", "password"), fill("Новый пароль", "password2")]);
+    expect(blocks.variables.map((v) => [v.name, v.secret, v.description])).toEqual([
+      ["password", true, "Пароль 1 (вводится при запуске)"],
+      ["password2", true, "Пароль 2 (вводится при запуске)"],
+    ]);
   });
 });

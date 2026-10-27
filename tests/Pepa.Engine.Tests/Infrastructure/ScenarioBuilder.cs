@@ -42,9 +42,9 @@ public sealed class ScenarioBuilder(string name = "Тестовый сценар
         return this;
     }
 
-    public ScenarioBuilder Variable(string variableName, VariableType type, JsonNode? defaultValue = null, bool isInput = false)
+    public ScenarioBuilder Variable(string variableName, VariableType type, JsonNode? defaultValue = null, bool isInput = false, bool secret = false)
     {
-        _variables.Add(new VariableDefinition { Name = variableName, Type = type, Default = defaultValue, IsInput = isInput });
+        _variables.Add(new VariableDefinition { Name = variableName, Type = type, Default = defaultValue, IsInput = isInput, Secret = secret });
         return this;
     }
 

@@ -241,6 +241,13 @@ public static class PluginLoader
                 return $"блок «{type}»: расширения не могут добавлять «Начало», «Завершение» и блоки ветвления.";
             }
 
+            if (descriptor.SupportsVerification && descriptor.Effect != NodeEffect.External)
+            {
+                // Проверка результата — для внешних действий; без Effect = External Pepa повторяла бы блок после сбоя, не проверяя.
+                return $"блок «{type}»: проверка результата (SupportsVerification) есть только у блоков с внешним действием — " +
+                       "укажите Effect = NodeEffect.External.";
+            }
+
             if (string.IsNullOrWhiteSpace(descriptor.Title) || descriptor.Description is null)
             {
                 return $"блок «{type}»: не задано название или описание.";

@@ -191,24 +191,24 @@ public sealed class DesktopRecordingTests
     }
 
     [Theory]
-    [InlineData(0x41, false, false, false, false, true, false, "typing", null)] // буква в поле
-    [InlineData(0x41, false, false, false, false, false, false, "key", "A")] // буква вне поля (переход по списку, меню)
-    [InlineData(0x0D, false, false, false, false, true, false, "key", "Enter")] // Enter в однострочном поле — действие
-    [InlineData(0x0D, false, false, false, false, true, true, "typing", null)] // Enter в многострочном — часть текста
-    [InlineData(0x56, true, false, false, false, true, false, "typing", null)] // Ctrl+V в поле — изменит текст поля
-    [InlineData(0x53, true, false, false, false, true, false, "key", "Ctrl+S")] // Ctrl+S в поле — команда программы
-    [InlineData(0x32, true, true, false, false, true, false, "typing", null)] // AltGr+2 — символ
-    [InlineData(0x73, false, true, false, false, false, false, "key", "Alt+F4")]
-    [InlineData(0x09, false, true, false, false, false, false, "ignore", null)] // Alt+Tab — переключение окон
-    [InlineData(0x45, false, false, false, true, false, false, "ignore", null)] // Win+E
-    [InlineData(0xBE, false, false, false, false, false, false, "ignore", null)] // точка вне поля
-    [InlineData(0x12, false, false, false, false, false, false, "key", "Alt")] // отдельное нажатие Alt — меню
-    [InlineData(0x10, false, false, false, false, true, false, "ignore", null)] // Shift сам по себе
-    [InlineData(0x09, false, false, true, false, true, false, "key", "Shift+Tab")]
-    public void Keys_are_split_into_typing_and_key_steps(int vk, bool ctrl, bool alt, bool shift, bool win, bool editable, bool multiLine,
+    [InlineData(0x41, false, false, false, false, true, "typing", null)] // буква в поле
+    [InlineData(0x41, false, false, false, false, false, "key", "A")] // буква вне поля (переход по списку, меню)
+    [InlineData(0x0D, false, false, false, false, true, "key", "Enter")] // Enter — всегда клавиша: в чатах он отправляет сообщение
+    [InlineData(0x09, false, false, false, false, true, "key", "Tab")]
+    [InlineData(0x56, true, false, false, false, true, "typing", null)] // Ctrl+V в поле — изменит текст поля
+    [InlineData(0x53, true, false, false, false, true, "key", "Ctrl+S")] // Ctrl+S в поле — команда программы
+    [InlineData(0x32, true, true, false, false, true, "typing", null)] // AltGr+2 — символ
+    [InlineData(0x73, false, true, false, false, false, "key", "Alt+F4")]
+    [InlineData(0x09, false, true, false, false, false, "ignore", null)] // Alt+Tab — переключение окон
+    [InlineData(0x45, false, false, false, true, false, "ignore", null)] // Win+E
+    [InlineData(0xBE, false, false, false, false, false, "ignore", null)] // точка вне поля
+    [InlineData(0x12, false, false, false, false, false, "key", "Alt")] // отдельное нажатие Alt — меню
+    [InlineData(0x10, false, false, false, false, true, "ignore", null)] // Shift сам по себе
+    [InlineData(0x09, false, false, true, false, true, "key", "Shift+Tab")]
+    public void Keys_are_split_into_typing_and_key_steps(int vk, bool ctrl, bool alt, bool shift, bool win, bool editable,
         string role, string? keys)
     {
-        var decision = DesktopKeyRules.Classify(vk, ctrl, alt, shift, win, editable, multiLine);
+        var decision = DesktopKeyRules.Classify(vk, ctrl, alt, shift, win, editable);
         Assert.Equal(role, decision.Role.ToString().ToLowerInvariant());
         Assert.Equal(keys, decision.Keys);
         if (decision.Keys is { } combo)

@@ -9,7 +9,7 @@ const element = (patch: Partial<DesktopElement>): DesktopElement => ({
 
 describe("выбор элемента окна", () => {
   it("подставляет подпись, код (если он один в окне) и известный тип", () => {
-    expect(elementConfig(element({}), types)).toEqual({ name: "Сохранить", nameMatch: "exact", automationId: "save", controlType: "Button" });
+    expect(elementConfig(element({}), types)).toEqual({ name: "Сохранить", nameMatch: "exact", automationId: "save", controlType: "Button", match: "strict" });
     expect(elementConfig(element({ uniqueId: false }), types).automationId).toBe("");
     expect(elementConfig(element({ controlType: "SplitButton" }), types).controlType).toBe("");
     // Без подписи — даже неуникальный код: иначе блоку не по чему искать.

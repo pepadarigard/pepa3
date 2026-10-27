@@ -144,4 +144,29 @@ public sealed class BackupTests : IDisposable
         await h.Store.InitializeAsync();
         Assert.Null(h.Store.RestoredFromBackupAt);
     }
+
+    [Fact]
+    public async Task Copy_made_by_an_older_version_can_be_restored_into_a_newer_one()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var path = Path.Combine(_dir, "pepa.db");
+        // Старая версия Pepa (схема 1) сделала ежедневную копию.
+        var old = new SqliteStore(path);
+        await old.InitializeAsync(1, ct);
+        await SaveAsync(old, "старый");
+        var copy = Path.Combine(_dir, "copy.db");
+        await old.BackupAsync(copy, ct);
+        SqliteConnection.ClearAllPools();
+
+        // Pepa обновили, а базу заменили этой копией: перед обновлением схемы делается новая копия — уже из копии.
+        File.Delete(path);
+        File.Delete(path + "-wal");
+        File.Delete(path + "-shm");
+        File.Copy(copy, path);
+        var store = new SqliteStore(path);
+        await store.InitializeAsync(ct);
+        Assert.NotNull(store.RestoredFromBackupAt);
+        var migration = Assert.Single(Directory.GetFiles(store.BackupDirectory, "pepa-migration1-*.db"));
+        Assert.Equal(1, (await ReadAsync(migration)).Scenarios);
+    }
 }

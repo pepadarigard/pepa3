@@ -350,35 +350,61 @@ internal static class ApiEndpoints
         // ───────────── Запись действий в окнах Windows ─────────────
         api.MapGet("/recorder/desktop", (Adapters.Desktop.DesktopRecorder recorder) => DesktopRecorderDto(recorder));
 
-        api.MapPost("/recorder/desktop/start", async (Adapters.Desktop.DesktopRecorder recorder, IPepaStore store, CancellationToken ct) =>
+        api.MapPost("/recorder/desktop/start", async (Adapters.Desktop.DesktopRecorder recorder, ProcessEngine engine, EventHub events,
+            CancellationToken ct) =>
         {
             if (recorder.UnavailableReason is { } reason)
             {
                 return Results.Json(new ErrorDto(reason), Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status409Conflict);
             }
 
-            // Пока процесс работает мышью и клавиатурой, запись перемешала бы его действия с действиями пользователя.
-            var key = Adapters.Desktop.DesktopNodes.InputResource.Key;
-            if ((await store.ListResourcesAsync(ct)).FirstOrDefault(r => r.Key == key && r.HolderProcessId is not null) is { } held)
+            // Мышь и клавиатура на время записи — за ней: процесс, которому они понадобятся, подождёт в очереди, а не смешает
+            // свои действия с действиями пользователя. Заняты процессом — запись не начинается.
+            var input = Adapters.Desktop.DesktopNodes.InputResource;
+            if (await engine.TryHoldExternallyAsync(input.Key, input.Title, RecordingHolder, ct) is { } holder)
             {
-                return Results.Json(new ErrorDto($"Мышь и клавиатура сейчас заняты процессом #{held.HolderProcessId![^6..]} — дождитесь его окончания или остановите."),
+                return Results.Json(new ErrorDto($"Мышь и клавиатура сейчас заняты процессом #{holder[^Math.Min(6, holder.Length)..]} — дождитесь его окончания или остановите."),
                     Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status409Conflict);
             }
 
             try
             {
                 await recorder.StartAsync(ct);
-                return Results.Ok(DesktopRecorderDto(recorder));
             }
-            catch (Adapters.Desktop.DesktopRecorderException ex)
+            catch (Exception ex)
             {
-                return Results.Json(new ErrorDto(ex.Message), Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status409Conflict);
+                // Запись не началась (в том числе запрос отменён) — мышь и клавиатура снова свободны для процессов.
+                if (!recorder.State.Recording)
+                {
+                    await engine.ReleaseExternalAsync(input.Key, RecordingHolder, CancellationToken.None);
+                    events.Publish("resources");
+                }
+
+                if (ex is Adapters.Desktop.DesktopRecorderException)
+                {
+                    return Results.Json(new ErrorDto(ex.Message), Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status409Conflict);
+                }
+
+                throw;
             }
+
+            events.Publish("resources");
+            return Results.Ok(DesktopRecorderDto(recorder));
         });
 
-        api.MapPost("/recorder/desktop/stop", async (Adapters.Desktop.DesktopRecorder recorder, CancellationToken ct) =>
+        api.MapPost("/recorder/desktop/stop", async (Adapters.Desktop.DesktopRecorder recorder, ProcessEngine engine, EventHub events,
+            CancellationToken ct) =>
         {
-            await recorder.StopAsync(ct);
+            try
+            {
+                await recorder.StopAsync(ct);
+            }
+            finally
+            {
+                await engine.ReleaseExternalAsync(Adapters.Desktop.DesktopNodes.InputResource.Key, RecordingHolder, CancellationToken.None);
+                events.Publish("resources");
+            }
+
             return DesktopRecorderDto(recorder);
         });
 
@@ -540,13 +566,28 @@ internal static class ApiEndpoints
             var parent = process.ParentProcessId is { } parentId ? await store.GetProcessAsync(parentId, ct) : null;
             var children = await store.GetChildProcessesAsync(id, ct);
             var held = (await store.ListResourcesAsync(ct)).Where(r => r.HolderProcessId == id).Select(r => r.Key).ToList();
+            var definition = Core.Serialization.PepaJson.Deserialize<ScenarioDefinition>(process.DefinitionJson);
+            // Секретные переменные (пароли) не показываются: ни сами, ни внутри параметров шагов.
+            var secrets = ProcessEngine.SecretValues(process, definition);
+            var variables = (System.Text.Json.Nodes.JsonObject)process.Variables.DeepClone();
+            foreach (var secret in definition.Variables.Where(v => v.Secret && variables[v.Name] is not null))
+            {
+                variables[secret.Name] = ProcessEngine.SecretMask;
+            }
+
+            definition = definition with
+            {
+                Variables = definition.Variables.Select(v => v.Secret && v.Default is not null ? v with { Default = ProcessEngine.SecretMask } : v).ToList(),
+            };
+
             return Results.Ok(new ProcessDetailsDto(
                 mapper.Summary(process, tokens, subscriptions.ToDictionary(s => s.Id)),
-                process.Variables,
-                process.LastError,
-                steps.Select(ProcessMapper.Step).ToList(),
-                journal.Select(ProcessMapper.Journal).ToList(),
-                Core.Serialization.PepaJson.Deserialize<ScenarioDefinition>(process.DefinitionJson),
+                variables,
+                ProcessEngine.Redact(process.LastError, secrets),
+                steps.Select(s => ProcessMapper.Step(s with { Input = ProcessEngine.Redact(s.Input, secrets), Output = ProcessEngine.Redact(s.Output, secrets) }))
+                    .ToList(),
+                journal.Select(j => ProcessMapper.Journal(j with { Message = ProcessEngine.Redact(j.Message, secrets)! })).ToList(),
+                definition,
                 parent is null ? null : ProcessMapper.Ref(parent),
                 await mapper.SummariesAsync(children, ct),
                 subscriptions.Select(ProcessMapper.Wait).ToList(),
@@ -699,6 +740,9 @@ internal static class ApiEndpoints
         }, ct);
         return (await mapper.TriggersAsync([saved], ct))[0];
     }
+
+    /// <summary>Держатель мыши и клавиатуры на время записи действий в окнах.</summary>
+    private const string RecordingHolder = ProcessEngine.RecordingHolder;
 
     private static DesktopRecorderDto DesktopRecorderDto(Adapters.Desktop.DesktopRecorder recorder)
     {

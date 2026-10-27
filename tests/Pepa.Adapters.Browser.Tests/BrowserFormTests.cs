@@ -128,7 +128,7 @@ public sealed class BrowserFormTests
         var id = await f.H.RunAsync(new ScenarioBuilder("Инструкции")
             .Variable("count", VariableType.Number, JsonValue.Create(3))
             .Variable("a", VariableType.Any).Variable("b", VariableType.Any).Variable("c", VariableType.Any).Variable("d", VariableType.Any)
-            .Variable("e", VariableType.Any).Variable("strict", VariableType.Any)
+            .Variable("e", VariableType.Any).Variable("strict", VariableType.Any).Variable("plain", VariableType.Any)
             .Node("start", "start")
             .Node("open", "browser.open", BrowserFixture.OpenConfig(f.Site.Url("/controls")))
             .Node("a", "browser.evaluate", new { script = "document.title.length > 0;", saveTo = "a" })
@@ -138,8 +138,10 @@ public sealed class BrowserFormTests
             .Node("e", "browser.evaluate", new { script = "async () => [0 / 0, 1]", saveTo = "e" })
             // Директива в начале кода остаётся директивой: строгий режим действует.
             .Node("strict", "browser.evaluate", new { script = "'use strict';\n(function () { return this === undefined; })()", saveTo = "strict" })
+            // Код — только строка: она и есть результат.
+            .Node("plain", "browser.evaluate", new { script = "'готово'", saveTo = "plain" })
             .Node("end", "end")
-            .Chain("start", "open", "a", "b", "c", "d", "e", "strict", "end")
+            .Chain("start", "open", "a", "b", "c", "d", "e", "strict", "plain", "end")
             .Build());
         var done = await f.H.WaitForStatusAsync(id, ProcessStatus.Completed);
         Assert.True(done.Variables["a"]!.GetValue<bool>());
@@ -148,6 +150,7 @@ public sealed class BrowserFormTests
         Assert.Equal(30, done.Variables["d"]!.GetValue<double>());
         Assert.Equal("[null,1]", done.Variables["e"]!.ToJsonString());
         Assert.True(done.Variables["strict"]!.GetValue<bool>());
+        Assert.Equal("готово", done.Variables["plain"]!.GetValue<string>());
 
         // Ошибка в записи кода — код не выполнялся: обычная ошибка шага, а не «неизвестно, выполнился ли».
         var broken = await f.H.RunAsync(Single(f, "browser.evaluate", new { script = "window.ran = true; )(" }));

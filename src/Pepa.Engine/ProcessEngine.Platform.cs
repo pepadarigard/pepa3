@@ -473,6 +473,70 @@ public sealed partial class ProcessEngine
 
     // ───────────────────────────── Ресурсы ─────────────────────────────
 
+    /// <summary>Держатель ресурса — сама Pepa, а не процесс (например, «pepa:recording» — запись действий).</summary>
+    public const string ExternalHolderPrefix = "pepa:";
+
+    /// <summary>Запись действий в окнах Windows держит мышь и клавиатуру.</summary>
+    public const string RecordingHolder = ExternalHolderPrefix + "recording";
+
+    public static bool IsExternalHolder(string? holder) => holder?.StartsWith(ExternalHolderPrefix, StringComparison.Ordinal) == true;
+
+    /// <summary>Кем занят ресурс, если не процессом: «запись действий в окнах Windows»; null — процессом (или свободен).</summary>
+    public static string? ExternalHolderTitle(string? holder) =>
+        holder == RecordingHolder ? "запись действий в окнах Windows" : IsExternalHolder(holder) ? "Pepa" : null;
+
+    /// <summary>
+    /// Занять ресурс самой Pepa (не процессом): процессы, которым он нужен, ждут в очереди, как если бы его держал другой
+    /// процесс. После перезапуска такой ресурс свободен (его держатель — не процесс).
+    /// </summary>
+    /// <returns>null — занят; иначе — процесс, который держит ресурс сейчас (тогда ничего не изменилось).</returns>
+    public async Task<string?> TryHoldExternallyAsync(string key, string title, string holder, CancellationToken cancellationToken = default)
+    {
+        EnsureRunning();
+        if (!IsExternalHolder(holder))
+        {
+            throw new ArgumentException("Держатель должен начинаться с " + ExternalHolderPrefix, nameof(holder));
+        }
+
+        await using var write = await _store.BeginWriteAsync(cancellationToken);
+        var resource = await write.GetResourceAsync(key);
+        if (resource?.HolderProcessId is { } current && current != holder)
+        {
+            return current;
+        }
+
+        var now = _time.GetUtcNow();
+        await write.UpsertResourceAsync(new ResourceRecord
+        {
+            Key = key, Title = resource?.Title ?? title, HolderProcessId = holder, AcquiredAt = resource?.AcquiredAt ?? now, UpdatedAt = now,
+        });
+        await write.CommitAsync();
+        return null;
+    }
+
+    /// <summary>Освободить ресурс, занятый самой Pepa, и передать первому в очереди.</summary>
+    public async Task ReleaseExternalAsync(string key, string holder, CancellationToken cancellationToken = default)
+    {
+        EnsureRunning();
+        var effects = new CommitEffects();
+        await using (var write = await _store.BeginWriteAsync(cancellationToken))
+        {
+            if (await write.GetResourceAsync(key) is not { } resource || resource.HolderProcessId != holder)
+            {
+                return;
+            }
+
+            if (await ReleaseAndGrantAsync(write, resource, _time.GetUtcNow()) is { } granted)
+            {
+                effects.Enqueue.Add(granted);
+            }
+
+            await write.CommitAsync();
+        }
+
+        await ApplyEffectsAsync(effects);
+    }
+
     /// <summary>Освободить ресурс и сразу передать первому в очереди активному процессу. Возвращает получателя.</summary>
     private static async Task<string?> ReleaseAndGrantAsync(IStoreWrite write, ResourceRecord resource, DateTimeOffset now)
     {
@@ -556,14 +620,18 @@ public sealed partial class ProcessEngine
 
             var now = _time.GetUtcNow();
             var granted = await ReleaseAndGrantAsync(write, resource, now);
-            await write.AddJournalAsync(Journal(holder, JournalLevel.Warning,
-                $"Ресурс «{key}» освобождён пользователем принудительно."));
+            if (!IsExternalHolder(holder))
+            {
+                await write.AddJournalAsync(Journal(holder, JournalLevel.Warning,
+                    $"Ресурс «{key}» освобождён пользователем принудительно."));
+                effects.Notify.Add(holder);
+            }
+
             if (granted is not null)
             {
                 effects.Enqueue.Add(granted);
             }
 
-            effects.Notify.Add(holder);
             await write.CommitAsync();
             message = granted is null
                 ? $"Ресурс «{key}» освобождён."

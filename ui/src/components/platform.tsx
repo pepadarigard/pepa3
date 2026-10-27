@@ -284,7 +284,7 @@ export function ResourcesCard({ resources }: { resources: Resource[] }) {
   const feedback = useFeedback();
   const invalidate = useInvalidatePlatform();
   const [busy, setBusy] = useState<string | null>(null);
-  const used = resources.filter((r) => r.holder || r.queue.length > 0);
+  const used = resources.filter((r) => r.holder || r.heldBy || r.queue.length > 0);
 
   const release = async (resource: Resource) => {
     if (!(await feedback.confirm({
@@ -310,7 +310,7 @@ export function ResourcesCard({ resources }: { resources: Resource[] }) {
   };
 
   return (
-    <Card title={`Ресурсы · занято ${resources.filter((r) => r.holder).length}`}>
+    <Card title={`Ресурсы · занято ${resources.filter((r) => r.holder || r.heldBy).length}`}>
       {used.length === 0 ? (
         <Empty icon={LockOpen} title="Все ресурсы свободны">
           Процесс занимает ресурс блоком «Занять ресурс» — например, профиль браузера — и другие процессы ждут своей очереди.
@@ -332,7 +332,7 @@ export function ResourcesCard({ resources }: { resources: Resource[] }) {
                 <tr key={r.key}>
                   <td>
                     <div className="row" style={{ gap: 6, fontWeight: 560 }}>
-                      {r.holder ? <Lock size={14} /> : <LockOpen size={14} />} {r.title}
+                      {r.holder || r.heldBy ? <Lock size={14} /> : <LockOpen size={14} />} {r.title}
                     </div>
                     {r.title !== r.key && <div className="faint small mono">{r.key}</div>}
                   </td>
@@ -342,6 +342,8 @@ export function ResourcesCard({ resources }: { resources: Resource[] }) {
                         <ProcessLink id={r.holder.id} label={`${r.holder.scenarioName} #${r.holder.shortId}`} />
                         <div className="faint">{ru.processStatus[r.holder.status]}</div>
                       </>
+                    ) : r.heldBy ? (
+                      <span>{r.heldBy} <span className="faint">— освободится, когда она закончится</span></span>
                     ) : (
                       <span className="muted">свободен</span>
                     )}

@@ -579,7 +579,10 @@ public sealed class EvaluateNode(BrowserSessions sessions) : INodeExecutor
     internal static string Marked(string script)
     {
         var end = DirectivesEnd(script);
-        return end == 0 ? "__mark(); " + script : script[..end] + ";__mark();" + script[end..];
+        // Код — только строка («'готово'»): это и есть результат; отметка после неё стала бы результатом вместо строки.
+        return end == 0 || Regex.IsMatch(script[end..], @"^(\s|//[^\n]*|/\*[\s\S]*?\*/)*$")
+            ? "__mark(); " + script
+            : script[..end] + ";__mark();" + script[end..];
     }
 
     /// <summary>Где кончаются директивы в начале кода: строки-инструкции вроде «'use strict';» (0 — директив нет).</summary>

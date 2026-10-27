@@ -16,6 +16,8 @@ export function elementConfig(element: DesktopElement, controlTypes: SelectOptio
     // Неуникальный код без подписи всё же лучше, чем ничего: если подойдёт несколько элементов, блок остановится.
     automationId: useId ? element.automationId : "",
     controlType: controlTypes.some((o) => o.value === element.controlType) ? element.controlType : "",
+    // Выбран один элемент — «взять первый/последний» от прошлого выбора не должно молча остаться.
+    match: "strict",
   };
 }
 

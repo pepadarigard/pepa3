@@ -128,8 +128,9 @@ public sealed partial class SqliteStore : IPepaStore
                 await target.OpenAsync(cancellationToken);
                 source.BackupDatabase(target);
                 // Отметка «это копия»: если базу заменят ею, Pepa узнает об этом при запуске (см. RestoredFromBackupAt).
+                // База сама может быть восстановленной копией (с отметкой) — отметка тогда просто обновляется.
                 await ExecuteAsync(target, null,
-                    "CREATE TABLE pepa_backup (created_at TEXT NOT NULL); " +
+                    "CREATE TABLE IF NOT EXISTS pepa_backup (created_at TEXT NOT NULL); DELETE FROM pepa_backup; " +
                     $"INSERT INTO pepa_backup (created_at) VALUES ('{DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture)}');",
                     cancellationToken);
                 // Копия — одним файлом, без журнала WAL рядом.

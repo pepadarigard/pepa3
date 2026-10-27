@@ -31,6 +31,7 @@ const short = (text: string | null, max = 28) => {
 export function recordingToBlocks(actions: RecordedAction[], source: RecordingSource): BlockClipboard {
   const nodes: NodeDefinition[] = [];
   const variables: VariableDefinition[] = [];
+  const passwordFields = new Map<string, string>();
   const add = (type: string, config: Record<string, string | boolean>, label: string | null, note: string | null = null) => {
     nodes.push({
       id: `rec${nodes.length + 1}`,
@@ -62,10 +63,14 @@ export function recordingToBlocks(actions: RecordedAction[], source: RecordingSo
         break;
       case "fill":
         if (action.secret) {
-          if (!variables.some((v) => v.name === "password")) {
-            variables.push({ name: "password", type: "text", default: null, description: "Пароль (вводится при запуске)", isInput: true });
+          // У каждого поля пароля — своя переменная (старый и новый пароль — разные значения).
+          let name = passwordFields.get(selector);
+          if (!name) {
+            name = passwordFields.size === 0 ? "password" : `password${passwordFields.size + 1}`;
+            passwordFields.set(selector, name);
+            variables.push({ name, type: "text", default: null, description: "Пароль (вводится при запуске)", isInput: true, secret: true });
           }
-          add("browser.fill", { selector, text: "{{ vars.password }}" }, "Ввести пароль", action.note);
+          add("browser.fill", { selector, text: `{{ vars.${name} }}` }, "Ввести пароль", action.note);
         } else {
           add("browser.fill", { selector, text: action.value ?? "" }, action.label ? `Ввести «${short(action.label)}»` : null, action.note);
         }
@@ -104,9 +109,12 @@ export function desktopRecordingToBlocks(steps: RecordedDesktopStep[]): BlockCli
     settings,
     note: step.note,
   }));
-  const variables: VariableDefinition[] = steps.some((s) => s.secret)
-    ? [{ name: "password", type: "text", default: null, description: "Пароль (вводится при запуске)", isInput: true }]
-    : [];
+  // У каждого поля пароля — своя переменная (password, password2…): старый и новый пароль — разные значения.
+  const names = [...new Set(steps.filter((s) => s.secret).map((s) => s.secretVariable ?? "password"))];
+  const variables: VariableDefinition[] = names.map((name, i) => ({
+    name, type: "text", default: null, isInput: true, secret: true,
+    description: names.length > 1 ? `Пароль ${i + 1} (вводится при запуске)` : "Пароль (вводится при запуске)",
+  }));
   const edges = nodes.slice(1).map((node, i) => ({ id: `rec-e${i + 1}`, source: nodes[i].id, sourcePort: "out", target: node.id }));
   return { kind: "pepa-blocks", version: 1, nodes, edges, variables };
 }

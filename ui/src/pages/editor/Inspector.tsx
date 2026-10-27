@@ -256,6 +256,10 @@ export function ScenarioInspector({ meta, issues, onChange }: { meta: Meta; issu
               <input type="checkbox" checked={variable.isInput} onChange={(e) => updateVariable(index, { isInput: e.target.checked }, "input")} />
               Спрашивать при запуске
             </label>
+            <label className="check small" title="Например, пароль: вводится скрыто, а в журнале и на странице процесса вместо значения — «••••»">
+              <input type="checkbox" checked={variable.secret === true} onChange={(e) => updateVariable(index, { secret: e.target.checked }, "secret")} />
+              Секретная (пароль)
+            </label>
           </div>
         ))}
       </div>
@@ -352,7 +356,8 @@ function ElementPickerButton({ node, descriptor, onChange }: {
 }) {
   const [open, setOpen] = useState(false);
   const title = typeof node.config.window === "string" ? node.config.window.trim() : "";
-  const process = typeof node.config.process === "string" ? node.config.process.trim() : "";
+  // Как в блоках: «notepad.exe» — программа «notepad».
+  const process = typeof node.config.process === "string" ? node.config.process.trim().replace(/\.exe$/i, "") : "";
   const dynamic = title.includes("{{") || process.includes("{{");
   const typeField = descriptor.fields.find((f) => f.name === "controlType");
   const typeLabels = useMemo(() => new Map((typeField?.options ?? []).filter((o) => o.value).map((o) => [o.value, o.label])), [typeField]);

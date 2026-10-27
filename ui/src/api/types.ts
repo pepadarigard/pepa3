@@ -10,6 +10,8 @@ export interface VariableDefinition {
   default: Json | null;
   description: string;
   isInput: boolean;
+  /** Секретное значение (пароль): вводится скрыто, в истории процесса — «••••». */
+  secret?: boolean;
 }
 
 export interface NodeSettings {
@@ -255,6 +257,8 @@ export interface Resource {
   acquiredAt: string | null;
   updatedAt: string;
   queue: { process: ProcessRef; requestedAt: string }[];
+  /** Ресурс заняла сама Pepa (например, «запись действий в окнах Windows»). */
+  heldBy?: string | null;
 }
 
 export type TriggerKind = "schedule" | "event";
@@ -471,8 +475,9 @@ export interface RecordedDesktopStep {
   label: string | null;
   /** Что проверить в шаге (ненадёжный поиск, сокращённый заголовок окна, пропущенные действия). */
   note: string | null;
-  /** Введён пароль: в блоке переменная password. */
+  /** Введён пароль: в блоке секретная переменная secretVariable. */
   secret: boolean;
+  secretVariable?: string | null;
 }
 
 export interface DesktopRecorderState {

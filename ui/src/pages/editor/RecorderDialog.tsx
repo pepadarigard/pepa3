@@ -7,6 +7,7 @@ import { Dialog } from "../../components/feedback";
 import { Button, Callout, Spinner } from "../../components/ui";
 import type { BlockClipboard } from "../../lib/clipboard";
 import { desktopRecordingToBlocks, recordingToBlocks, type RecordedAction } from "../../lib/recording";
+import { native } from "../../lib/native";
 import { AdsPowerPicker } from "./FieldEditor";
 
 const kindText: Record<RecordedAction["kind"], string> = {
@@ -225,6 +226,8 @@ function WindowsRecorder({ state, refetch, switcher, onInsert, onClose }: Props 
 
   const recording = state?.recording === true;
   const unavailable = state?.unavailableReason ?? null;
+  // Окна самой Pepa не записываются, а окно обычного браузера с Pepa — записалось бы (вместе с кнопкой «Остановить»).
+  const outsideApp = unavailable === null && !native.available();
   return (
     <Dialog
       title={recording ? "Идёт запись действий в окнах" : "Записать действия в окнах Windows"}
@@ -241,7 +244,7 @@ function WindowsRecorder({ state, refetch, switcher, onInsert, onClose }: Props 
         ) : (
           <>
             <Button onClick={onClose}>Закрыть</Button>
-            <Button variant="primary" icon={Circle} busy={busy} onClick={() => void start()} disabled={!state || unavailable !== null}>
+            <Button variant="primary" icon={Circle} busy={busy} onClick={() => void start()} disabled={!state || unavailable !== null || outsideApp}>
               Начать запись
             </Button>
           </>
@@ -254,6 +257,11 @@ function WindowsRecorder({ state, refetch, switcher, onInsert, onClose }: Props 
         <div className="stack" style={{ gap: 12 }}>
           {switcher}
           {unavailable && <Callout tone="attention">{unavailable}</Callout>}
+          {outsideApp && (
+            <Callout tone="attention">
+              Pepa открыта в обычном браузере: его окно тоже попало бы в запись. Начните запись в окне Pepa (Pepa.exe).
+            </Callout>
+          )}
           <p className="small muted">
             Работайте в программах как обычно: нажатия мышью, ввод текста в поля и сочетания клавиш записываются блоками «Нажать в окне»,
             «Ввести в окне» и «Клавиатура». Элемент записывается по коду или подписи, так что блоки не зависят от положения окна. Окна

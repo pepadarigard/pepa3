@@ -123,7 +123,8 @@ function RunDialog({ name, inputs, onRun, onCancel }: { name: string; inputs: Va
           ) : (
             <input
               className="input"
-              type={variable.type === "number" ? "number" : "text"}
+              type={variable.secret ? "password" : variable.type === "number" ? "number" : "text"}
+              autoComplete={variable.secret ? "off" : undefined}
               value={String(values[variable.name] ?? "")}
               onChange={(e) => setValues({ ...values, [variable.name]: e.target.value })}
             />

@@ -19,6 +19,14 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
 {
     public string? UnavailableReason => null;
 
+    /// <summary>Как в настройках мыши Windows.</summary>
+    public TimeSpan DoubleClickTime => TimeSpan.FromMilliseconds(HookNative.GetDoubleClickTime());
+
+    public int DoubleClickDistance => Math.Max(2, HookNative.GetSystemMetrics(HookNative.SmCxDoubleClk) / 2);
+
+    /// <summary>Сколько может задержаться определение элемента, прежде чем у шага появится пояснение.</summary>
+    private static readonly TimeSpan LagNote = TimeSpan.FromMilliseconds(300);
+
     public IDesktopInputWatch Start(Action<DesktopInput> sink)
     {
         var watch = new Watch(sink);
@@ -57,8 +65,19 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
 
         // Состояние потока разбора (только из него).
         private bool _ctrl, _alt, _shift, _win, _altAlone;
-        private (AutomationElement Element, DesktopTarget Target)? _typing;
-        private readonly Dictionary<MouseButtonKind, (Raw Down, DesktopTarget? Target, AutomationElement? Window)> _down = [];
+        private Typing? _typing;
+        private readonly Dictionary<MouseButtonKind, (Raw Down, DesktopTarget? Target, AutomationElement? Window, bool Modifiers)> _down = [];
+
+        /// <summary>Набор текста в поле: само поле, что о нём записать и последнее прочтённое во время набора значение.</summary>
+        private sealed class Typing(AutomationElement element, DesktopTarget target)
+        {
+            public AutomationElement Element { get; } = element;
+            public DesktopTarget Target { get; } = target;
+            public string? LastSeen { get; set; }
+
+            /// <summary>Последняя клавиша набора стирала (Backspace, Delete, Ctrl+X): пустое поле — это ввод пользователя.</summary>
+            public bool LastKeyErased { get; set; }
+        }
 
         public void Start()
         {
@@ -250,8 +269,9 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
                     {
                         Parse(raw);
                     }
-                    catch (Exception ex) when (IsUiaFailure(ex))
+                    catch (Exception ex) when (!IsFatal(ex))
                     {
+                        // Любая ошибка UI Automation или программы — пояснение к записи, а не падение Pepa.
                         Emit(new DesktopSkippedInput(raw.At, $"Windows не ответил, что за элемент под мышью или в фокусе ({ex.Message}) — действие не записано"));
                     }
                 }
@@ -286,7 +306,7 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
                     }
 
                     var (target, window) = Resolve(raw);
-                    _down[raw.Button] = (raw, target, window);
+                    _down[raw.Button] = (raw, target, window, _ctrl || _shift || _alt);
                     break;
                 case RawKind.MouseUp:
                     if (!_down.Remove(raw.Button, out var pressed) || pressed.Target is null)
@@ -294,13 +314,14 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
                         break;
                     }
 
-                    if (Math.Abs(raw.X - pressed.Down.X) > 5 || Math.Abs(raw.Y - pressed.Down.Y) > 5)
+                    if (IsDrag(pressed.Down, raw, pressed.Target))
                     {
                         Emit(new DesktopSkippedInput(raw.At, "перетаскивание мышью не записывается"));
                         break;
                     }
 
-                    Emit(new DesktopClickInput(pressed.Down.At, pressed.Target, pressed.Down.X, pressed.Down.Y, raw.Button), pressed.Window);
+                    Emit(new DesktopClickInput(pressed.Down.At, pressed.Target, pressed.Down.X, pressed.Down.Y, raw.Button, pressed.Modifiers),
+                        pressed.Window);
                     break;
                 case RawKind.KeyDown:
                     OnKeyDown(raw);
@@ -348,11 +369,27 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
             Key(raw, raw.Vk);
         }
 
+        /// <summary>
+        /// Перетаскивание — мышь ушла дальше, чем Windows считает щелчком, и отпущена не над тем же элементом. Чуть сдвинутое
+        /// нажатие на кнопку остаётся нажатием.
+        /// </summary>
+        private static bool IsDrag(Raw down, Raw up, DesktopTarget target)
+        {
+            var moved = Math.Abs(up.X - down.X) > Math.Max(2, HookNative.GetSystemMetrics(HookNative.SmCxDrag)) ||
+                        Math.Abs(up.Y - down.Y) > Math.Max(2, HookNative.GetSystemMetrics(HookNative.SmCyDrag));
+            if (!moved)
+            {
+                return false;
+            }
+
+            return target.Element is not { Bounds: var b } ||
+                   up.X < b.X || up.Y < b.Y || up.X >= b.X + b.Width || up.Y >= b.Y + b.Height;
+        }
+
         private void Key(Raw raw, int vk)
         {
             var focused = _automation!.FocusedElement();
-            var (editable, multiLine) = Editable(focused);
-            var decision = DesktopKeyRules.Classify(vk, _ctrl, _alt, _shift, _win, editable, multiLine);
+            var decision = DesktopKeyRules.Classify(vk, _ctrl, _alt, _shift, _win, Editable(focused));
             switch (decision.Role)
             {
                 case KeyRole.Typing:
@@ -361,9 +398,20 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
                         FlushTyping(raw.At);
                     }
 
-                    if (_typing is null && Target(focused, raw) is { } target)
+                    if (_typing is { } current)
                     {
-                        _typing = (focused, target.Target);
+                        // Прочитать поле на каждой клавише набора: если после Enter программа сразу очистит поле, останется
+                        // текст до последнего символа.
+                        current.LastSeen = TryRead(current) ?? current.LastSeen;
+                    }
+                    else if (Target(focused, raw) is { } target)
+                    {
+                        _typing = new Typing(focused, target.Target);
+                    }
+
+                    if (_typing is { } active)
+                    {
+                        active.LastKeyErased = vk is 0x08 or 0x2E || (_ctrl && vk == 0x58);
                     }
 
                     break;
@@ -412,20 +460,36 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
             }
 
             _typing = null;
-            string? text = null;
-            if (!typing.Target.IsPassword)
+            var text = TryRead(typing);
+            var early = false;
+            if (!typing.Target.IsPassword && string.IsNullOrEmpty(text) && !typing.LastKeyErased && typing.LastSeen is { Length: > 0 } seen)
             {
-                try
-                {
-                    text = ReadText(typing.Element);
-                }
-                catch (Exception ex) when (IsUiaFailure(ex))
-                {
-                    // Поле закрылось вместе с окном — текст не прочитать; шаг будет с пояснением.
-                }
+                // Поле пустое (или закрылось), хотя последним вводили символ, — программа очистила его сама (Enter отправил
+                // сообщение). Берём прочтённое во время набора — с пометкой, что последний символ мог не попасть.
+                text = seen;
+                early = true;
             }
 
-            Emit(new DesktopTextInput(at, typing.Target, text), WindowOf(typing.Element));
+            Emit(new DesktopTextInput(at, typing.Target, text, early), WindowOf(typing.Element));
+        }
+
+        /// <summary>Значение поля; null — пароль (не читается) или поле уже не прочитать.</summary>
+        private static string? TryRead(Typing typing)
+        {
+            if (typing.Target.IsPassword)
+            {
+                return null;
+            }
+
+            try
+            {
+                return ReadText(typing.Element);
+            }
+            catch (Exception ex) when (!IsFatal(ex))
+            {
+                // Поле закрылось вместе с окном — текст не прочитать; шаг будет с пояснением.
+                return null;
+            }
         }
 
         private static string? ReadText(AutomationElement element)
@@ -438,30 +502,17 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
             return element.Patterns.Text.TryGetPattern(out var text) ? text.DocumentRange.GetText(-1) : null;
         }
 
-        private static (bool Editable, bool MultiLine) Editable(AutomationElement? element)
+        private static bool Editable(AutomationElement? element)
         {
             if (element is null)
             {
-                return (false, false);
+                return false;
             }
 
             var type = element.Properties.ControlType.ValueOrDefault;
-            var editable = element.Patterns.Value.TryGetPattern(out var value)
+            return element.Patterns.Value.TryGetPattern(out var value)
                 ? !value.IsReadOnly.ValueOrDefault && type is ControlType.Edit or ControlType.Document or ControlType.ComboBox
                 : type is ControlType.Edit or ControlType.Document && element.Patterns.Text.IsSupported;
-            if (!editable)
-            {
-                return (false, false);
-            }
-
-            var multiLine = type == ControlType.Document;
-            var handle = element.Properties.NativeWindowHandle.ValueOrDefault;
-            if (!multiLine && handle != 0)
-            {
-                multiLine = (HookNative.GetWindowLongPtr(handle, HookNative.GwlStyle) & HookNative.EsMultiline) != 0;
-            }
-
-            return (true, multiLine);
         }
 
         /// <summary>Что под мышью: элемент и его окно верхнего уровня (null — окно, которое не записывается).</summary>
@@ -477,23 +528,33 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
             var target = result.Value.Target;
             if (target.Window.ProcessId != raw.RootProcessId && raw.RootProcessId != 0)
             {
-                target = target with { Note = "под мышью во время нажатия сменилось окно — проверьте, тот ли элемент записан" };
+                target = target with
+                {
+                    Note = string.Join("; ", new[] { target.Note, "под мышью во время нажатия сменилось окно — проверьте, тот ли элемент записан" }
+                        .Where(n => n is not null)),
+                };
             }
 
             return (target, result.Value.Window);
         }
 
-        /// <summary>Окно и сведения об элементе; null — окна Pepa и оболочки Windows (не записываются).</summary>
+        /// <summary>
+        /// Окно и сведения об элементе; null — окна Pepa и оболочки Windows (не записываются) или окно не определилось
+        /// (тогда — пояснение к записи: действие не записано, но и не пропало молча).
+        /// </summary>
         private (DesktopTarget Target, AutomationElement Window)? Target(AutomationElement? element, Raw raw)
         {
+            const string unknown = "Pepa не смогла определить окно (оно закрылось или не отвечает) — действие не записано";
             if (element is null)
             {
+                Emit(new DesktopSkippedInput(raw.At, unknown));
                 return null;
             }
 
             var window = WindowOf(element);
             if (window is null)
             {
+                Emit(new DesktopSkippedInput(raw.At, unknown));
                 return null;
             }
 
@@ -506,6 +567,7 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
             var processName = UiaDesktop.WindowProcessName(window, processId);
             if (processName is null)
             {
+                Emit(new DesktopSkippedInput(raw.At, unknown));
                 return null;
             }
 
@@ -521,7 +583,12 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
                 new DesktopRect(r.X, r.Y, r.Width, r.Height));
             // Нажатие в само окно (фон, рамка) — элемента нет, будет нажатие в точке.
             var described = Same(element, window) ? null : UiaDesktop.Describe(element);
-            return (new DesktopTarget { Window = info, Element = described, IsPassword = element.Properties.IsPassword.ValueOrDefault }, window);
+            // Окно ответило не сразу — к этому времени фокус или элемент под мышью могли уже смениться.
+            var late = DateTimeOffset.Now - raw.At > LagNote
+                ? "Windows долго отвечал, что за элемент, — проверьте, тот ли элемент записан"
+                : null;
+            return (new DesktopTarget { Window = info, Element = described, IsPassword = element.Properties.IsPassword.ValueOrDefault, Note = late },
+                window);
         }
 
         /// <summary>Окно верхнего уровня элемента — так же, как окна перебирают блоки (дети «рабочего стола» UI Automation).</summary>
@@ -548,7 +615,7 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
                     current = parent;
                 }
             }
-            catch (Exception ex) when (IsUiaFailure(ex))
+            catch (Exception ex) when (!IsFatal(ex))
             {
                 return null;
             }
@@ -571,7 +638,7 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
             {
                 return _automation!.Compare(a, b);
             }
-            catch (Exception ex) when (IsUiaFailure(ex))
+            catch (Exception ex) when (!IsFatal(ex))
             {
                 return false;
             }
@@ -604,7 +671,7 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
                             _ => input,
                         };
                     }
-                    catch (Exception ex) when (IsUiaFailure(ex))
+                    catch (Exception ex) when (!IsFatal(ex))
                     {
                         // Окно закрылось — похожие элементы не подсчитать: шаг всё равно записывается, с пояснением.
                         input = input switch
@@ -660,9 +727,11 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
             return target with { SameId = sameId, SameName = sameName };
         }
 
-        private static bool IsUiaFailure(Exception ex) =>
-            ex is COMException or InvalidOperationException or TimeoutException or FlaUI.Core.Exceptions.ElementNotAvailableException
-                or FlaUI.Core.Exceptions.PropertyNotSupportedException or FlaUI.Core.Exceptions.PatternNotSupportedException;
+        /// <summary>
+        /// Ошибки, после которых процесс не жилец; все остальные (COM переводит свои коды в самые разные исключения .NET) —
+        /// пояснение к записи. Необработанное исключение в этом потоке уронило бы всю Pepa вместе с идущими процессами.
+        /// </summary>
+        private static bool IsFatal(Exception ex) => ex is OutOfMemoryException or AccessViolationException or StackOverflowException;
     }
 }
 
@@ -675,8 +744,9 @@ internal static partial class HookNative
     public const uint LlmhfInjected = 0x01;
     public const uint LlmhfLowerIlInjected = 0x02;
     public const uint LlkhfInjected = 0x10;
-    public const int GwlStyle = -16;
-    public const nint EsMultiline = 0x0004;
+    public const int SmCxDoubleClk = 36;
+    public const int SmCxDrag = 68;
+    public const int SmCyDrag = 69;
 
     [StructLayout(LayoutKind.Sequential)]
     public struct MouseInfo
@@ -752,6 +822,9 @@ internal static partial class HookNative
     [LibraryImport("user32.dll")]
     public static partial uint GetWindowThreadProcessId(nint window, out uint processId);
 
-    [LibraryImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
-    public static partial nint GetWindowLongPtr(nint window, int index);
+    [LibraryImport("user32.dll")]
+    public static partial uint GetDoubleClickTime();
+
+    [LibraryImport("user32.dll")]
+    public static partial int GetSystemMetrics(int index);
 }

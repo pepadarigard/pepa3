@@ -29,10 +29,16 @@ public sealed record DesktopTarget
 public abstract record DesktopInput(DateTimeOffset At);
 
 /// <summary>Нажатие мышью: кнопка нажата и отпущена почти в одной точке. Координаты — экранные.</summary>
-public sealed record DesktopClickInput(DateTimeOffset At, DesktopTarget Target, int X, int Y, MouseButtonKind Button) : DesktopInput(At);
+/// <param name="WithModifiers">Во время нажатия были зажаты Ctrl, Shift или Alt.</param>
+public sealed record DesktopClickInput(DateTimeOffset At, DesktopTarget Target, int X, int Y, MouseButtonKind Button, bool WithModifiers = false)
+    : DesktopInput(At);
 
 /// <summary>Ввод текста в поле закончился: значение поля в этот момент (null — прочитать не удалось или это пароль).</summary>
-public sealed record DesktopTextInput(DateTimeOffset At, DesktopTarget Target, string? Text) : DesktopInput(At);
+/// <param name="ReadBeforeLastKey">
+/// Поле сразу очистилось или закрылось (например, Enter отправил сообщение), и текст взят из последнего прочтения во время
+/// набора — последний символ мог в него не попасть.
+/// </param>
+public sealed record DesktopTextInput(DateTimeOffset At, DesktopTarget Target, string? Text, bool ReadBeforeLastKey = false) : DesktopInput(At);
 
 /// <summary>Клавиша или сочетание (не набор текста) — в формате блока «Клавиатура»: «Enter», «Ctrl+S».</summary>
 public sealed record DesktopKeyInput(DateTimeOffset At, DesktopTarget Target, string Keys) : DesktopInput(At);
@@ -52,6 +58,12 @@ public interface IDesktopInputMonitor
     /// Не удалось начать — <see cref="DesktopException"/>.
     /// </summary>
     IDesktopInputWatch Start(Action<DesktopInput> sink);
+
+    /// <summary>Двойной щелчок: второе нажатие не позже этого (как в настройках Windows).</summary>
+    TimeSpan DoubleClickTime => TimeSpan.FromMilliseconds(500);
+
+    /// <summary>Двойной щелчок: второе нажатие не дальше этого, точек.</summary>
+    int DoubleClickDistance => 4;
 }
 
 public interface IDesktopInputWatch
@@ -131,9 +143,12 @@ public static class DesktopKeyRules
     /// Что записать для нажатой клавиши. Клавиши-модификаторы сами по себе не записываются (кроме отдельного нажатия Alt —
     /// перехватчик сообщает о нём, когда Alt отпущен, а других клавиш не нажимали): они входят в сочетания.
     /// </summary>
+    /// <remarks>
+    /// Enter и Tab — всегда отдельные клавиши, даже в многострочном поле: в чатах Enter отправляет сообщение, и это действие
+    /// нельзя потерять. Если они стали частью текста, запись склеит текст в один шаг (<see cref="DesktopRecorder"/>).
+    /// </remarks>
     /// <param name="editable">Фокус в поле ввода.</param>
-    /// <param name="multiLine">Поле многострочное: Enter и Tab в нём — часть текста.</param>
-    public static KeyDecision Classify(int vk, bool ctrl, bool alt, bool shift, bool win, bool editable, bool multiLine)
+    public static KeyDecision Classify(int vk, bool ctrl, bool alt, bool shift, bool win, bool editable)
     {
         if (vk == Alt && !ctrl && !shift && !win)
         {
@@ -161,11 +176,6 @@ public static class DesktopKeyRules
         if (editable)
         {
             if (plain && (IsPrintable(vk) || IsEditing(vk)))
-            {
-                return new KeyDecision(KeyRole.Typing);
-            }
-
-            if (!ctrl && !alt && vk is Enter or Tab && multiLine)
             {
                 return new KeyDecision(KeyRole.Typing);
             }
@@ -206,8 +216,11 @@ public sealed record RecordedDesktopStep
     /// <summary>Что проверить в этом шаге (ненадёжный поиск, сокращённый заголовок, пропущенные действия…).</summary>
     public string? Note { get; init; }
 
-    /// <summary>Введён пароль: текст не записан, в блоке — переменная <c>password</c>.</summary>
+    /// <summary>Введён пароль: текст не записан, в блоке — переменная <see cref="SecretVariable"/>.</summary>
     public bool Secret { get; init; }
+
+    /// <summary>Переменная пароля: «password», у второго поля пароля — «password2» и т. д.</summary>
+    public string? SecretVariable { get; init; }
 }
 
 public sealed record DesktopRecorderState(bool Recording, IReadOnlyList<RecordedDesktopStep> Steps);
@@ -222,17 +235,26 @@ public sealed class DesktopRecorderException(string message) : Exception(message
 /// </summary>
 public sealed class DesktopRecorder(IDesktopInputMonitor monitor)
 {
-    /// <summary>Двойной щелчок: второе нажатие не позже и не дальше этого.</summary>
-    private static readonly TimeSpan DoubleClickTime = TimeSpan.FromMilliseconds(500);
-    private const int DoubleClickDistance = 4;
+    private const string OutsideTyping =
+        "набор текста вне поля ввода не записывается: это мог быть пароль (например, в окне удалённого рабочего стола) — " +
+        "если текст нужен, добавьте блок «Клавиатура» → «Напечатать текст»";
+
+    /// <summary>Элементы, у которых нажатие без мыши (Invoke/Toggle/Select) делает то же, что щелчок.</summary>
+    private static readonly HashSet<string> InvokeIsClick =
+        new(["Button", "SplitButton", "MenuItem", "Hyperlink", "CheckBox", "RadioButton", "TabItem"], StringComparer.Ordinal);
 
     private readonly SemaphoreSlim _lock = new(1, 1);
     private readonly object _gate = new();
     private readonly List<Entry> _entries = [];
     private readonly HashSet<string> _notedWindows = new(StringComparer.Ordinal);
+    private readonly List<DesktopTarget> _passwordFields = [];
     private IDesktopInputWatch? _watch;
     private bool _active;
+    private int _session;
     private string? _pendingNote;
+
+    /// <summary>Окно, где сейчас набирают текст вне поля ввода (клавиши не записываются).</summary>
+    private long? _outsideTypingWindow;
 
     /// <summary>Записан шаг или запись началась/закончилась.</summary>
     public event Action? Changed;
@@ -260,26 +282,32 @@ public sealed class DesktopRecorder(IDesktopInputMonitor monitor)
                 throw new DesktopRecorderException("Запись уже идёт. Остановите её, прежде чем начать новую.");
             }
 
+            int session;
             lock (_gate)
             {
                 _entries.Clear();
                 _notedWindows.Clear();
+                _passwordFields.Clear();
                 _pendingNote = null;
+                _outsideTypingWindow = null;
                 _active = true;
+                session = ++_session;
             }
 
             try
             {
-                _watch = monitor.Start(Accept);
+                // Действия привязаны к этой записи: если прошлый перехват не остановился вовремя, его запоздалые действия
+                // в новую запись не попадут.
+                _watch = monitor.Start(input => Accept(session, input));
             }
-            catch (DesktopException ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 lock (_gate)
                 {
                     _active = false;
                 }
 
-                throw new DesktopRecorderException(ex.Message);
+                throw new DesktopRecorderException(ex is DesktopException ? ex.Message : $"Не удалось начать запись: {ex.Message}");
             }
         }
         finally
@@ -298,7 +326,18 @@ public sealed class DesktopRecorder(IDesktopInputMonitor monitor)
             if (_watch is { } watch)
             {
                 // Перехватчик передаёт незаконченный ввод текста до возврата — только потом запись закрывается.
-                await watch.StopAsync();
+                try
+                {
+                    await watch.StopAsync();
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Записанное не теряется: шаги остаются, у последнего — пояснение.
+                    lock (_gate)
+                    {
+                        _pendingNote = Join(_pendingNote, $"перехват не остановился как следует ({ex.Message}) — последние действия могли не записаться");
+                    }
+                }
             }
         }
         finally
@@ -325,23 +364,24 @@ public sealed class DesktopRecorder(IDesktopInputMonitor monitor)
     }
 
     /// <summary>Действие от перехватчика (по одному, по порядку).</summary>
-    internal void Accept(DesktopInput input)
+    private void Accept(int session, DesktopInput input)
     {
         lock (_gate)
         {
-            if (!_active)
+            if (!_active || session != _session)
             {
                 return;
+            }
+
+            if (input is not DesktopKeyInput && input is not DesktopSkippedInput)
+            {
+                _outsideTypingWindow = null;
             }
 
             switch (input)
             {
                 case DesktopSkippedInput skipped:
-                    if (_pendingNote is null || !_pendingNote.Contains(skipped.Reason, StringComparison.Ordinal))
-                    {
-                        _pendingNote = Join(_pendingNote, skipped.Reason);
-                    }
-
+                    AddPendingNote(skipped.Reason);
                     break;
                 case DesktopClickInput click:
                     OnClick(click);
@@ -350,8 +390,7 @@ public sealed class DesktopRecorder(IDesktopInputMonitor monitor)
                     OnText(text);
                     break;
                 case DesktopKeyInput key:
-                    Add(new Entry(Step(key.Target, "desktop.keys", new JsonObject { ["mode"] = "keys", ["keys"] = key.Keys }, $"Клавиши {key.Keys}"),
-                        EntryKind.Keys, key.Target, key.At, key.Keys));
+                    OnKey(key);
                     break;
             }
         }
@@ -361,9 +400,20 @@ public sealed class DesktopRecorder(IDesktopInputMonitor monitor)
 
     private void OnClick(DesktopClickInput click)
     {
-        if (click.Button == MouseButtonKind.Left && _entries.Count > 0 && _entries[^1] is { Kind: EntryKind.Click, Double: false, Right: false } previous &&
-            click.At - previous.At <= DoubleClickTime && Math.Abs(click.X - previous.X) <= DoubleClickDistance &&
-            Math.Abs(click.Y - previous.Y) <= DoubleClickDistance && SameElement(previous.Target, click.Target))
+        if (click.WithModifiers)
+        {
+            // Ctrl/Shift+щелчок (выделить несколько, открыть в новой вкладке) блоки не умеют — простой щелчок сделал бы другое.
+            AddPendingNote("нажатие мышью с Ctrl, Shift или Alt не записано (выделение нескольких элементов, открытие в новой вкладке) — " +
+                           "добавьте такой шаг вручную");
+            return;
+        }
+
+        if (click.Button == MouseButtonKind.Left && _entries.Count > 0 &&
+            _entries[^1] is { Kind: EntryKind.Click, Double: false, Button: MouseButtonKind.Left } previous &&
+            click.At - previous.At <= monitor.DoubleClickTime && Math.Abs(click.X - previous.X) <= monitor.DoubleClickDistance &&
+            Math.Abs(click.Y - previous.Y) <= monitor.DoubleClickDistance &&
+            (SameElement(previous.Target, click.Target) ||
+             (previous.Step.Type == "desktop.mouse" && Describe(click.Target) is null && previous.Target.Window.Handle == click.Target.Window.Handle)))
         {
             // Второе нажатие двойного щелчка — тот же шаг, но двойным щелчком.
             var config = (JsonObject)previous.Step.Config.DeepClone();
@@ -395,40 +445,108 @@ public sealed class DesktopRecorder(IDesktopInputMonitor monitor)
             var note = element is null
                 ? "элемент не определился — нажатие в точке окна: если окно изменит размер или вид, нажатие попадёт не туда"
                 : "нажатие средней кнопкой — в точке окна";
-            Add(new Entry(Step(target, "desktop.mouse", config, null, note), EntryKind.Click, target, click.At, X: click.X, Y: click.Y));
+            Add(new Entry(Step(target, "desktop.mouse", config, null, note), EntryKind.Click, target, click.At, X: click.X, Y: click.Y,
+                Button: click.Button));
             return;
         }
 
-        var how = click.Button == MouseButtonKind.Right ? "right" : "auto";
+        // «Без мыши» — только там, где нажатие UI Automation и есть щелчок. У пунктов списков, файлов, строк таблиц оно
+        // означает «открыть» (как двойной щелчок), а у пунктов с флажком — переключить флажок: щелчок, который выделял
+        // строку, при выполнении открыл бы файл. Такие нажатия повторяются мышью.
+        var how = click.Button == MouseButtonKind.Right ? "right" : InvokeIsClick.Contains(target.Element!.ControlType) ? "auto" : "mouse";
         var clickConfig = element.Value.Config;
         clickConfig["how"] = how;
         var label = target.Element!.Name.Length > 0
             ? $"{(how == "right" ? "Правой кнопкой" : "Нажать")} «{Short(target.Element.Name)}»"
             : null;
         Add(new Entry(Step(target, "desktop.click", clickConfig, label, element.Value.Note), EntryKind.Click, target, click.At,
-            X: click.X, Y: click.Y, Right: how == "right"));
+            X: click.X, Y: click.Y, Button: click.Button));
+    }
+
+    private void OnKey(DesktopKeyInput key)
+    {
+        if (IsPrintableKey(key.Keys))
+        {
+            // Буквы и цифры одна за другой вне поля ввода — это набор текста (пароль в удалённом рабочем столе, поле, о
+            // котором Windows не сообщает). Нажатиями его не записываем: пароль оказался бы в сценарии открытым текстом.
+            if (_outsideTypingWindow == key.Target.Window.Handle)
+            {
+                return;
+            }
+
+            if (_entries.Count > 0 && _entries[^1] is { Kind: EntryKind.Keys, Keys: { } last } previous && IsPrintableKey(last) &&
+                previous.Target.Window.Handle == key.Target.Window.Handle)
+            {
+                _entries.RemoveAt(_entries.Count - 1);
+                _outsideTypingWindow = key.Target.Window.Handle;
+                AddPendingNote(OutsideTyping);
+                return;
+            }
+        }
+        else
+        {
+            _outsideTypingWindow = null;
+        }
+
+        // Enter или Tab после ввода в это же поле: если перевод строки уже попал в прочитанный текст, его повторит сама клавиша.
+        if (key.Keys is "Enter" or "Shift+Enter" or "Tab" && _entries.Count > 0 && _entries[^1] is { Kind: EntryKind.Text, Text: { } text } typed &&
+            SameElement(typed.Target, key.Target) && TrimEnding(text, key.Keys == "Tab") is { } trimmed)
+        {
+            var config = (JsonObject)typed.Step.Config.DeepClone();
+            config["text"] = trimmed;
+            _entries[^1] = typed with { Step = typed.Step with { Config = config }, Text = trimmed };
+        }
+
+        Add(new Entry(Step(key.Target, "desktop.keys", new JsonObject { ["mode"] = "keys", ["keys"] = key.Keys }, $"Клавиши {key.Keys}"),
+            EntryKind.Keys, key.Target, key.At, key.Keys));
+    }
+
+    /// <summary>Текст без последнего перевода строки (или табуляции); null — им он не кончается.</summary>
+    private static string? TrimEnding(string text, bool tab) =>
+        tab ? text.EndsWith('\t') ? text[..^1] : null
+            : text.EndsWith("\r\n", StringComparison.Ordinal) ? text[..^2]
+            : text.EndsWith('\n') || text.EndsWith('\r') ? text[..^1]
+            : null;
+
+    private static bool IsPrintableKey(string keys) =>
+        keys is "Space" || (keys.StartsWith("Shift+", StringComparison.Ordinal) ? keys[6..] : keys) is { Length: 1 } k && char.IsAsciiLetterOrDigit(k[0]);
+
+    private void AddPendingNote(string reason)
+    {
+        if (_pendingNote is null || !_pendingNote.Contains(reason, StringComparison.Ordinal))
+        {
+            _pendingNote = Join(_pendingNote, reason);
+        }
     }
 
     private void OnText(DesktopTextInput input)
     {
         var target = input.Target;
         var secret = target.IsPassword;
-        var text = secret ? "{{ vars.password }}" : input.Text ?? "";
+        var variable = secret ? PasswordVariable(target) : null;
+        var text = secret ? $"{{{{ vars.{variable} }}}}" : input.Text ?? "";
         var unread = !secret && input.Text is null ? "Pepa не смогла прочитать текст поля — впишите его" : null;
+        if (input.ReadBeforeLastKey && !secret)
+        {
+            unread = Join(unread, "поле очистилось сразу после нажатия (например, сообщение отправлено) — текст прочитан чуть раньше, " +
+                                  "последний символ мог не попасть: проверьте его");
+        }
+
         var element = Describe(target);
 
-        // Набор продолжился после Enter или Tab в том же поле, и они стали частью текста (многострочное поле, о котором
-        // Windows этого не сообщает) — итоговый текст включает и их. Если не стали (Enter отправил поиск) — шаги остаются.
-        while (!secret && _entries.Count >= 2 && _entries[^1] is { Kind: EntryKind.Keys, Keys: "Enter" or "Tab" or "Shift+Enter" } key &&
-               SameElement(key.Target, target) && _entries[^2] is { Kind: EntryKind.Text, Text: { } previousText } before &&
-               SameElement(before.Target, target) && Count(text, key.Keys == "Tab" ? '\t' : '\n') > Count(previousText, key.Keys == "Tab" ? '\t' : '\n'))
+        // Набор продолжился после Enter или Tab в том же поле, и они стали частью текста (многострочное поле) — итоговый
+        // текст включает и их: прежний текст, перевод строки и новое. Если нет (Enter отправил сообщение и поле очистилось) —
+        // шаги остаются.
+        if (!secret && _entries.Count >= 2 && _entries[^1] is { Kind: EntryKind.Keys, Keys: "Enter" or "Tab" or "Shift+Enter" } key &&
+            SameElement(key.Target, target) && _entries[^2] is { Kind: EntryKind.Text, Text: { } previousText } before &&
+            SameElement(before.Target, target) && Continues(text, previousText, key.Keys == "Tab"))
         {
             _entries.RemoveRange(_entries.Count - 2, 2);
         }
 
         string? carried = null;
         if (_entries.Count > 0 && SameElement(_entries[^1].Target, target) &&
-            _entries[^1] is { Kind: EntryKind.Text } or { Kind: EntryKind.Click, Double: false, Right: false, Step.Type: "desktop.click" })
+            _entries[^1] is { Kind: EntryKind.Text } or { Kind: EntryKind.Click, Double: false, Button: MouseButtonKind.Left, Step.Type: "desktop.click" })
         {
             // Повторный ввод в то же поле или нажатие в поле перед вводом: «Ввести в окне» само ставит курсор в поле.
             carried = _entries[^1].Step.Note;
@@ -451,7 +569,25 @@ public sealed class DesktopRecorder(IDesktopInputMonitor monitor)
             step = Step(target, "desktop.fill", config, label, Join(carried, Join(element.Value.Note, unread)));
         }
 
-        Add(new Entry(step with { Secret = secret }, EntryKind.Text, target, input.At, Text: secret ? null : input.Text));
+        Add(new Entry(step with { Secret = secret, SecretVariable = variable }, EntryKind.Text, target, input.At, Text: secret ? null : text));
+    }
+
+    /// <summary>Новый текст — это прежний, затем перевод строки (табуляция) и дальше.</summary>
+    private static bool Continues(string text, string previous, bool tab) =>
+        text.Length > previous.Length && text.StartsWith(previous, StringComparison.Ordinal) &&
+        (tab ? text[previous.Length] == '\t' : text[previous.Length] is '\n' or '\r');
+
+    /// <summary>У каждого поля пароля — своя переменная (старый и новый пароль — разные значения).</summary>
+    private string PasswordVariable(DesktopTarget target)
+    {
+        var index = _passwordFields.FindIndex(t => SameElement(t, target));
+        if (index < 0)
+        {
+            _passwordFields.Add(target);
+            index = _passwordFields.Count - 1;
+        }
+
+        return index == 0 ? "password" : $"password{index + 1}";
     }
 
     /// <summary>Поля поиска элемента для блока: однозначно, если можно; иначе — с пояснением.</summary>
@@ -560,8 +696,6 @@ public sealed class DesktopRecorder(IDesktopInputMonitor monitor)
         a.Window.Handle == b.Window.Handle && a.Element is { } x && b.Element is { } y &&
         x.Name == y.Name && x.ControlType == y.ControlType && x.AutomationId == y.AutomationId && x.Bounds == y.Bounds;
 
-    private static int Count(string text, char c) => text.Count(x => x == c);
-
     private static string Short(string text) => text.Length > 28 ? text[..28] + "…" : text;
 
     private static string? Join(string? a, string? b) =>
@@ -587,5 +721,5 @@ public sealed class DesktopRecorder(IDesktopInputMonitor monitor)
     }
 
     private sealed record Entry(RecordedDesktopStep Step, EntryKind Kind, DesktopTarget Target, DateTimeOffset At, string? Keys = null,
-        int X = 0, int Y = 0, bool Double = false, bool Right = false, string? Text = null);
+        int X = 0, int Y = 0, bool Double = false, MouseButtonKind Button = MouseButtonKind.Left, string? Text = null);
 }

@@ -93,7 +93,18 @@ public sealed class AttentionNotifier : IAsyncDisposable
                 var fresh = new List<ProcessRecord>();
                 foreach (var id in ids)
                 {
-                    var process = await _load(id, stop);
+                    ProcessRecord? process;
+                    try
+                    {
+                        process = await _load(id, stop);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        // База занята или недоступна — этот процесс пропускаем; следующие изменения разберутся как обычно.
+                        _logger.LogWarning(ex, "Не удалось прочитать процесс {Id} для уведомления.", id);
+                        continue;
+                    }
+
                     if (process is not { Status: ProcessStatus.NeedsAttention })
                     {
                         // Решение принято (или процесс удалён) — следующая остановка снова будет новостью.
@@ -111,7 +122,14 @@ public sealed class AttentionNotifier : IAsyncDisposable
 
                 if (fresh.Count > 0)
                 {
-                    await NotifyAsync(fresh, stop);
+                    try
+                    {
+                        await NotifyAsync(fresh, stop);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogWarning(ex, "Уведомление не отправлено.");
+                    }
                 }
             }
         }

@@ -42,7 +42,7 @@ public sealed partial class DatabaseBackups(SqliteStore store, TimeProvider time
             .Select(f => (File: f, Match: NamePattern().Match(f.Name)))
             .Where(x => x.Match.Success)
             .Select(x => new BackupInfo(x.File.Name, x.Match.Groups[1].Value, new DateTimeOffset(x.File.LastWriteTimeUtc, TimeSpan.Zero), x.File.Length))
-            .OrderByDescending(b => b.CreatedAt)
+            .OrderByDescending(b => b.CreatedAt > time.GetUtcNow() + TimeSpan.FromMinutes(5) ? DateTimeOffset.MinValue : b.CreatedAt)
             .ToList();
     }
 
@@ -73,18 +73,20 @@ public sealed partial class DatabaseBackups(SqliteStore store, TimeProvider time
     /// <summary>Ежедневная копия, если последней нет или она старше суток. Ошибка — в журнал и <see cref="LastError"/>.</summary>
     public async Task EnsureDailyAsync(CancellationToken cancellationToken)
     {
-        var last = List().FirstOrDefault(b => b.Kind == "daily");
-        if (last is not null && time.GetUtcNow() - last.CreatedAt < DailyInterval)
-        {
-            return;
-        }
-
         try
         {
+            // Копия «из будущего» (часы были переведены) не считается: иначе новых копий не было бы до той даты.
+            var now = time.GetUtcNow();
+            var last = List().FirstOrDefault(b => b.Kind == "daily" && b.CreatedAt <= now + TimeSpan.FromMinutes(5));
+            if (last is not null && now - last.CreatedAt < DailyInterval)
+            {
+                return;
+            }
+
             await CreateAsync("daily", cancellationToken);
             LastError = null;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or Microsoft.Data.Sqlite.SqliteException)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             LastError = ex.Message;
             logger.LogWarning(ex, "Не удалось сделать резервную копию базы.");
@@ -133,7 +135,16 @@ public sealed partial class DatabaseBackups(SqliteStore store, TimeProvider time
         }
 
         await _stop.CancelAsync();
-        await _loop;
+        try
+        {
+            await _loop;
+        }
+        catch (Exception ex)
+        {
+            // Остановка Pepa не должна прерываться из-за фоновой копии.
+            logger.LogWarning(ex, "Резервное копирование остановилось с ошибкой.");
+        }
+
         _stop.Dispose();
     }
 }

@@ -201,7 +201,7 @@ internal sealed class ProcessMapper(ProcessEngine engine, IPepaStore store)
             }
 
             result.Add(new ResourceDto(resource.Key, resource.Title, holder is null ? null : Ref(holder), resource.AcquiredAt,
-                resource.UpdatedAt, queue));
+                resource.UpdatedAt, queue, ProcessEngine.ExternalHolderTitle(resource.HolderProcessId)));
         }
 
         return result;

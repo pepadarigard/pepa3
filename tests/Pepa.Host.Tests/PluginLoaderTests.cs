@@ -67,6 +67,7 @@ public sealed class PluginLoaderTests
         { "field", "своё непустое имя" },
         { "select", "нет вариантов" },
         { "summary", "SummaryField" },
+        { "verification", "только у блоков с внешним действием" },
     };
 
     [Theory]
@@ -79,6 +80,8 @@ public sealed class PluginLoaderTests
             "ports" => Valid() with { Outputs = [new PortDescriptor(Ports.Out, "Далее"), new PortDescriptor(Ports.Out, "Ещё")] },
             "field" => Valid() with { Fields = [new FieldDescriptor { Name = null!, Label = "Поле", Kind = FieldKind.Text }] },
             "select" => Valid() with { Fields = [new FieldDescriptor { Name = "mode", Label = "Режим", Kind = FieldKind.Select }] },
+            // Проверка без внешнего действия: после сбоя Pepa повторила бы блок, так и не вызвав проверку.
+            "verification" => Valid() with { SupportsVerification = true, Effect = NodeEffect.ReadOnly },
             _ => Valid() with { SummaryField = "нет-такого" },
         };
         var (info, registry) = Accept(r => r.AddCategory(Own).AddNode(new TestNode(() => descriptor)));

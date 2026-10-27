@@ -189,6 +189,60 @@ public sealed class DesktopApiTests
     }
 
     [Fact]
+    public async Task While_actions_are_recorded_a_process_waits_for_the_mouse_and_keyboard()
+    {
+        var desktop = new Adapters.Desktop.Tests.FakeDesktop();
+        var notepad = desktop.AddWindow("Документ — Блокнот", "notepad");
+        notepad.Add("Сохранить", id: "save");
+        var monitor = new Adapters.Desktop.Tests.FakeInputMonitor();
+        await using var f = await HostFixture.StartAsync(seedSamples: false, desktop: desktop, desktopInput: monitor);
+        var (_, scenario) = await f.SendAsync(HttpMethod.Post, "/api/scenarios", new
+        {
+            name = "Сохранить",
+            nodes = new object[]
+            {
+                new { id = "start", type = "start" },
+                new { id = "save", type = "desktop.click", config = new { window = "Блокнот", name = "Сохранить", automationId = "save" } },
+                new { id = "wait", type = "wait", config = new { mode = "duration", amount = 10, unit = "minutes" } },
+                new { id = "end", type = "end" },
+            },
+            edges = new object[]
+            {
+                new { id = "a", source = "start", sourcePort = "out", target = "save" },
+                new { id = "b", source = "save", sourcePort = "out", target = "wait" },
+                new { id = "c", source = "wait", sourcePort = "out", target = "end" },
+            },
+        });
+        var scenarioId = scenario!["id"]!.GetValue<string>();
+
+        // Запись заняла мышь и клавиатуру — процесс ждёт в очереди и не нажимает ничего во время записи.
+        Assert.Equal(200, (await f.SendAsync(HttpMethod.Post, "/api/recorder/desktop/start")).Status);
+        var input = (await f.GetAsync("/api/resources")).AsArray().Single(r => r!["key"]!.GetValue<string>() == "desktop:input")!;
+        Assert.Equal("запись действий в окнах Windows", input["heldBy"]!.GetValue<string>());
+        Assert.Null(input["holder"]);
+        var (_, run) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{scenarioId}/run", new { });
+        var id = run!["processId"]!.GetValue<string>();
+        var queued = await f.WaitForProcessAsync(id, p => p["waitKind"]?.GetValue<string>() == "resource");
+        Assert.Contains(queued["journal"]!.AsArray(), j => j!["message"]!.GetValue<string>().Contains("(запись действий в окнах Windows)", StringComparison.Ordinal));
+        Assert.DoesNotContain("invoke Сохранить", desktop.Actions);
+
+        // Запись остановлена — процесс продолжает и держит мышь и клавиатуру, пока не закончит.
+        await f.SendAsync(HttpMethod.Post, "/api/recorder/desktop/stop");
+        await f.WaitForProcessAsync(id, p => p["waitKind"]?.GetValue<string>() == "timer");
+        Assert.Contains("invoke Сохранить", desktop.Actions);
+        var (busy, why) = await f.SendAsync(HttpMethod.Post, "/api/recorder/desktop/start");
+        Assert.Equal(409, busy);
+        Assert.Contains("заняты процессом", why!["error"]!.GetValue<string>());
+        Assert.False(monitor.Watching);
+
+        await f.SendAsync(HttpMethod.Post, $"/api/processes/{id}/cancel");
+        await f.WaitForProcessAsync(id, p => HostFixture.Status(p) == "cancelled");
+        Assert.Equal(200, (await f.SendAsync(HttpMethod.Post, "/api/recorder/desktop/start")).Status);
+        await f.SendAsync(HttpMethod.Post, "/api/recorder/desktop/stop");
+        Assert.Null((await f.GetAsync("/api/resources")).AsArray().Single(r => r!["key"]!.GetValue<string>() == "desktop:input")!["heldBy"]);
+    }
+
+    [Fact]
     public async Task Window_elements_are_listed_with_uniqueness_and_ambiguous_window_is_not_guessed()
     {
         var desktop = new Adapters.Desktop.Tests.FakeDesktop();

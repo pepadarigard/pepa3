@@ -183,6 +183,30 @@ public sealed class AttentionNotifierTests
     }
 
     [Fact]
+    public async Task One_failed_read_of_the_database_does_not_stop_later_notifications()
+    {
+        var telegram = new SavedMessages();
+        var alerts = new Alerts();
+        var failOnce = 1;
+        var processes = new ConcurrentDictionary<string, ProcessRecord>();
+        await using var notifier = new AttentionNotifier((id, _) =>
+                Interlocked.Exchange(ref failOnce, 0) == 1
+                    ? throw new Microsoft.Data.Sqlite.SqliteException("database is locked", 5)
+                    : Task.FromResult(processes.GetValueOrDefault(id)),
+            telegram, () => true, alerts, NullLogger.Instance, TimeSpan.FromMilliseconds(20));
+        notifier.Start([], null);
+        processes["process-a"] = Process("a", ProcessStatus.NeedsAttention);
+        notifier.OnProcessChanged("process-a");
+        await Task.Delay(200);
+
+        // Временная ошибка прошла — следующая остановка сообщается как обычно.
+        processes["process-b"] = Process("b", ProcessStatus.NeedsAttention);
+        notifier.OnProcessChanged("process-b");
+        await Eventually(() => alerts.Count > 0);
+        Assert.Contains("«Заказ b»", telegram.Messages.Single());
+    }
+
+    [Fact]
     public async Task Test_message_without_Telegram_explains_why()
     {
         await using var f = await HostFixture.StartAsync(seedSamples: false);
