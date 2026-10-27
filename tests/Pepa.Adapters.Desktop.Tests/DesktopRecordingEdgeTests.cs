@@ -392,6 +392,8 @@ public sealed class DesktopRecordingEdgeTests
     [InlineData("Подтверждение пароля")]
     [InlineData("Password")]
     [InlineData("PIN")]
+    [InlineData("Пароль (не короче 8 знаков, требования: буквы и цифры)")]
+    [InlineData("Password (minimum length 8)")]
     public async Task Field_named_like_a_password_is_a_password(string name)
     {
         var d = new FakeDesktop();
@@ -422,7 +424,6 @@ public sealed class DesktopRecordingEdgeTests
     [Theory]
     [InlineData("Подсказка к паролю", "Edit")]
     [InlineData("Password hint", "Edit")]
-    [InlineData("Требования к паролю", "Edit")]
     [InlineData("Сменить пароль — Госуслуги", "Document")]
     public async Task Field_that_only_mentions_a_password_is_not_a_password(string name, string type)
     {

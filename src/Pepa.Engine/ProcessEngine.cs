@@ -30,6 +30,11 @@ public sealed partial class ProcessEngine : IAsyncDisposable
 
     private readonly ConcurrentDictionary<string, ProcessSlot> _slots = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ScenarioGraph> _graphs = new(StringComparer.Ordinal);
+
+    /// <summary>Сценарии завершённых процессов для показа — по тексту сценария (у процессов одной версии он один).</summary>
+    private readonly ConcurrentDictionary<string, ScenarioGraph> _finishedGraphs = new(StringComparer.Ordinal);
+
+    private const int MaxFinishedGraphs = 64;
     private readonly Channel<string> _queue = Channel.CreateUnbounded<string>();
     private readonly HashSet<string> _queued = new(StringComparer.Ordinal);
     private readonly Lock _queueLock = new();
@@ -435,10 +440,36 @@ public sealed partial class ProcessEngine : IAsyncDisposable
         return node is null ? null : _registry.FindDescriptor(node.Type);
     }
 
-    public ScenarioGraph Graph(ProcessRecord process) =>
-        _graphs.GetOrAdd(process.Id,
-            static (_, json) => new ScenarioGraph(PepaJson.Deserialize<ScenarioDefinition>(json)),
-            process.DefinitionJson);
+    /// <summary>
+    /// Сценарий процесса. Работающих — запоминается до завершения; завершённых (списки и история) — не по номеру процесса,
+    /// а по тексту сценария и не больше <see cref="MaxFinishedGraphs"/>: иначе каждый показанный процесс оставался бы в памяти.
+    /// </summary>
+    public ScenarioGraph Graph(ProcessRecord process)
+    {
+        if (_graphs.TryGetValue(process.Id, out var graph))
+        {
+            return graph;
+        }
+
+        if (!process.IsTerminal)
+        {
+            return _graphs.GetOrAdd(process.Id, static (_, json) => Parse(json), process.DefinitionJson);
+        }
+
+        if (_finishedGraphs.TryGetValue(process.DefinitionJson, out graph))
+        {
+            return graph;
+        }
+
+        if (_finishedGraphs.Count >= MaxFinishedGraphs)
+        {
+            _finishedGraphs.Clear();
+        }
+
+        return _finishedGraphs.GetOrAdd(process.DefinitionJson, Parse);
+
+        static ScenarioGraph Parse(string json) => new(PepaJson.Deserialize<ScenarioDefinition>(json));
+    }
 
     private static ProcessAction ToProcessAction(ResumeAction action) => action switch
     {

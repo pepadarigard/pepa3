@@ -637,14 +637,17 @@ public sealed class DesktopRecorder(IDesktopInputMonitor monitor)
     }
 
     /// <summary>Поле ввода с подписью «Пароль», «Password», «PIN» — пароль, даже если Windows не отмечает его так.</summary>
-    /// <remarks>Только поля ввода (не документы: у страницы в браузере подпись — её заголовок) и не подсказки и требования к паролю.</remarks>
+    /// <remarks>
+    /// Только поля ввода (не документы: у страницы в браузере подпись — её заголовок) и не подсказки к паролю. Поле с
+    /// требованиями в подписи («Пароль (не короче 8 знаков)») — пароль: лишний раз скрытое значение безопаснее показанного.
+    /// </remarks>
     private static bool LooksLikePassword(DesktopTarget target) =>
         target.Element is { ControlType: "Edit" } e && PasswordName.IsMatch(e.Name) && !NotPassword.IsMatch(e.Name);
 
     private static readonly System.Text.RegularExpressions.Regex PasswordName = new(@"парол|password|passwd|\bpin\b|\bпин\b",
         System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
-    private static readonly System.Text.RegularExpressions.Regex NotPassword = new(@"подсказ|hint|требован|правил|policy|длин|length|забыл|forgot|сложност",
+    private static readonly System.Text.RegularExpressions.Regex NotPassword = new(@"подсказ|hint|забыл|forgot",
         System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
     /// <summary>У каждого поля пароля — своя переменная (старый и новый пароль — разные значения).</summary>

@@ -24,12 +24,6 @@ public sealed partial class ProcessEngine
 {
     public const string SecretMask = "••••";
 
-    /// <summary>Сколько прежних значений секретных переменных помнит процесс (при большем — самые старые забываются).</summary>
-    private const int MaxPreviousSecrets = 500;
-
-    /// <summary>Сколько секретов, пришедших извне, помнит процесс (больше бывает только по ошибке сценария).</summary>
-    private const int MaxCarriedSecrets = 5000;
-
     /// <summary>Значения короче не скрываются: такие встречаются в любом тексте.</summary>
     private const int MinSecretLength = 3;
 
@@ -48,10 +42,10 @@ public sealed partial class ProcessEngine
         var updates = (result as NodeResult.Success)?.VariableUpdates;
         foreach (var variable in definition.Variables.Where(v => v.Secret))
         {
-            Collect(process.Variables[variable.Name], secrets, top: true);
+            Collect(process.Variables[variable.Name], secrets);
             if (updates is not null && updates.TryGetValue(variable.Name, out var assigned))
             {
-                Collect(assigned, secrets, top: true);
+                Collect(assigned, secrets);
             }
         }
 
@@ -66,7 +60,7 @@ public sealed partial class ProcessEngine
         {
             foreach (var variable in definition.Variables.Where(v => v.Secret && updates.ContainsKey(v.Name)))
             {
-                Collect(process.Variables[variable.Name], replaced, top: true);
+                Collect(process.Variables[variable.Name], replaced);
             }
         }
 
@@ -100,24 +94,24 @@ public sealed partial class ProcessEngine
     }
 
     /// <summary>
-    /// Значения внутри секретного значения: само значение (строка или число — ПИН-код), а у секретного списка или объекта —
-    /// его строки (числа и «да/нет» внутри — обычно служебные: код ответа 200, количество).
+    /// Значения внутри секретного значения: строки и числа (ПИН-код, CVV) — и у секретного списка или объекта. Числа ищутся
+    /// только целым числом, так что «1234» не найдётся в «A-12345».
     /// </summary>
-    private static void Collect(JsonNode? node, List<string> secrets, bool top)
+    private static void Collect(JsonNode? node, List<string> secrets)
     {
         switch (node)
         {
             case JsonObject obj:
                 foreach (var (_, value) in obj)
                 {
-                    Collect(value, secrets, top: false);
+                    Collect(value, secrets);
                 }
 
                 break;
             case JsonArray array:
                 foreach (var item in array)
                 {
-                    Collect(item, secrets, top: false);
+                    Collect(item, secrets);
                 }
 
                 break;
@@ -128,7 +122,7 @@ public sealed partial class ProcessEngine
                 }
 
                 break;
-            case JsonValue value when top && value.GetValueKind() == JsonValueKind.Number:
+            case JsonValue value when value.GetValueKind() == JsonValueKind.Number:
                 if (value.ToJsonString() is { Length: >= MinSecretLength } number)
                 {
                     secrets.Add(number);
@@ -139,34 +133,31 @@ public sealed partial class ProcessEngine
     }
 
     /// <summary>
-    /// Добавить к секретам процесса прежние значения его секретных переменных и пришедшие извне. Прежних помнится не больше
-    /// <see cref="MaxPreviousSecrets"/> (забываются самые старые), пришедшие извне не вытесняются ими.
+    /// Добавить к секретам процесса прежние значения его секретных переменных и пришедшие извне. Ничего не забывается:
+    /// забытое значение показалось бы там, где оно хранится настоящим (параметры прошлых шагов, копии в обычных переменных).
     /// </summary>
     internal static ProcessSecrets? Remember(ProcessSecrets? known, IEnumerable<string> previous, IEnumerable<string> carried)
     {
-        var carriedList = Add(known?.Carried, carried, MaxCarriedSecrets);
-        var previousList = Add(known?.Previous, previous.Where(v => !carriedList.Contains(v, StringComparer.Ordinal)), MaxPreviousSecrets);
+        var carriedList = Add(known?.Carried, carried, []);
+        var previousList = Add(known?.Previous, previous, carriedList);
         return carriedList.Count == 0 && previousList.Count == 0
             ? null
-            : known is not null && carriedList.SequenceEqual(known.Carried) && previousList.SequenceEqual(known.Previous)
+            : known is not null && carriedList.Count == known.Carried.Count && previousList.Count == known.Previous.Count
                 ? known
                 : new ProcessSecrets { Carried = carriedList, Previous = previousList };
     }
 
-    private static List<string> Add(IReadOnlyList<string>? list, IEnumerable<string> values, int max)
+    private static List<string> Add(IReadOnlyList<string>? list, IEnumerable<string> values, IReadOnlyList<string> elsewhere)
     {
         var result = new List<string>(list ?? []);
+        var seen = new HashSet<string>(result, StringComparer.Ordinal);
+        seen.UnionWith(elsewhere);
         foreach (var value in values)
         {
-            if (value.Length >= MinSecretLength && !result.Contains(value, StringComparer.Ordinal))
+            if (value.Length >= MinSecretLength && seen.Add(value))
             {
                 result.Add(value);
             }
-        }
-
-        if (result.Count > max)
-        {
-            result.RemoveRange(0, result.Count - max);
         }
 
         return result;
@@ -184,8 +175,12 @@ public sealed partial class ProcessEngine
             Strings(node, strings);
         }
 
-        return secrets.Where(secret => strings.Any(s => SecretList.Occurs(s, secret))).ToList();
+        // И в записи JSON: секрет внутри JSON.stringify(...) записан с экранированием.
+        return secrets.Where(secret => Forms(secret).Any(form => strings.Any(s => SecretList.Occurs(s, form)))).ToList();
     }
+
+    private static IEnumerable<string> Forms(string secret) =>
+        new[] { secret, JsonEncodedText.Encode(secret).Value, JsonEncodedText.Encode(secret, RelaxedEncoder).Value }.Distinct(StringComparer.Ordinal);
 
     private static void Strings(JsonNode? node, List<string> into)
     {
@@ -255,12 +250,19 @@ public sealed partial class ProcessEngine
         }
     }
 
-    /// <summary>Итог шага для истории: тексты и результат без секретов (изменения переменных не трогаются).</summary>
-    internal static NodeResult Redact(NodeResult result, IReadOnlyList<string> secrets) => secrets.Count == 0
+    /// <summary>
+    /// Итог шага для истории: тексты и результат без секретов (изменения переменных не трогаются). Результат, уже очищенный
+    /// раньше (<paramref name="cleanOutput"/>), не проверяется второй раз.
+    /// </summary>
+    internal static NodeResult Redact(NodeResult result, IReadOnlyList<string> secrets, JsonObject? cleanOutput = null) => secrets.Count == 0
         ? result
         : result switch
         {
-            NodeResult.Success ok => ok with { Message = Redact(ok.Message, secrets), Output = Redact(ok.Output, secrets) },
+            NodeResult.Success ok => ok with
+            {
+                Message = Redact(ok.Message, secrets),
+                Output = cleanOutput is not null && ReferenceEquals(ok.Output, cleanOutput) ? ok.Output : Redact(ok.Output, secrets),
+            },
             NodeResult.RunAgain again => again with { Message = Redact(again.Message, secrets) },
             NodeResult.Failure fail => fail with { Error = Redact(fail.Error, secrets)! },
             NodeResult.Unknown unknown => unknown with { Reason = Redact(unknown.Reason, secrets)! },
@@ -298,8 +300,9 @@ public sealed partial class ProcessEngine
 }
 
 /// <summary>
-/// Готовый к поиску набор секретных значений (длинные — первыми). Короткие и числа ищутся только отдельным словом, начала
-/// длинных — и перед «…» (блоки сокращают значения в сообщениях).
+/// Готовый к поиску набор секретных значений (длинные — первыми). Короткие и числа ищутся только отдельным словом (числом),
+/// начала длинных — и перед «…» (блоки сокращают значения в сообщениях). Все совпадения ищутся в исходном тексте за один
+/// проход по каждому значению, пересекающиеся объединяются — и текст собирается один раз.
 /// </summary>
 public sealed class SecretList : IReadOnlyList<string>
 {
@@ -317,63 +320,100 @@ public sealed class SecretList : IReadOnlyList<string>
     System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
 
     /// <summary>Короткое значение и число — только отдельным словом (числом), длинное — где угодно.</summary>
-    private static bool Bounded(string secret) => secret.Length < ProcessEngine.ShortSecretLength || secret.All(char.IsAsciiDigit);
+    private static bool Bounded(string secret) => secret.Length < ProcessEngine.ShortSecretLength || IsNumber(secret);
+
+    private static bool IsNumber(string secret) => secret.All(char.IsAsciiDigit);
 
     private static bool IsWordChar(char c, bool digitsOnly) => digitsOnly ? char.IsAsciiDigit(c) : char.IsLetterOrDigit(c);
 
-    /// <summary>Есть ли значение в тексте по правилу скрытия.</summary>
-    public static bool Occurs(string text, string secret) => Find(text, secret, 0) >= 0;
-
-    private static int Find(string text, string secret, int from)
+    /// <summary>
+    /// Перед позицией — граница слова: начало текста, не буква (не цифра) или конец экранирования JSON — «\n», «\t»,
+    /// «\uXXXX» (так в тексте выглядят значения, записанные как JSON).
+    /// </summary>
+    private static bool BoundaryBefore(string text, int at, bool digitsOnly)
     {
-        var bounded = Bounded(secret);
-        var digits = secret.All(char.IsAsciiDigit);
-        for (var at = text.IndexOf(secret, from, StringComparison.Ordinal); at >= 0;
-             at = at + 1 < text.Length ? text.IndexOf(secret, at + 1, StringComparison.Ordinal) : -1)
+        if (at == 0 || !IsWordChar(text[at - 1], digitsOnly))
         {
-            if (!bounded || ((at == 0 || !IsWordChar(text[at - 1], digits)) &&
-                             (at + secret.Length == text.Length || !IsWordChar(text[at + secret.Length], digits))))
-            {
-                return at;
-            }
+            return true;
         }
 
-        return -1;
+        if (at >= 2 && text[at - 2] == '\\' && text[at - 1] is 'n' or 't' or 'r' or 'b' or 'f')
+        {
+            return true;
+        }
+
+        return at >= 6 && text[at - 6] == '\\' && text[at - 5] == 'u' && text.AsSpan(at - 4, 4).ToString().All(char.IsAsciiHexDigit);
+    }
+
+    private static bool BoundaryAfter(string text, int end, bool digitsOnly) => end == text.Length || !IsWordChar(text[end], digitsOnly);
+
+    /// <summary>Есть ли значение в тексте по правилу скрытия.</summary>
+    public static bool Occurs(string text, string secret) => Matches(text, secret).Any();
+
+    private static IEnumerable<int> Matches(string text, string secret)
+    {
+        var bounded = Bounded(secret);
+        var digits = IsNumber(secret);
+        for (var at = text.IndexOf(secret, StringComparison.Ordinal); at >= 0;
+             at = at + 1 < text.Length ? text.IndexOf(secret, at + 1, StringComparison.Ordinal) : -1)
+        {
+            if (!bounded || (BoundaryBefore(text, at, digits) && BoundaryAfter(text, at + secret.Length, digits)))
+            {
+                yield return at;
+            }
+        }
     }
 
     public string Redact(string text)
     {
+        var ranges = new List<(int Start, int End)>();
         foreach (var secret in _items)
         {
-            if (text.Length < secret.Length)
+            if (secret.Length <= text.Length)
             {
-                continue;
-            }
-
-            if (!Bounded(secret))
-            {
-                text = text.Replace(secret, ProcessEngine.SecretMask, StringComparison.Ordinal);
-                continue;
-            }
-
-            for (var at = Find(text, secret, 0); at >= 0; at = Find(text, secret, at + ProcessEngine.SecretMask.Length))
-            {
-                text = string.Concat(text.AsSpan(0, at), ProcessEngine.SecretMask, text.AsSpan(at + secret.Length));
-                if (at + ProcessEngine.SecretMask.Length >= text.Length)
+                foreach (var at in Matches(text, secret))
                 {
-                    break;
+                    ranges.Add((at, at + secret.Length));
                 }
             }
         }
 
-        return text.Contains('…') || text.Contains("...", StringComparison.Ordinal) ? RedactPreviews(text) : text;
+        if (text.Contains('…') || text.Contains("...", StringComparison.Ordinal))
+        {
+            AddPreviews(text, ranges);
+        }
+
+        if (ranges.Count == 0)
+        {
+            return text;
+        }
+
+        // Пересекающиеся совпадения («abcdef» и «defghi» в «abcdefghi») скрываются вместе — без хвостов.
+        ranges.Sort((a, b) => a.Start != b.Start ? a.Start.CompareTo(b.Start) : b.End.CompareTo(a.End));
+        var result = new System.Text.StringBuilder(text.Length);
+        var position = 0;
+        var current = ranges[0];
+        foreach (var range in ranges.Skip(1).Append((Start: int.MaxValue, End: int.MaxValue)))
+        {
+            if (range.Start < current.End)
+            {
+                current.End = Math.Max(current.End, range.End);
+                continue;
+            }
+
+            result.Append(text, position, current.Start - position).Append(ProcessEngine.SecretMask);
+            position = current.End;
+            current = range;
+        }
+
+        return result.Append(text, position, text.Length - position).ToString();
     }
 
     /// <summary>
     /// Начало значения, за которым сразу «…» или «...», — тоже секрет (не короче трёх знаков и половины значения): так его
-    /// показал блок, сократив длинное значение.
+    /// показал блок, сократив длинное значение. Короткое значение и число — тоже только с начала слова.
     /// </summary>
-    private string RedactPreviews(string text)
+    private void AddPreviews(string text, List<(int Start, int End)> ranges)
     {
         foreach (var secret in _items)
         {
@@ -383,9 +423,17 @@ public sealed class SecretList : IReadOnlyList<string>
                 continue;
             }
 
-            var start = 0;
-            while (start < text.Length && text.IndexOf(secret[..min], start, StringComparison.Ordinal) is var at and >= 0)
+            var bounded = Bounded(secret);
+            var digits = IsNumber(secret);
+            var prefix = secret[..min];
+            for (var at = text.IndexOf(prefix, StringComparison.Ordinal); at >= 0;
+                 at = at + 1 < text.Length ? text.IndexOf(prefix, at + 1, StringComparison.Ordinal) : -1)
             {
+                if (bounded && !BoundaryBefore(text, at, digits))
+                {
+                    continue;
+                }
+
                 var length = min;
                 while (length < secret.Length && at + length < text.Length && text[at + length] == secret[length])
                 {
@@ -396,17 +444,10 @@ public sealed class SecretList : IReadOnlyList<string>
                 var ellipsis = rest.StartsWith("…") ? 1 : rest.StartsWith("...") ? 3 : 0;
                 if (length < secret.Length && ellipsis > 0)
                 {
-                    text = string.Concat(text.AsSpan(0, at), ProcessEngine.SecretMask, text.AsSpan(at + length + ellipsis));
-                    start = at + ProcessEngine.SecretMask.Length;
-                }
-                else
-                {
-                    start = at + 1;
+                    ranges.Add((at, at + length + ellipsis));
                 }
             }
         }
-
-        return text;
     }
 }
 
@@ -471,6 +512,14 @@ public sealed class SecretMasker
                 {
                     input[field] = ProcessEngine.SecretMask;
                 }
+            }
+
+            // «Задать переменную» для секретной переменной: значение — секрет целиком, даже записанное в самом блоке.
+            if (node.Type == Nodes.SetVariableNode.TypeName && input.ContainsKey("value") &&
+                (input["variable"] ?? node.Config["variable"]) is JsonValue target && target.TryGetValue<string>(out var name) &&
+                _secretNames.Contains(name, StringComparer.Ordinal))
+            {
+                input["value"] = ProcessEngine.SecretMask;
             }
         }
 

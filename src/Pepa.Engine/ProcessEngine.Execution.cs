@@ -440,6 +440,15 @@ public sealed partial class ProcessEngine
         rawSecrets.AddRange(acquired ?? []);
         var secrets = Expand(rawSecrets);
 
+        // Результат шага бывает большим (прочитанная страница, список файлов) — он очищается от секретов тоже до права
+        // записи; под ним — только тексты.
+        JsonObject? cleanOutput = null;
+        if (secrets.Count > 0 && result is NodeResult.Success { Output: not null } produced)
+        {
+            cleanOutput = Redact(produced.Output, secrets);
+            result = produced with { Output = cleanOutput };
+        }
+
         await using var write = await _store.BeginWriteAsync();
 
         // Время — после получения права записи: подписка и событие, записанные позже, не должны получить более раннее время.
@@ -457,7 +466,9 @@ public sealed partial class ProcessEngine
                 secrets = Expand(rawSecrets.Concat(RawSecretValues(process, graph.Definition, decided)));
             }
 
+            // Решение принято под правом записи — его результат очищается целиком.
             result = decided;
+            cleanOutput = null;
         }
 
         var replacedSecrets = ReplacedSecretValues(process, graph.Definition, result);
@@ -476,7 +487,7 @@ public sealed partial class ProcessEngine
         // Тексты для истории — без значений секретных переменных (и тех, что шаг им присваивает), уже после всех проверок:
         // их сообщения тоже могут содержать значение. Параметры шага (Input) остаются настоящими: по ним проверяется
         // результат после перезапуска; при показе их скрывает SecretMasker.
-        result = Redact(result, secrets);
+        result = Redact(result, secrets, cleanOutput);
         resolution = Redact(resolution, secrets);
 
         // Итоговые поля шага.

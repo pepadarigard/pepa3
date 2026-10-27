@@ -445,9 +445,11 @@ public sealed record ProcessSecrets
     /// <summary>Пришли извне — от вызвавшего процесса, с событиями. Не забываются: их больше негде узнать.</summary>
     public IReadOnlyList<string> Carried { get; init; } = [];
 
-    /// <summary>Прежние значения собственных секретных переменных (помнятся последние).</summary>
+    /// <summary>Прежние значения собственных секретных переменных. Тоже не забываются: они остаются в параметрах прошлых шагов.</summary>
     public IReadOnlyList<string> Previous { get; init; } = [];
 
+    /// <summary>Все вместе (в базу не записывается — только два списка).</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
     public IEnumerable<string> All => Carried.Concat(Previous);
 }
 
