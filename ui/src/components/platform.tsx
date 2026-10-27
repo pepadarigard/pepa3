@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Inbox, Lock, LockOpen, RefreshCw, Send, SkipForward, UserCheck } from "lucide-react";
+import { AlertTriangle, Inbox, Lock, LockOpen, RefreshCw, Send, SkipForward, Square, UserCheck } from "lucide-react";
 import { api } from "../api/client";
 import type { Json, PepaEvent, Resource } from "../api/types";
 import { ru } from "../i18n/ru";
@@ -286,6 +286,28 @@ export function ResourcesCard({ resources }: { resources: Resource[] }) {
   const [busy, setBusy] = useState<string | null>(null);
   const used = resources.filter((r) => r.holder || r.heldBy || r.queue.length > 0);
 
+  // Запись действий в окнах держит мышь и клавиатуру: её можно остановить и отсюда (записанное не добавляется в сценарий).
+  const stopRecording = async (resource: Resource) => {
+    if (!(await feedback.confirm({
+      title: "Остановить запись действий?",
+      text: "Записанные шаги не добавятся в сценарий. Процессы, которые ждут мышь и клавиатуру, продолжат работу.",
+      confirmLabel: "Остановить запись",
+      danger: true,
+    }))) {
+      return;
+    }
+    setBusy(resource.key);
+    try {
+      await api.desktopRecorderStop();
+      feedback.toast("Запись остановлена");
+    } catch (e) {
+      feedback.error(e);
+    } finally {
+      setBusy(null);
+      invalidate();
+    }
+  };
+
   const release = async (resource: Resource) => {
     if (!(await feedback.confirm({
       title: `Освободить «${resource.title}»?`,
@@ -363,6 +385,11 @@ export function ResourcesCard({ resources }: { resources: Resource[] }) {
                     {r.holder && (
                       <Button size="small" icon={LockOpen} busy={busy === r.key} onClick={() => release(r)}>
                         Освободить
+                      </Button>
+                    )}
+                    {!r.holder && r.heldBy && r.key === "desktop:input" && (
+                      <Button size="small" icon={Square} busy={busy === r.key} onClick={() => void stopRecording(r)}>
+                        Остановить запись
                       </Button>
                     )}
                   </td>

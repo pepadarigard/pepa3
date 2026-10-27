@@ -173,6 +173,9 @@ public sealed partial class ProcessEngine
             Time = _time,
         };
         var verification = await SafeVerifyAsync(executor, context);
+        // Пояснение проверки может содержать значения (адрес страницы, текст расширения) — без секретов.
+        var secrets = SecretValues(process, Graph(process).Definition, NodeResult.Ok(verification.Port, verification.VariableUpdates ?? EmptyUpdates));
+        verification = verification with { Message = Redact(verification.Message, secrets)! };
         var label = Label(node, executor.Descriptor);
         switch (verification.Outcome)
         {

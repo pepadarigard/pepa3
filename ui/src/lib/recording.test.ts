@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { desktopRecordingToBlocks, recordingToBlocks, type RecordedAction } from "./recording";
+import { desktopRecordingToBlocks, recordingToBlocks, withFreeVariables, type RecordedAction } from "./recording";
 
 const action = (kind: RecordedAction["kind"], extra: Partial<RecordedAction> = {}): RecordedAction =>
   ({ kind, selector: null, value: null, url: null, note: null, label: null, secret: false, ...extra });
@@ -77,5 +77,19 @@ describe("запись в окнах Windows → блоки", () => {
       ["password", true, "Пароль 1 (вводится при запуске)"],
       ["password2", true, "Пароль 2 (вводится при запуске)"],
     ]);
+  });
+});
+
+describe("переменные записи и уже существующие", () => {
+  it("пароль записи не берёт чужую переменную: получает свободный номер, блоки переписаны", () => {
+    const recorded = desktopRecordingToBlocks([
+      { type: "desktop.fill", config: { window: "Вход", name: "Пароль", text: "{{ vars.password }}" }, label: "Ввести пароль", note: null, secret: true, secretVariable: "password" },
+      { type: "desktop.fill", config: { window: "Вход", name: "Ещё раз", text: "{{ vars.password2 }}" }, label: "Ввести пароль", note: null, secret: true, secretVariable: "password2" },
+    ]);
+    const blocks = withFreeVariables(recorded, ["password", "login"]);
+    expect(blocks.variables.map((v) => [v.name, v.secret])).toEqual([["password3", true], ["password2", true]]);
+    expect(blocks.nodes.map((n) => n.config.text)).toEqual(["{{ vars.password3 }}", "{{ vars.password2 }}"]);
+    // Совпадений нет — ничего не меняется.
+    expect(withFreeVariables(recorded, ["login"])).toBe(recorded);
   });
 });

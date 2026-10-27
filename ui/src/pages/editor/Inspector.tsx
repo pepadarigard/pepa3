@@ -329,7 +329,8 @@ function DefaultValueEditor({ variable, onChange }: { variable: VariableDefiniti
 
   return (
     <div className="field">
-      <input className={`input${variable.type === "text" ? "" : " mono"}${error ? " invalid" : ""}`} placeholder="Начальное значение (пусто — нет)" value={text} onChange={(e) => commit(e.target.value)} />
+      <input className={`input${variable.type === "text" ? "" : " mono"}${error ? " invalid" : ""}`} placeholder="Начальное значение (пусто — нет)" value={text}
+        type={variable.secret ? "password" : "text"} autoComplete={variable.secret ? "off" : undefined} onChange={(e) => commit(e.target.value)} />
       {error && <span className="field-error">{error}</span>}
     </div>
   );

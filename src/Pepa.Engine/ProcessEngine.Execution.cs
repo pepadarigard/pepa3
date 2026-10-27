@@ -401,11 +401,6 @@ public sealed partial class ProcessEngine
         StepState successState = StepState.Succeeded, Func<IStoreWrite, Task<NodeResult?>>? decide = null,
         Func<IStoreWrite, long, NodeResult, CommitEffects, Task>? extraWrites = null)
     {
-        // Тексты для истории — без значений секретных переменных. Параметры шага (Input) остаются настоящими: по ним
-        // проверяется результат после перезапуска; при показе их скрывает API.
-        var secrets = SecretValues(process, graph.Definition);
-        result = Redact(result, secrets);
-        resolution = Redact(resolution, secrets);
         var effects = new CommitEffects();
         var committed = await CommitResultAsync(process, graph, token, node, descriptor, step, result, resolution, successState,
             decide, extraWrites, effects);
@@ -453,6 +448,8 @@ public sealed partial class ProcessEngine
             result = decided;
         }
 
+        // Секреты — до проверок: сообщение о неверном типе содержит присвоенное значение.
+        var secrets = SecretValues(process, graph.Definition, result);
         result = CheckVariableTypes(result, graph.Definition, descriptor);
         result = await ResolveIntentAsync(write, process, token, label, result, effects, now);
 
@@ -464,6 +461,12 @@ public sealed partial class ProcessEngine
                 (routed.Message is { Length: > 0 } reason ? reason + " " : "") + $"Выход «{optional.Label}» не подключён.",
                 retryable: false);
         }
+
+        // Тексты для истории — без значений секретных переменных (и тех, что шаг им присваивает), уже после всех проверок:
+        // их сообщения тоже могут содержать значение. Параметры шага (Input) остаются настоящими: по ним проверяется
+        // результат после перезапуска; при показе их скрывает SecretMasker.
+        result = Redact(result, secrets);
+        resolution = Redact(resolution, secrets);
 
         // Итоговые поля шага.
         var finalStep = step with { FinishedAt = now, Resolution = resolution ?? step.Resolution };

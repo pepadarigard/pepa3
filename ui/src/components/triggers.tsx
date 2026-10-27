@@ -13,6 +13,9 @@ import { Badge, Button, Callout, Empty, Loading } from "./ui";
 
 const DAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"];
 
+/** Так сервер показывает значения секретных переменных. */
+const SECRET_MASK = "••••";
+
 /** Источники событий Pepa (можно вписать и свой). */
 const EVENT_SOURCES = [
   ["http", "Запрос к API Pepa"],
@@ -228,6 +231,11 @@ function TriggerEditor({ scenarioId, scenarioName, inputs, trigger, kind, onDone
         continue;
       }
       if (raw === "" && variable.type !== "text") continue;
+      // Секретное значение показано как «••••»: так и отправляем — Pepa оставит сохранённое.
+      if (variable.secret && raw === SECRET_MASK) {
+        builtInputs[variable.name] = raw;
+        continue;
+      }
       const parsed = parseInput(variable, raw);
       if ("error" in parsed) {
         setError(`«${variable.name}»: ${parsed.error}`);
@@ -365,6 +373,7 @@ function TriggerEditor({ scenarioId, scenarioName, inputs, trigger, kind, onDone
             <label key={v.name} className="field">
               <span className="field-label">{v.name}<span className="faint">· {ru.variableTypes[v.type]}</span></span>
               <input className={`input${kind === "event" ? " mono" : ""}`} value={values[v.name] ?? ""}
+                type={v.secret && kind === "schedule" ? "password" : "text"} autoComplete={v.secret ? "off" : undefined}
                 placeholder={kind === "event" ? "event.payload.id" : "значение по умолчанию"}
                 onChange={(e) => setValues({ ...values, [v.name]: e.target.value })} />
               {kind === "event" && <span className="field-help">Выражение от event; пусто — значение по умолчанию.</span>}

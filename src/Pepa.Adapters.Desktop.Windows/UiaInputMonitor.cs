@@ -44,7 +44,23 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
     }
 
     /// <summary>Сырое событие из перехватчика: только то, что можно узнать мгновенно.</summary>
-    private readonly record struct Raw(RawKind Kind, DateTimeOffset At, int X, int Y, MouseButtonKind Button, int Vk, bool Own, int RootProcessId);
+    /// <param name="Modifiers">Какие из Ctrl, Alt, Shift, Win зажаты в момент события (<see cref="Mods"/>).</param>
+    private readonly record struct Raw(RawKind Kind, DateTimeOffset At, int X, int Y, MouseButtonKind Button, int Vk, bool Own, int RootProcessId,
+        int Modifiers = 0);
+
+    private static class Mods
+    {
+        public const int Ctrl = 1, Alt = 2, Shift = 4, Win = 8;
+
+        /// <summary>
+        /// Состояние клавиш-модификаторов прямо сейчас (в обратном вызове перехвата). Не по нажатиям: после Ctrl+Alt+Del или
+        /// Win+L Windows не сообщает перехватчику, что клавиши отпущены, и «зажатый» Ctrl испортил бы всю запись.
+        /// </summary>
+        public static int Now() =>
+            (HookNative.GetAsyncKeyState(0x11) < 0 ? Ctrl : 0) | (HookNative.GetAsyncKeyState(0x12) < 0 ? Alt : 0) |
+            (HookNative.GetAsyncKeyState(0x10) < 0 ? Shift : 0) |
+            (HookNative.GetAsyncKeyState(0x5B) < 0 || HookNative.GetAsyncKeyState(0x5C) < 0 ? Win : 0);
+    }
 
     /// <summary>Действие, ожидающее подсчёта похожих элементов (окно — для поиска).</summary>
     private sealed record Pending(DesktopInput Input, AutomationElement? Window);
@@ -64,7 +80,7 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
         private nint _keyboardHook;
 
         // Состояние потока разбора (только из него).
-        private bool _ctrl, _alt, _shift, _win, _altAlone;
+        private bool _alt, _altAlone;
         private Typing? _typing;
         private readonly Dictionary<MouseButtonKind, (Raw Down, DesktopTarget? Target, AutomationElement? Window, bool Modifiers)> _down = [];
 
@@ -77,7 +93,18 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
 
             /// <summary>Последняя клавиша набора стирала (Backspace, Delete, Ctrl+X): пустое поле — это ввод пользователя.</summary>
             public bool LastKeyErased { get; set; }
+
+            /// <summary>
+            /// Поле большое или отвечает медленно (документ в Word): во время набора его больше не читаем, чтобы не задерживать
+            /// разбор нажатий мышью.
+            /// </summary>
+            public bool SkipReads { get; set; }
         }
+
+        /// <summary>Чтение поля во время набора дольше этого — дальше поле во время набора не читается.</summary>
+        private static readonly TimeSpan SlowRead = TimeSpan.FromMilliseconds(40);
+
+        private const int MaxReadLength = 20_000;
 
         public void Start()
         {
@@ -220,7 +247,7 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
                             var root = HookNative.GetAncestor(HookNative.WindowFromPoint(info->Point), HookNative.GaRoot);
                             HookNative.GetWindowThreadProcessId(root, out var processId);
                             watch._raw.TryAdd(new Raw(k, DateTimeOffset.Now, info->Point.X, info->Point.Y, button, 0,
-                                processId == Environment.ProcessId, (int)processId));
+                                processId == Environment.ProcessId, (int)processId, k == RawKind.MouseDown ? Mods.Now() : 0));
                         }
                     }
                 }
@@ -245,8 +272,9 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
                     {
                         var down = (int)message is 0x0100 or 0x0104;
                         HookNative.GetWindowThreadProcessId(HookNative.GetForegroundWindow(), out var processId);
+                        // Сама нажатая клавиша в этом состоянии ещё не учтена — только зажатые до неё.
                         watch._raw.TryAdd(new Raw(down ? RawKind.KeyDown : RawKind.KeyUp, DateTimeOffset.Now, 0, 0, MouseButtonKind.Left,
-                            (int)info->VkCode, processId == Environment.ProcessId, (int)processId));
+                            (int)info->VkCode, processId == Environment.ProcessId, (int)processId, down ? Mods.Now() : 0));
                     }
                 }
                 catch
@@ -306,7 +334,7 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
                     }
 
                     var (target, window) = Resolve(raw);
-                    _down[raw.Button] = (raw, target, window, _ctrl || _shift || _alt);
+                    _down[raw.Button] = (raw, target, window, (raw.Modifiers & (Mods.Ctrl | Mods.Alt | Mods.Shift)) != 0);
                     break;
                 case RawKind.MouseUp:
                     if (!_down.Remove(raw.Button, out var pressed) || pressed.Target is null)
@@ -328,6 +356,13 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
                     break;
                 case RawKind.KeyUp:
                     UpdateModifiers(raw.Vk, down: false);
+                    if (_typing is { } typed && !DesktopKeyRules.IsModifier(raw.Vk))
+                    {
+                        // Прочитать поле, когда программа уже приняла клавишу: если после Enter она сразу очистит поле,
+                        // останется текст со всеми символами.
+                        Remember(typed);
+                    }
+
                     if (raw.Vk is 0x12 or 0xA4 or 0xA5 && _altAlone)
                     {
                         _altAlone = false;
@@ -350,7 +385,7 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
                 if (raw.Vk is 0x12 or 0xA4 or 0xA5)
                 {
                     // Повтор зажатого Alt не сбрасывает «нажат один Alt»; Alt вместе с Ctrl — это AltGr или сочетание.
-                    _altAlone = (wasDown ? _altAlone : true) && !_ctrl && !_shift && !_win;
+                    _altAlone = (wasDown ? _altAlone : true) && (raw.Modifiers & (Mods.Ctrl | Mods.Shift | Mods.Win)) == 0;
                 }
                 else
                 {
@@ -369,9 +404,15 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
             Key(raw, raw.Vk);
         }
 
+        /// <summary>Элементы-«пункты»: сдвинутое в их пределах нажатие — всё ещё нажатие на них.</summary>
+        private static readonly HashSet<string> ItemTypes = new(
+            ["Button", "SplitButton", "MenuItem", "Hyperlink", "CheckBox", "RadioButton", "TabItem", "ListItem", "TreeItem", "HeaderItem"],
+            StringComparer.Ordinal);
+
         /// <summary>
-        /// Перетаскивание — мышь ушла дальше, чем Windows считает щелчком, и отпущена не над тем же элементом. Чуть сдвинутое
-        /// нажатие на кнопку остаётся нажатием.
+        /// Перетаскивание — мышь ушла дальше, чем Windows считает щелчком. Чуть сдвинутое нажатие на кнопку или пункт (отпущено
+        /// над тем же элементом) остаётся нажатием; в списке, тексте, холсте любое такое движение — выделение рамкой или текста,
+        /// и щелчок сделал бы другое.
         /// </summary>
         private static bool IsDrag(Raw down, Raw up, DesktopTarget target)
         {
@@ -382,14 +423,17 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
                 return false;
             }
 
-            return target.Element is not { Bounds: var b } ||
+            return target.Element is not { Bounds: var b } element || !ItemTypes.Contains(element.ControlType) ||
                    up.X < b.X || up.Y < b.Y || up.X >= b.X + b.Width || up.Y >= b.Y + b.Height;
         }
 
         private void Key(Raw raw, int vk)
         {
             var focused = _automation!.FocusedElement();
-            var decision = DesktopKeyRules.Classify(vk, _ctrl, _alt, _shift, _win, Editable(focused));
+            var mods = raw.Modifiers;
+            var ctrl = (mods & Mods.Ctrl) != 0;
+            var decision = DesktopKeyRules.Classify(vk, ctrl, (mods & Mods.Alt) != 0 || vk is 0x12, (mods & Mods.Shift) != 0, (mods & Mods.Win) != 0,
+                Editable(focused));
             switch (decision.Role)
             {
                 case KeyRole.Typing:
@@ -398,20 +442,14 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
                         FlushTyping(raw.At);
                     }
 
-                    if (_typing is { } current)
-                    {
-                        // Прочитать поле на каждой клавише набора: если после Enter программа сразу очистит поле, останется
-                        // текст до последнего символа.
-                        current.LastSeen = TryRead(current) ?? current.LastSeen;
-                    }
-                    else if (Target(focused, raw) is { } target)
+                    if (_typing is null && Target(focused, raw) is { } target)
                     {
                         _typing = new Typing(focused, target.Target);
                     }
 
                     if (_typing is { } active)
                     {
-                        active.LastKeyErased = vk is 0x08 or 0x2E || (_ctrl && vk == 0x58);
+                        active.LastKeyErased = vk is 0x08 or 0x2E || (ctrl && vk == 0x58);
                     }
 
                     break;
@@ -433,23 +471,33 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
             }
         }
 
+        /// <summary>Зажат ли Alt — только чтобы узнать отдельное нажатие Alt (меню); сочетания берут состояние из события.</summary>
         private void UpdateModifiers(int vk, bool down)
         {
-            switch (vk)
+            if (vk is 0x12 or 0xA4 or 0xA5)
             {
-                case 0x11 or 0xA2 or 0xA3:
-                    _ctrl = down;
-                    break;
-                case 0x12 or 0xA4 or 0xA5:
-                    _alt = down;
-                    break;
-                case 0x10 or 0xA0 or 0xA1:
-                    _shift = down;
-                    break;
-                case 0x5B or 0x5C:
-                    _win = down;
-                    break;
+                _alt = down;
             }
+        }
+
+        /// <summary>Запомнить текущее значение поля во время набора (не дольше <see cref="SlowRead"/>).</summary>
+        private static void Remember(Typing typing)
+        {
+            if (typing.SkipReads || typing.Target.IsPassword)
+            {
+                return;
+            }
+
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            var text = TryRead(typing);
+            if (System.Diagnostics.Stopwatch.GetElapsedTime(started) > SlowRead || text is { Length: > MaxReadLength })
+            {
+                typing.SkipReads = true;
+                typing.LastSeen = null;
+                return;
+            }
+
+            typing.LastSeen = text ?? typing.LastSeen;
         }
 
         private void FlushTyping(DateTimeOffset at)
@@ -462,12 +510,13 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
             _typing = null;
             var text = TryRead(typing);
             var early = false;
-            if (!typing.Target.IsPassword && string.IsNullOrEmpty(text) && !typing.LastKeyErased && typing.LastSeen is { Length: > 0 } seen)
+            if (!typing.Target.IsPassword && string.IsNullOrEmpty(text) && !typing.LastKeyErased)
             {
                 // Поле пустое (или закрылось), хотя последним вводили символ, — программа очистила его сама (Enter отправил
-                // сообщение). Берём прочтённое во время набора — с пометкой, что последний символ мог не попасть.
-                text = seen;
-                early = true;
+                // сообщение). Берём прочтённое во время набора — с пометкой, что последний символ мог не попасть; не прочли
+                // ничего — текст неизвестен (шаг попросит вписать его), а не пустой.
+                text = typing.LastSeen is { Length: > 0 } seen ? seen : null;
+                early = text is not null;
             }
 
             Emit(new DesktopTextInput(at, typing.Target, text, early), WindowOf(typing.Element));
@@ -827,4 +876,7 @@ internal static partial class HookNative
 
     [LibraryImport("user32.dll")]
     public static partial int GetSystemMetrics(int index);
+
+    [LibraryImport("user32.dll")]
+    public static partial short GetAsyncKeyState(int key);
 }

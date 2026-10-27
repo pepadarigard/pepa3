@@ -114,7 +114,7 @@ function RunDialog({ name, inputs, onRun, onCancel }: { name: string; inputs: Va
               />
               {values[variable.name] === true ? "Да" : "Нет"}
             </span>
-          ) : variable.type === "list" || variable.type === "object" || variable.type === "any" ? (
+          ) : !variable.secret && (variable.type === "list" || variable.type === "object" || variable.type === "any") ? (
             <textarea
               className="textarea mono"
               value={String(values[variable.name] ?? "")}

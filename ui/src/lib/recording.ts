@@ -1,4 +1,4 @@
-import type { NodeDefinition, RecordedDesktopStep, VariableDefinition } from "../api/types";
+import type { Json, NodeDefinition, RecordedDesktopStep, VariableDefinition } from "../api/types";
 import type { BlockClipboard } from "./clipboard";
 
 /** Записанное действие (как его присылает сервер). */
@@ -117,4 +117,38 @@ export function desktopRecordingToBlocks(steps: RecordedDesktopStep[]): BlockCli
   }));
   const edges = nodes.slice(1).map((node, i) => ({ id: `rec-e${i + 1}`, source: nodes[i].id, sourcePort: "out", target: node.id }));
   return { kind: "pepa-blocks", version: 1, nodes, edges, variables };
+}
+
+/**
+ * Переменные записи (пароли) не должны совпасть с уже существующими в сценарии: иначе новый блок молча взял бы чужое
+ * значение (пароль другой программы) или обычную, не скрытую переменную. Совпавшие получают следующий свободный номер
+ * (password → password3), обращения к ним в блоках переписываются.
+ */
+export function withFreeVariables(blocks: BlockClipboard, taken: string[]): BlockClipboard {
+  const existing = new Set(taken);
+  // Свои имена, которые ни с чем не совпали, тоже заняты: переименованная переменная не должна взять одно из них.
+  const used = new Set([...taken, ...blocks.variables.map((v) => v.name)]);
+  const renames = new Map<string, string>();
+  for (const variable of blocks.variables) {
+    if (!existing.has(variable.name)) continue;
+    const base = variable.name.replace(/\d+$/, "");
+    let n = 2;
+    while (used.has(`${base}${n}`)) n++;
+    renames.set(variable.name, `${base}${n}`);
+    used.add(`${base}${n}`);
+  }
+  if (renames.size === 0) return blocks;
+  const rewrite = (value: Json): Json => {
+    if (typeof value === "string") {
+      return value.replace(/vars\.([A-Za-z_][A-Za-z0-9_]*)/g, (all, name: string) => (renames.has(name) ? `vars.${renames.get(name)}` : all));
+    }
+    if (Array.isArray(value)) return value.map(rewrite);
+    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, rewrite(v)]));
+    return value;
+  };
+  return {
+    ...blocks,
+    nodes: blocks.nodes.map((node) => ({ ...node, config: rewrite(node.config) as Record<string, Json> })),
+    variables: blocks.variables.map((v) => (renames.has(v.name) ? { ...v, name: renames.get(v.name)! } : v)),
+  };
 }

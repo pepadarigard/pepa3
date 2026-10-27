@@ -45,4 +45,42 @@ public sealed class SecretApiTests
         Assert.Contains(details["journal"]!.AsArray(), j => j!["message"]!.GetValue<string>() == "вход ivan: •••• / ••••");
         await f.SendAsync(HttpMethod.Post, $"/api/processes/{id}/cancel");
     }
+
+    [Fact]
+    public async Task Secret_input_of_a_scheduled_run_is_hidden_and_kept_when_saved_back()
+    {
+        await using var f = await HostFixture.StartAsync(seedSamples: false);
+        var (_, scenario) = await f.SendAsync(HttpMethod.Post, "/api/scenarios", new
+        {
+            name = "Вход по расписанию",
+            variables = new object[]
+            {
+                new { name = "password", type = "text", isInput = true, secret = true },
+                new { name = "login", type = "text", isInput = true },
+            },
+            nodes = new object[] { new { id = "start", type = "start" }, new { id = "end", type = "end" } },
+            edges = new object[] { new { id = "a", source = "start", sourcePort = "out", target = "end" } },
+        });
+        var scenarioId = scenario!["id"]!.GetValue<string>();
+        var (status, trigger) = await f.SendAsync(HttpMethod.Post, "/api/triggers", new
+        {
+            scenarioId, kind = "schedule", enabled = true, config = new { mode = "daily", time = "09:00", days = Array.Empty<int>() },
+            inputs = new { password = "S3cr3t-Pa55", login = "ivan" },
+        });
+        Assert.Equal(200, status);
+        Assert.Equal("••••", trigger!["inputs"]!["password"]!.GetValue<string>());
+        var id = trigger["id"]!.GetValue<string>();
+        Assert.DoesNotContain("S3cr3t-Pa55", await f.Client.GetStringAsync("/api/triggers"));
+
+        // Редактор отправляет «••••» обратно — сохранённый пароль не меняется; новое значение — меняется.
+        Assert.Equal(200, (await f.SendAsync(HttpMethod.Put, $"/api/triggers/{id}", new
+        {
+            scenarioId, kind = "schedule", enabled = true, config = new { mode = "daily", time = "10:00", days = Array.Empty<int>() },
+            inputs = new { password = "••••", login = "petr" },
+        })).Status);
+        var store = (Engine.Persistence.IPepaStore)f.Host.Services.GetService(typeof(Engine.Persistence.IPepaStore))!;
+        var saved = await store.GetTriggerAsync(id);
+        Assert.Equal("S3cr3t-Pa55", saved!.Inputs!["password"]!.GetValue<string>());
+        Assert.Equal("petr", saved.Inputs["login"]!.GetValue<string>());
+    }
 }

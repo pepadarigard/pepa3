@@ -371,51 +371,37 @@ internal static class ApiEndpoints
                 return Results.Json(new ErrorDto(reason), Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status409Conflict);
             }
 
-            // Мышь и клавиатура на время записи — за ней: процесс, которому они понадобятся, подождёт в очереди, а не смешает
-            // свои действия с действиями пользователя. Заняты процессом — запись не начинается.
-            var input = Adapters.Desktop.DesktopNodes.InputResource;
-            if (await engine.TryHoldExternallyAsync(input.Key, input.Title, RecordingHolder, ct) is { } holder)
-            {
-                return Results.Json(new ErrorDto($"Мышь и клавиатура сейчас заняты процессом #{holder[^Math.Min(6, holder.Length)..]} — дождитесь его окончания или остановите."),
-                    Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status409Conflict);
-            }
-
+            // Начало и конец записи — по одному: иначе остановка между «занять» и «начать» оставила бы запись без ресурса.
+            await RecordingGate.WaitAsync(ct);
             try
             {
-                await recorder.StartAsync(ct);
+                return await StartRecordingAsync(recorder, engine, events, ct);
             }
-            catch (Exception ex)
+            finally
             {
-                // Запись не началась (в том числе запрос отменён) — мышь и клавиатура снова свободны для процессов.
-                if (!recorder.State.Recording)
-                {
-                    await engine.ReleaseExternalAsync(input.Key, RecordingHolder, CancellationToken.None);
-                    events.Publish("resources");
-                }
-
-                if (ex is Adapters.Desktop.DesktopRecorderException)
-                {
-                    return Results.Json(new ErrorDto(ex.Message), Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status409Conflict);
-                }
-
-                throw;
+                RecordingGate.Release();
             }
-
-            events.Publish("resources");
-            return Results.Ok(DesktopRecorderDto(recorder));
         });
 
         api.MapPost("/recorder/desktop/stop", async (Adapters.Desktop.DesktopRecorder recorder, ProcessEngine engine, EventHub events,
             CancellationToken ct) =>
         {
+            await RecordingGate.WaitAsync(ct);
             try
             {
                 await recorder.StopAsync(ct);
             }
             finally
             {
-                await engine.ReleaseExternalAsync(Adapters.Desktop.DesktopNodes.InputResource.Key, RecordingHolder, CancellationToken.None);
-                events.Publish("resources");
+                try
+                {
+                    await engine.ReleaseExternalAsync(Adapters.Desktop.DesktopNodes.InputResource.Key, RecordingHolder, CancellationToken.None);
+                    events.Publish("resources");
+                }
+                finally
+                {
+                    RecordingGate.Release();
+                }
             }
 
             return DesktopRecorderDto(recorder);
@@ -580,27 +566,16 @@ internal static class ApiEndpoints
             var children = await store.GetChildProcessesAsync(id, ct);
             var held = (await store.ListResourcesAsync(ct)).Where(r => r.HolderProcessId == id).Select(r => r.Key).ToList();
             var definition = Core.Serialization.PepaJson.Deserialize<ScenarioDefinition>(process.DefinitionJson);
-            // Секретные переменные (пароли) не показываются: ни сами, ни внутри параметров шагов.
-            var secrets = ProcessEngine.SecretValues(process, definition);
-            var variables = (System.Text.Json.Nodes.JsonObject)process.Variables.DeepClone();
-            foreach (var secret in definition.Variables.Where(v => v.Secret && variables[v.Name] is not null))
-            {
-                variables[secret.Name] = ProcessEngine.SecretMask;
-            }
-
-            definition = definition with
-            {
-                Variables = definition.Variables.Select(v => v.Secret && v.Default is not null ? v with { Default = ProcessEngine.SecretMask } : v).ToList(),
-            };
-
+            // Секретные переменные (пароли) не показываются: ни сами, ни в параметрах шагов, где их использовали.
+            var masker = new SecretMasker(process, definition);
+            var summary = mapper.Summary(process, tokens, subscriptions.ToDictionary(s => s.Id));
             return Results.Ok(new ProcessDetailsDto(
-                mapper.Summary(process, tokens, subscriptions.ToDictionary(s => s.Id)),
-                variables,
-                ProcessEngine.Redact(process.LastError, secrets),
-                steps.Select(s => ProcessMapper.Step(s with { Input = ProcessEngine.Redact(s.Input, secrets), Output = ProcessEngine.Redact(s.Output, secrets) }))
-                    .ToList(),
-                journal.Select(j => ProcessMapper.Journal(j with { Message = ProcessEngine.Redact(j.Message, secrets)! })).ToList(),
-                definition,
+                summary with { StatusMessage = masker.Text(summary.StatusMessage) },
+                masker.Variables(process.Variables),
+                masker.Json(process.LastError),
+                steps.Select(s => ProcessMapper.Step(masker.Step(s))).ToList(),
+                journal.Select(j => ProcessMapper.Journal(j with { Message = masker.Text(j.Message)! })).ToList(),
+                masker.Definition(),
                 parent is null ? null : ProcessMapper.Ref(parent),
                 await mapper.SummariesAsync(children, ct),
                 subscriptions.Select(ProcessMapper.Wait).ToList(),
@@ -666,14 +641,14 @@ internal static class ApiEndpoints
         api.MapGet("/triggers", async (string? scenarioId, IPepaStore store, ProcessMapper mapper, CancellationToken ct) =>
             await mapper.TriggersAsync(await store.ListTriggersAsync(string.IsNullOrWhiteSpace(scenarioId) ? null : scenarioId, ct), ct));
 
-        api.MapPost("/triggers", async (SaveTriggerRequest request, ProcessEngine engine, ProcessMapper mapper, CancellationToken ct) =>
-            await SaveTriggerAsync(null, request, engine, mapper, ct));
+        api.MapPost("/triggers", async (SaveTriggerRequest request, ProcessEngine engine, ProcessMapper mapper, IPepaStore store,
+            CancellationToken ct) => await SaveTriggerAsync(null, request, engine, mapper, store, ct));
 
         api.MapPut("/triggers/{id}", async (string id, SaveTriggerRequest request, ProcessEngine engine, ProcessMapper mapper,
             IPepaStore store, CancellationToken ct) =>
             await store.GetTriggerAsync(id, ct) is null
                 ? NotFound("Запуск по расписанию или событию не найден.")
-                : Results.Ok(await SaveTriggerAsync(id, request, engine, mapper, ct)));
+                : Results.Ok(await SaveTriggerAsync(id, request, engine, mapper, store, ct)));
 
         api.MapDelete("/triggers/{id}", async (string id, ProcessEngine engine, CancellationToken ct) =>
             await engine.DeleteTriggerAsync(id, ct)
@@ -736,8 +711,22 @@ internal static class ApiEndpoints
     }
 
     private static async Task<TriggerDto> SaveTriggerAsync(string? id, SaveTriggerRequest request, ProcessEngine engine,
-        ProcessMapper mapper, CancellationToken ct)
+        ProcessMapper mapper, IPepaStore store, CancellationToken ct)
     {
+        var inputs = request.Inputs?.DeepClone() as System.Text.Json.Nodes.JsonObject;
+        if (id is not null && inputs is not null && await store.GetTriggerAsync(id, ct) is { Inputs: { } stored })
+        {
+            // Секретное значение показывалось как «••••» — такое значение значит «не менять».
+            foreach (var (name, value) in inputs.ToList())
+            {
+                if (value?.GetValueKind() == System.Text.Json.JsonValueKind.String && value.GetValue<string>() == ProcessEngine.SecretMask &&
+                    stored[name] is { } previous)
+                {
+                    inputs[name] = previous.DeepClone();
+                }
+            }
+        }
+
         var saved = await engine.SaveTriggerAsync(new TriggerRecord
         {
             Id = id ?? "",
@@ -746,7 +735,7 @@ internal static class ApiEndpoints
             Enabled = request.Enabled,
             Name = request.Name ?? "",
             Config = (System.Text.Json.Nodes.JsonObject)request.Config.DeepClone(),
-            Inputs = request.Inputs?.DeepClone() as System.Text.Json.Nodes.JsonObject,
+            Inputs = inputs,
             Overlap = request.Overlap ?? "skip",
             CreatedAt = default,
             UpdatedAt = default,
@@ -756,6 +745,45 @@ internal static class ApiEndpoints
 
     /// <summary>Держатель мыши и клавиатуры на время записи действий в окнах.</summary>
     private const string RecordingHolder = ProcessEngine.RecordingHolder;
+
+    private static readonly SemaphoreSlim RecordingGate = new(1, 1);
+
+    private static async Task<IResult> StartRecordingAsync(Adapters.Desktop.DesktopRecorder recorder, ProcessEngine engine, EventHub events,
+        CancellationToken ct)
+    {
+        // Мышь и клавиатура на время записи — за ней: процесс, которому они понадобятся, подождёт в очереди, а не смешает
+        // свои действия с действиями пользователя. Заняты процессом — запись не начинается.
+        var input = Adapters.Desktop.DesktopNodes.InputResource;
+        if (await engine.TryHoldExternallyAsync(input.Key, input.Title, RecordingHolder, ct) is { } holder)
+        {
+            return Results.Json(new ErrorDto($"Мышь и клавиатура сейчас заняты процессом #{holder[^Math.Min(6, holder.Length)..]} — дождитесь его окончания или остановите."),
+                Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status409Conflict);
+        }
+
+        try
+        {
+            await recorder.StartAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            // Запись не началась (в том числе запрос отменён) — мышь и клавиатура снова свободны для процессов.
+            if (!recorder.State.Recording)
+            {
+                await engine.ReleaseExternalAsync(input.Key, RecordingHolder, CancellationToken.None);
+                events.Publish("resources");
+            }
+
+            if (ex is Adapters.Desktop.DesktopRecorderException)
+            {
+                return Results.Json(new ErrorDto(ex.Message), Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status409Conflict);
+            }
+
+            throw;
+        }
+
+        events.Publish("resources");
+        return Results.Ok(DesktopRecorderDto(recorder));
+    }
 
     private static WatchesDto WatchesDto(SettingsService settings, Adapters.FileSystem.FolderWatcher watcher)
     {

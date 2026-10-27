@@ -1,5 +1,7 @@
 using System.Globalization;
+using System.Text.Json.Nodes;
 using Pepa.Core;
+using Pepa.Core.Model;
 using Pepa.Core.Validation;
 using Pepa.Engine;
 using Pepa.Engine.Persistence;
@@ -211,9 +213,25 @@ internal sealed class ProcessMapper(ProcessEngine engine, IPepaStore store)
 
     public async Task<IReadOnlyList<TriggerDto>> TriggersAsync(IReadOnlyList<TriggerRecord> triggers, CancellationToken cancellationToken)
     {
-        var names = (await store.ListScenariosAsync(cancellationToken)).ToDictionary(s => s.Id, s => s.Name, StringComparer.Ordinal);
-        return triggers.Select(t => Trigger(t, names.GetValueOrDefault(t.ScenarioId) ?? "Сценарий удалён")).ToList();
+        var scenarios = (await store.ListScenariosAsync(cancellationToken)).ToDictionary(s => s.Id, StringComparer.Ordinal);
+        return triggers.Select(t =>
+        {
+            var scenario = scenarios.GetValueOrDefault(t.ScenarioId);
+            // Значения секретных переменных (пароль для запуска по расписанию) не показываются; при сохранении «••••» —
+            // «оставить как было».
+            var secret = scenario is null ? [] : SecretInputs(scenario);
+            var inputs = t.Inputs is null || secret.Count == 0 ? t.Inputs : (JsonObject)t.Inputs.DeepClone();
+            foreach (var name in secret.Where(n => inputs?[n] is not null))
+            {
+                inputs![name] = ProcessEngine.SecretMask;
+            }
+
+            return Trigger(t with { Inputs = inputs }, scenario?.Name ?? "Сценарий удалён");
+        }).ToList();
     }
+
+    public static IReadOnlyList<string> SecretInputs(StoredScenario scenario) =>
+        Core.Serialization.PepaJson.Deserialize<ScenarioDefinition>(scenario.DefinitionJson).Variables.Where(v => v.Secret).Select(v => v.Name).ToList();
 
     public static TriggerDto Trigger(TriggerRecord t, string scenarioName) => new(t.Id, t.ScenarioId, scenarioName, t.Kind,
         t.Enabled, t.Name, t.Config, t.Inputs, t.Overlap, DescribeTrigger(t), t.NextRunAt, t.LastRunAt, t.LastProcessId,

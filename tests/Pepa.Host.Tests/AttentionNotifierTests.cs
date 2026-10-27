@@ -207,6 +207,26 @@ public sealed class AttentionNotifierTests
     }
 
     [Fact]
+    public async Task Process_whose_read_failed_is_notified_after_a_retry()
+    {
+        var telegram = new SavedMessages();
+        var alerts = new Alerts();
+        var failOnce = 1;
+        var processes = new ConcurrentDictionary<string, ProcessRecord>();
+        await using var notifier = new AttentionNotifier((id, _) =>
+                Interlocked.Exchange(ref failOnce, 0) == 1
+                    ? throw new Microsoft.Data.Sqlite.SqliteException("database is locked", 5)
+                    : Task.FromResult(processes.GetValueOrDefault(id)),
+            telegram, () => true, alerts, NullLogger.Instance, TimeSpan.FromMilliseconds(20), retryDelay: TimeSpan.FromMilliseconds(100));
+        notifier.Start([], null);
+        processes["process-a"] = Process("a", ProcessStatus.NeedsAttention);
+        // Остановившийся процесс больше не меняется — уведомление о нём приходит после повторного чтения.
+        notifier.OnProcessChanged("process-a");
+        await Eventually(() => alerts.Count > 0);
+        Assert.Contains("«Заказ a»", telegram.Messages.Single());
+    }
+
+    [Fact]
     public async Task Test_message_without_Telegram_explains_why()
     {
         await using var f = await HostFixture.StartAsync(seedSamples: false);

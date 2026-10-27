@@ -57,4 +57,75 @@ public sealed class SecretTests
         // «abc» внутри «abc123» не оставляет хвост «123»; одну цифру не скрыть — она есть в любом тексте.
         Assert.Equal("•••• •••• 7", done.StatusMessage);
     }
+
+    [Fact]
+    public async Task Called_scenario_keeps_passed_secrets_secret_and_does_not_return_them()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var child = await h.CreateScenarioAsync(new ScenarioBuilder("Ребёнок")
+            .Variable("password", VariableType.Text, isInput: true)
+            .Node("start", "start")
+            .Node("log", "log", new { message = "в ребёнке {{ vars.password }}" })
+            .Node("end", "end")
+            .Chain("start", "log", "end").Build());
+        var parent = await h.RunAsync(new ScenarioBuilder("Родитель")
+            .Variable("password", VariableType.Text, isInput: true, secret: true)
+            .Variable("result", VariableType.Any)
+            .Node("start", "start")
+            .Node("call", "scenario.call", new { scenario = child, inputs = "({ password: vars.password })", saveTo = "result" })
+            .Node("end", "end")
+            .Edge("start", "call").Edge("call", "end", Ports.Done)
+            .Build(), new JsonObject { ["password"] = "S3cr3t-Pa55" });
+        var done = await h.WaitForStatusAsync(parent, ProcessStatus.Completed);
+
+        // Итог вызванного сценария сохранён в обычную переменную — пароля в нём нет.
+        Assert.Equal(ProcessEngine.SecretMask, done.Variables["result"]!["password"]!.GetValue<string>());
+        var called = (await h.Store.ListProcessesAsync(new ProcessQuery { Limit = 10 })).Single(p => p.ParentProcessId == parent);
+        // Во вызванном сценарии переменная не отмечена секретной, но значение пришло из секретной — оно секретно и там.
+        var definition = Core.Serialization.PepaJson.Deserialize<ScenarioDefinition>(called.DefinitionJson);
+        Assert.True(definition.Variables.Single(v => v.Name == "password").Secret);
+        var journal = string.Join("\n", (await h.Store.GetJournalAsync(called.Id)).Select(j => j.Message));
+        Assert.Contains("в ребёнке ••••", journal);
+        Assert.Equal(ProcessEngine.SecretMask, new SecretMasker(called, definition).Variables(called.Variables)["password"]!.GetValue<string>());
+        Assert.Equal("S3cr3t-Pa55", called.Variables["password"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Changed_secret_numbers_and_wrong_type_values_stay_hidden()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var scenario = new ScenarioBuilder("Смена")
+            .Variable("password", VariableType.Text, isInput: true, secret: true)
+            .Variable("pin", VariableType.Number, secret: true)
+            .Node("start", "start")
+            .Node("log", "log", new { message = "вход: {{ vars.password }}" })
+            .Node("set", "variable.set", new { variable = "password", value = "'second-Pa55'" })
+            .Node("pin", "variable.set", new { variable = "pin", value = "987654" })
+            .Node("logPin", "log", new { message = "ПИН {{ vars.pin }}" })
+            .Node("wrong", "variable.set", new { variable = "pin", value = "'zz-wrong-pin'" })
+            .Node("end", "end")
+            .Chain("start", "log", "set", "pin", "logPin", "wrong", "end").Build();
+        var id = await h.RunAsync(scenario, new JsonObject { ["password"] = "S3cr3t-Pa55" });
+        var stopped = await h.WaitForAsync(id, p => p.Status is ProcessStatus.NeedsAttention or ProcessStatus.Failed);
+
+        // Значение неверного типа — в сообщении об ошибке, но скрыто: оно присваивалось секретной переменной.
+        Assert.DoesNotContain("zz-wrong-pin", stopped.StatusMessage);
+        var journal = string.Join("\n", (await h.Store.GetJournalAsync(id)).Select(j => j.Message));
+        Assert.Contains("вход: ••••", journal);
+        Assert.Contains("ПИН ••••", journal);
+        Assert.DoesNotContain("987654", journal);
+        Assert.DoesNotContain("zz-wrong-pin", journal);
+
+        // При показе: прежнее значение пароля в параметрах шага скрыто, хотя переменная уже другая; число — тоже.
+        var masker = new SecretMasker(stopped, scenario);
+        var steps = (await h.StepsAsync(id)).Select(masker.Step).ToList();
+        Assert.Equal(ProcessEngine.SecretMask, steps.Single(s => s.NodeId == "log").Input!["message"]!.GetValue<string>());
+        Assert.Equal(ProcessEngine.SecretMask, steps.Single(s => s.NodeId == "set").Output!["variables"]!["password"]!.GetValue<string>());
+        Assert.Equal(ProcessEngine.SecretMask, steps.Single(s => s.NodeId == "pin").Output!["variables"]!["pin"]!.GetValue<string>());
+        var shown = string.Join("\n", steps.Select(s => $"{s.Input?.ToJsonString()} {s.Output?.ToJsonString()} {s.Error} {s.Resolution}"));
+        Assert.DoesNotContain("S3cr3t-Pa55", shown);
+        Assert.DoesNotContain("second-Pa55", shown);
+        Assert.DoesNotContain("987654", shown);
+        await h.Engine.CancelAsync(id);
+    }
 }

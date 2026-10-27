@@ -34,6 +34,9 @@ public sealed class AttentionNotifier : IAsyncDisposable
     private readonly TimeSpan _batchDelay;
     private readonly Channel<string> _changes = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
     private readonly Dictionary<string, string> _notified = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, int> _failedReads = new(StringComparer.Ordinal);
+    private readonly TimeSpan _retryDelay;
+    private const int MaxReadRetries = 3;
     private readonly CancellationTokenSource _stop = new();
     private readonly List<Task> _background = [];
     private int _disposed;
@@ -41,9 +44,11 @@ public sealed class AttentionNotifier : IAsyncDisposable
     /// <param name="load">Процесс по номеру (null — его нет).</param>
     /// <param name="telegramEnabled">Включено ли уведомление в Telegram (настройка может меняться на ходу).</param>
     /// <param name="batchDelay">Сколько собирать изменения в одну пачку.</param>
+    /// <param name="retryDelay">Через сколько снова прочитать процесс, если чтение не удалось.</param>
     public AttentionNotifier(Func<string, CancellationToken, Task<ProcessRecord?>> load, ITelegramGateway telegram, Func<bool> telegramEnabled,
-        IDesktopAlerts? desktop, ILogger logger, TimeSpan? batchDelay = null)
+        IDesktopAlerts? desktop, ILogger logger, TimeSpan? batchDelay = null, TimeSpan? retryDelay = null)
     {
+        _retryDelay = retryDelay ?? TimeSpan.FromSeconds(30);
         _load = load;
         _telegram = telegram;
         _telegramEnabled = telegramEnabled;
@@ -100,10 +105,20 @@ public sealed class AttentionNotifier : IAsyncDisposable
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
-                        // База занята или недоступна — этот процесс пропускаем; следующие изменения разберутся как обычно.
-                        _logger.LogWarning(ex, "Не удалось прочитать процесс {Id} для уведомления.", id);
+                        // База занята или недоступна — прочитаем позже: остановившийся процесс сам больше не изменится, и
+                        // без повтора уведомление пропало бы.
+                        var failures = _failedReads.GetValueOrDefault(id) + 1;
+                        _failedReads[id] = failures;
+                        _logger.LogWarning(ex, "Не удалось прочитать процесс {Id} для уведомления (попытка {Attempt}).", id, failures);
+                        if (failures <= MaxReadRetries)
+                        {
+                            _background.Add(RetryLaterAsync(id, stop));
+                        }
+
                         continue;
                     }
+
+                    _failedReads.Remove(id);
 
                     if (process is not { Status: ProcessStatus.NeedsAttention })
                     {
@@ -140,6 +155,18 @@ public sealed class AttentionNotifier : IAsyncDisposable
         {
             // Уведомления не должны мешать работе — но и молча пропадать тоже.
             _logger.LogError(ex, "Уведомления о процессах остановлены из-за ошибки.");
+        }
+    }
+
+    private async Task RetryLaterAsync(string id, CancellationToken stop)
+    {
+        try
+        {
+            await Task.Delay(_retryDelay, stop);
+            _changes.Writer.TryWrite(id);
+        }
+        catch (OperationCanceledException)
+        {
         }
     }
 

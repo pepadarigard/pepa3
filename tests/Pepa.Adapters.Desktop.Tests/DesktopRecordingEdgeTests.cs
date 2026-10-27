@@ -295,4 +295,76 @@ public sealed class DesktopRecordingEdgeTests
         Assert.Empty(recorder.State.Steps);
         await recorder.StopAsync(CancellationToken.None);
     }
+
+    [Fact]
+    public async Task Corrections_and_AltGr_characters_while_typing_outside_a_field_are_not_recorded_either()
+    {
+        var d = new FakeDesktop();
+        var window = d.AddWindow("Удалённый рабочий стол");
+        var (recorder, monitor) = await StartAsync();
+        var t = 0.0;
+        // Пароль «PAS» с опечаткой: P, Backspace, A, S, @ (AltGr+Q), исправления — и Enter.
+        foreach (var key in new[] { "P", "Backspace", "A", "S", "Ctrl+Alt+Q", "W", "O", "R", "Backspace", "D", "Left", "Right", "Ctrl+Alt+2", "X" })
+        {
+            monitor.Send(new DesktopKeyInput(At(t += 0.1), Target(window, null), key));
+        }
+
+        monitor.Send(new DesktopKeyInput(At(t += 0.1), Target(window, null), "Enter"));
+        var steps = await recorder.StopAsync(CancellationToken.None);
+
+        var step = Assert.Single(steps);
+        Assert.Equal("Enter", Text(step, "keys"));
+        Assert.Contains("набор текста вне поля ввода не записывается", step.Note);
+    }
+
+    [Fact]
+    public async Task Notes_of_merged_or_removed_steps_are_kept()
+    {
+        var d = new FakeDesktop();
+        var window = d.AddWindow("Документ — Блокнот", "notepad");
+        var note = window.Add("Текст", type: "Edit", hasValue: true);
+        var (recorder, monitor) = await StartAsync();
+        monitor.Send(new DesktopTextInput(At(0), Target(window, note), "строка 1"));
+        monitor.Send(new DesktopKeyInput(At(1), Target(window, note), "Enter"));
+        monitor.Send(new DesktopTextInput(At(2), Target(window, note), "строка 1\nстрока 2"));
+        var steps = await recorder.StopAsync(CancellationToken.None);
+
+        // Один шаг вместо трёх — и с пояснением о сокращённом заголовке окна, которое было у первого.
+        var step = Assert.Single(steps);
+        Assert.Contains("сокращён до «Блокнот»", step.Note);
+    }
+
+    [Fact]
+    public async Task Password_field_stays_secret_after_the_password_is_shown()
+    {
+        var d = new FakeDesktop();
+        var window = d.AddWindow("Вход");
+        var password = window.Add("Пароль", type: "Edit", hasValue: true);
+        var (recorder, monitor) = await StartAsync();
+        monitor.Send(new DesktopTextInput(At(0), Target(window, password, password: true), null));
+        // Нажали «глаз»: поле показывает пароль и перестаёт быть полем пароля для Windows.
+        monitor.Send(new DesktopTextInput(At(2), Target(window, password, password: false), "S3cr3t-Pa55"));
+        var steps = await recorder.StopAsync(CancellationToken.None);
+
+        var step = Assert.Single(steps);
+        Assert.True(step.Secret);
+        Assert.Equal("{{ vars.password }}", Text(step));
+        Assert.DoesNotContain("S3cr3t", step.Config.ToJsonString());
+    }
+
+    [Fact]
+    public async Task Text_read_before_enter_is_not_shortened_by_the_enter()
+    {
+        var d = new FakeDesktop();
+        var window = d.AddWindow("Чат");
+        var box = window.Add("Сообщение", type: "Edit", hasValue: true);
+        var (recorder, monitor) = await StartAsync();
+        // Прочитано до Enter: «a\nb» — это набранный текст, а не перевод строки от Enter.
+        monitor.Send(new DesktopTextInput(At(0), Target(window, box), "a\nb\n", ReadBeforeLastKey: true));
+        monitor.Send(new DesktopKeyInput(At(1), Target(window, box), "Enter"));
+        var steps = await recorder.StopAsync(CancellationToken.None);
+
+        Assert.Equal("a\nb\n", Text(steps[0]));
+        Assert.Equal("Enter", Text(steps[1], "keys"));
+    }
 }

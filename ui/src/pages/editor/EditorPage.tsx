@@ -38,6 +38,7 @@ import { EdgeInspector, NodeInspector, ScenarioInspector } from "./Inspector";
 import { IssuesPanel } from "./IssuesPanel";
 import { AssistantDialog } from "./AssistantDialog";
 import { RecorderDialog } from "./RecorderDialog";
+import { withFreeVariables } from "../../lib/recording";
 import { canvasNodeTypes, GroupActionsContext, type GroupActions } from "./GroupNodes";
 import { FlowContext } from "./NodeCard";
 import { DRAG_TYPE, Palette } from "./Palette";
@@ -658,7 +659,9 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
       {recorderOpen && (
         <RecorderDialog
           onClose={() => setRecorderOpen(false)}
-          onInsert={(blocks) => {
+          onInsert={(recorded) => {
+            // Пароли записи — свои переменные, даже если в сценарии уже есть «password» (например, от другой программы).
+            const blocks = withFreeVariables(recorded, editor.state.meta.variables.map((v) => v.name));
             insertAtView(blocks);
             feedback.toast(`Добавлено блоков из записи: ${blocks.nodes.length}. Соедините их со схемой.`, "info");
           }}

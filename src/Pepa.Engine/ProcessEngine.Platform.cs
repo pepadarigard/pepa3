@@ -692,6 +692,10 @@ public sealed partial class ProcessEngine
                 ProcessStatus.Cancelled => "cancelled",
                 _ => "failed",
             };
+            // Секретные переменные в результат не попадают: событие видно на странице «События», а результат сохраняется в
+            // обычную переменную вызвавшего процесса.
+            var definition = PepaJson.Deserialize<ScenarioDefinition>(process.DefinitionJson);
+            var secrets = SecretValues(process, definition);
             await write.TryInsertEventAsync(NewEventRecord(new EventInput
             {
                 Source = EventSources.Platform,
@@ -701,8 +705,8 @@ public sealed partial class ProcessEngine
                 Payload = new JsonObject
                 {
                     ["status"] = status,
-                    ["message"] = process.StatusMessage,
-                    ["variables"] = process.Variables.DeepClone(),
+                    ["message"] = Redact(process.StatusMessage, secrets),
+                    ["variables"] = Redact(MaskSecretVariables(process.Variables, definition), secrets),
                 },
             }, now));
             effects.RouteEvents = true;
@@ -792,7 +796,7 @@ public sealed partial class ProcessEngine
     private async Task<string> CreateChildAsync(IStoreWrite write, PreparedStart prepared, ProcessRecord parent, long stepId,
         DateTimeOffset now)
     {
-        var (process, token) = NewProcess(prepared, now, parent.Id, parent.Depth + 1, $"child:{parent.Id}:{stepId}");
+        var (process, token) = NewProcess(InheritSecrets(parent, prepared), now, parent.Id, parent.Depth + 1, $"child:{parent.Id}:{stepId}");
         await write.InsertProcessAsync(process);
         await write.UpsertTokenAsync(token);
         await write.AddJournalAsync(Journal(process.Id, JournalLevel.Info,
