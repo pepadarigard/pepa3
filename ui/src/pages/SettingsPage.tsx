@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Fingerprint, FolderOpen, Monitor, Moon, PlugZap, Save, Sun } from "lucide-react";
+import { BellRing, Fingerprint, FolderOpen, Monitor, Moon, PlugZap, Save, Sun } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { useInfo, useSettings } from "../api/hooks";
@@ -22,6 +22,7 @@ export function SettingsPage() {
   const [theme, setTheme] = useState<Theme>(loadTheme());
   const [checking, setChecking] = useState(false);
   const [check, setCheck] = useState<{ ok: boolean; message: string } | null>(null);
+  const [testing, setTesting] = useState(false);
 
   useEffect(() => {
     if (settings.data && !form) setForm(settings.data);
@@ -55,6 +56,17 @@ export function SettingsPage() {
       feedback.error(e);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const sendTest = async () => {
+    setTesting(true);
+    try {
+      feedback.toast((await api.notificationTest()).message, "success");
+    } catch (e) {
+      feedback.error(e);
+    } finally {
+      setTesting(false);
     }
   };
 
@@ -157,6 +169,23 @@ export function SettingsPage() {
             </Button>
             {check && <Badge tone={check.ok ? "success" : "danger"}>{check.ok ? "На связи" : "Нет связи"}</Badge>}
             {check && <span className="small muted">{check.message}</span>}
+          </div>
+        </div>
+      </Card>
+
+      <Card title={<h2 className="row"><BellRing size={16} /> Уведомления</h2>}>
+        <div className="card-body stack" data-testid="notifications-card">
+          <p className="small muted">
+            Когда процесс останавливается и ждёт вашего решения, кнопка Pepa на панели задач мигает (если окно не перед вами). Можно
+            получать и сообщение в Telegram — в «Избранное» вашего аккаунта, подключённого в «Интеграциях»: удобно, когда вас нет у
+            компьютера. Несколько остановок подряд приходят одним сообщением; о каждой — один раз.
+          </p>
+          <label className="row small" style={{ gap: 8 }}>
+            <input type="checkbox" checked={form.notifyTelegram} onChange={(e) => setForm({ ...form, notifyTelegram: e.target.checked })} />
+            Сообщать в Telegram («Избранное»), когда процесс ждёт решения
+          </label>
+          <div>
+            <Button size="small" variant="ghost" busy={testing} onClick={() => void sendTest()}>Отправить пробное сообщение</Button>
           </div>
         </div>
       </Card>

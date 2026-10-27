@@ -219,7 +219,9 @@ public sealed record SettingsDto(
     string? AdsPowerUrl = null,
     /// <summary>При сохранении: null — не менять, пустая строка — удалить. В ответах не возвращается.</summary>
     string? AdsPowerApiKey = null,
-    bool AdsPowerHasKey = false);
+    bool AdsPowerHasKey = false,
+    /// <summary>При сохранении: null — не менять.</summary>
+    bool? NotifyTelegram = null);
 
 public sealed record CheckResultDto(bool Ok, string Message);
 

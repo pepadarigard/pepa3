@@ -42,6 +42,7 @@ internal static class ApiEndpoints
                 ActionTimeoutSeconds = request.ActionTimeoutSeconds,
                 AdsPowerUrl = request.AdsPowerUrl ?? current.AdsPowerUrl,
                 AdsPowerApiKey = request.AdsPowerApiKey ?? current.AdsPowerApiKey,
+                NotifyTelegram = request.NotifyTelegram ?? current.NotifyTelegram,
             });
             return ToDto(settings);
         });
@@ -308,6 +309,25 @@ internal static class ApiEndpoints
         {
             await recorder.StopAsync(ct);
             return RecorderDto(recorder.State);
+        });
+
+        // ───────────── Уведомления ─────────────
+        api.MapPost("/notifications/test", async (Notifications.AttentionNotifier notifier, CancellationToken ct) =>
+        {
+            try
+            {
+                await notifier.SendTestAsync(ct);
+                return Results.Ok(new CheckResultDto(true, "Отправлено в «Избранное» вашего Telegram."));
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.Json(new ErrorDto(ex.Message), Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status409Conflict);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return Results.Json(new ErrorDto($"Telegram не принял сообщение: {ex.Message}"), Core.Serialization.PepaJson.Options,
+                    statusCode: StatusCodes.Status502BadGateway);
+            }
         });
 
         // ───────────── Резервные копии базы ─────────────
@@ -732,7 +752,8 @@ internal static class ApiEndpoints
     {
         var current = settings.Current;
         return new SettingsDto(current.WorkspaceRoot, current.MaxParallelProcesses, current.StepBudget,
-            current.ActionTimeoutSeconds, settings.RestartRequired, current.AdsPowerUrl, null, current.AdsPowerApiKey is not null);
+            current.ActionTimeoutSeconds, settings.RestartRequired, current.AdsPowerUrl, null, current.AdsPowerApiKey is not null,
+            current.NotifyTelegram);
     }
 
     private static ScenarioDto ToDto(StoredScenario stored, ScenarioService scenarios)

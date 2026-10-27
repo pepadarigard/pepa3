@@ -162,6 +162,8 @@ public sealed class PepaHost : IAsyncDisposable
         var desktopRecorder = new DesktopRecorder(options.DesktopInput ?? new UnavailableInputMonitor(
             "Запись действий в окнах Windows доступна только в приложении Pepa для Windows (Pepa.exe), а сейчас Pepa запущена без окна."));
         builder.Services.AddSingleton(desktopRecorder);
+        builder.Services.AddSingleton(sp => new Notifications.AttentionNotifier((id, ct) => store.GetProcessAsync(id, ct), telegram,
+            () => settings.Current.NotifyTelegram, options.DesktopAlerts, sp.GetRequiredService<ILogger<Notifications.AttentionNotifier>>()));
         builder.Services.AddSingleton(sp => new Backups.DatabaseBackups(store, TimeProvider.System, sp.GetRequiredService<ILogger<Backups.DatabaseBackups>>()));
         builder.Services.AddSingleton(sp => new ProcessEngine(
             sp.GetRequiredService<IPepaStore>(),
@@ -201,6 +203,8 @@ public sealed class PepaHost : IAsyncDisposable
         recorder.Changed += () => events.Publish("recorder");
         desktopRecorder.Changed += () => events.Publish("recorder");
         engine.Changed += change => events.Publish("process", change.ProcessId);
+        var notifier = app.Services.GetRequiredService<Notifications.AttentionNotifier>();
+        engine.Changed += change => notifier.OnProcessChanged(change.ProcessId);
         engine.EventsChanged += () => events.Publish("events");
         engine.TriggersChanged += () => events.Publish("triggers");
         // Процесс завершился — закрыть его браузеры (и профили AdsPower, если так настроено в блоке).
@@ -228,6 +232,8 @@ public sealed class PepaHost : IAsyncDisposable
             Limit = int.MaxValue,
         }, cancellationToken);
         browsers.Prune(unfinished.Select(p => p.Id).ToList());
+        // Уже ждавшие решения до запуска — не новость (их видно на «Главной»); после перезапуска — одно общее сообщение.
+        notifier.Start(unfinished.Where(p => p.Status == ProcessStatus.NeedsAttention), hostContext.Recovery);
         // Подключение к уже авторизованному Telegram — в фоне, чтобы не задерживать запуск окна.
         _ = Task.Run(async () =>
         {
@@ -367,6 +373,7 @@ public sealed class PepaHost : IAsyncDisposable
             await telegram.DisposeAsync();
             await Services.GetRequiredService<BrowserRecorder>().DisposeAsync();
             await Services.GetRequiredService<Backups.DatabaseBackups>().DisposeAsync();
+            await Services.GetRequiredService<Notifications.AttentionNotifier>().DisposeAsync();
             if (Services.GetRequiredService<DesktopRecorder>().State.Recording)
             {
                 // Перехват мыши и клавиатуры не должен пережить Pepa.

@@ -168,6 +168,7 @@ export const api = {
   templates: () => request<ScenarioTemplate[]>("GET", "/templates"),
   plugins: () => request<Plugins>("GET", "/plugins"),
   backups: () => request<Backups>("GET", "/backups"),
+  notificationTest: () => request<{ ok: boolean; message: string }>("POST", "/notifications/test"),
   backupCreate: () => request<BackupInfo>("POST", "/backups"),
   assistant: () => request<AssistantStatus>("GET", "/assistant"),
   assistantSetKey: (apiKey: string) => request<AssistantStatus>("PUT", "/assistant/key", { apiKey }),

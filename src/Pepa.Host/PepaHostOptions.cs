@@ -50,6 +50,9 @@ public sealed record PepaHostOptions
     /// </summary>
     public Adapters.Desktop.IDesktop? Desktop { get; init; }
 
+    /// <summary>Окно Pepa: привлечь внимание, когда процесс ждёт решения (мигание на панели задач). null — окна нет.</summary>
+    public Notifications.IDesktopAlerts? DesktopAlerts { get; init; }
+
     /// <summary>Перехват мыши и клавиатуры для записи действий в окнах Windows. null — запись честно сообщает, что недоступна.</summary>
     public Adapters.Desktop.IDesktopInputMonitor? DesktopInput { get; init; }
 }

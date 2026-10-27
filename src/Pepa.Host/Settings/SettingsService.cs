@@ -19,6 +19,9 @@ public sealed record PlatformSettings
     /// <summary>Ключ API AdsPower, если в AdsPower включена проверка ключа. Хранится в базе Pepa на этом компьютере.</summary>
     public string? AdsPowerApiKey { get; init; }
 
+    /// <summary>Сообщать в Telegram («Избранное» своего аккаунта), когда процесс ждёт решения.</summary>
+    public bool NotifyTelegram { get; init; }
+
     public const string DefaultAdsPowerUrl = "http://127.0.0.1:50325";
 
     public EngineOptions ToEngineOptions() => new()

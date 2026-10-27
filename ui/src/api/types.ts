@@ -389,6 +389,8 @@ export interface Settings {
   /** При сохранении: null — не менять, "" — удалить. */
   adsPowerApiKey: string | null;
   adsPowerHasKey: boolean;
+  /** Сообщать в Telegram («Избранное»), когда процесс ждёт решения. */
+  notifyTelegram: boolean;
 }
 
 export type TelegramState =

@@ -41,6 +41,7 @@ public partial class App : Application
             desktop = new UnavailableDesktop($"UI Automation Windows недоступна: {ex.Message}");
         }
 
+        var alerts = new WindowAlerts();
         try
         {
             _host = await PepaHost.StartAsync(new PepaHostOptions
@@ -49,6 +50,7 @@ public partial class App : Application
                 IsDesktop = true,
                 Desktop = desktop,
                 DesktopInput = desktopInput,
+                DesktopAlerts = alerts,
             });
         }
         catch (InstanceAlreadyRunningException)
@@ -78,6 +80,7 @@ public partial class App : Application
 
         var window = new MainWindow(_host);
         MainWindow = window;
+        alerts.Attach(window);
         window.Closed += (_, _) => Shutdown(0);
         SessionEnding += (_, _) => window.CloseForSessionEnd();
         window.Show();

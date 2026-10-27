@@ -449,6 +449,19 @@ async function main() {
     await page.waitForTimeout(200);
     await backupsCard.screenshot({ path: path.join(shots, "25-backups.png") });
 
+    step("Уведомления: включить и пробное сообщение без Telegram");
+    const notifications = page.getByTestId("notifications-card");
+    await notifications.getByRole("checkbox").check();
+    await page.getByRole("button", { name: "Сохранить", exact: true }).click();
+    await page.getByText("Сохранено").first().waitFor();
+    const errorsBeforeTest = errors.length;
+    await notifications.getByRole("button", { name: "Отправить пробное сообщение" }).click();
+    await page.getByText("Telegram не подключён").first().waitFor();
+    // Ответ 409 здесь ожидаем — браузер всё равно пишет о нём в консоль.
+    errors.splice(errorsBeforeTest, errors.length - errorsBeforeTest, ...errors.slice(errorsBeforeTest).filter((e) => !e.includes("status of 409")));
+    await page.reload();
+    if (!(await page.getByTestId("notifications-card").getByRole("checkbox").isChecked())) throw new Error("Настройка уведомлений не сохранилась");
+
     step("Тёмная тема");
     await page.goto(`${base}/#/settings`);
     await page.getByRole("button", { name: "Тёмная" }).click();
