@@ -164,5 +164,12 @@ public sealed class ExpressionTests
         // После постоянной части пути «?» в значении — часть значения (кодируется), а не начало параметров.
         Assert.Equal("https://api.example/v1/find%3Femail%3Da%40b.com", _evaluator.RenderUrl("{{ vars.base }}/find{{ vars.query }}", scope));
     }
+
+    [Theory]
+    [InlineData("https://api.example/orders/{{ vars.a }}{{ vars.b }}/items", "#", "https://api.example/orders/5%23/items")]
+    [InlineData("https://api.example/search?q={{ vars.a }}{{ vars.b }}", "?y&role=admin", "https://api.example/search?q=5%3Fy%26role%3Dadmin")]
+    [InlineData("https://api.example/orders/{{ vars.a }}{{ vars.b }}", "/delete", "https://api.example/orders/5%2Fdelete")]
+    public void Value_after_another_value_inside_the_path_is_encoded(string template, string b, string expected) =>
+        Assert.Equal(expected, _evaluator.RenderUrl(template, Scope(new JsonObject { ["a"] = "5", ["b"] = b })));
 }
 

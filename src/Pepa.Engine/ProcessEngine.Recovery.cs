@@ -162,14 +162,16 @@ public sealed partial class ProcessEngine
     private async Task<ControlResult> VerifyCoreAsync(ProcessRecord process, IReadOnlyList<TokenRecord> tokens)
     {
         var (step, token, node, executor) = await LoadAttentionAsync(process, tokens);
-        // Итог неизвестен из-за прошлой попытки (эта окончательно не удалась): сверяется та попытка — с её параметрами и
-        // снимком; не выполнена — значит, окончательна ошибка этой попытки.
-        if (step.Output?["uncertainStepId"]?.AsNumber() is { } uncertainId && await _store.GetStepAsync((long)uncertainId) is { } earlier)
+        // В этом посещении блока раньше была попытка, которая могла выполниться: сверяется она (с её параметрами и снимком) —
+        // снимок этой попытки уже видел бы её результат. Если эта попытка окончательно не удалась, «не выполнено» значит:
+        // окончательна её ошибка.
+        var earlier = step.Output?["uncertainStepId"]?.AsNumber() is { } uncertainId ? await _store.GetStepAsync((long)uncertainId) : null;
+        if (earlier is not null && step.Output?["failure"] is not null)
         {
             return await VerifyEarlierAsync(process, step, earlier, token, node, executor);
         }
 
-        var verification = await SafeVerifyAsync(executor, VerifyContext(process, node, step));
+        var verification = await SafeVerifyAsync(executor, VerifyContext(process, node, earlier ?? step));
         // Пояснение проверки может содержать значения (адрес страницы, текст расширения) — без секретов.
         var secrets = SecretValues(process, ExecutionGraph(process).Definition, NodeResult.Ok(verification.Port, verification.VariableUpdates ?? EmptyUpdates));
         verification = verification with { Message = Redact(verification.Message, secrets)! };
@@ -188,9 +190,16 @@ public sealed partial class ProcessEngine
                 var updated = Cleared(process) with { Status = ProcessStatus.Running, UpdatedAt = now };
                 var message = $"Проверка показала, что шаг {label} не выполнен ({verification.Message}). Шаг будет выполнен снова.";
                 var effects = new CommitEffects();
+                var uncertain = await _store.GetUncertainAttemptsAsync(process.Id, token.Id, node.Id);
                 await using (var write = await _store.BeginWriteAsync())
                 {
                     await ReleaseTokenWaitAsync(write, process.Id, token, effects);
+                    // Прошлые попытки, которые могли выполниться, проверены этой же проверкой — тоже не выполнены.
+                    foreach (var settled in uncertain.Where(s => s.Id != step.Id))
+                    {
+                        await write.UpdateStepAsync(Settled(settled, $"Проверено: не выполнено. {verification.Message}", now));
+                    }
+
                     await write.UpdateStepAsync(step with
                     {
                         State = StepState.Failed,
@@ -215,7 +224,7 @@ public sealed partial class ProcessEngine
             default:
             {
                 var message = $"Проверка не дала однозначного ответа: {verification.Message} " +
-                              "Решите вручную: считать шаг выполненным, выполнить его ещё раз или остановить процесс.";
+                              "Решите вручную: считать шаг выполненным или невыполненным, выполнить его ещё раз или остановить процесс.";
                 var updated = process with { StatusMessage = message, UpdatedAt = _time.GetUtcNow() };
                 await using (var write = await _store.BeginWriteAsync())
                 {
@@ -276,10 +285,11 @@ public sealed partial class ProcessEngine
     private async Task<ControlResult> NotExecutedAsync(ProcessRecord process, StepRecord step, TokenRecord token, NodeDefinition node,
         NodeTypeDescriptor descriptor, string resolution, string error)
     {
-        await SettleAsync(process, await _store.GetUncertainAttemptsAsync(process.Id, token.Id, node.Id), resolution);
-        await ApplyResultAsync(process, ExecutionGraph(process), token, node, descriptor, step with { State = StepState.Failed },
+        var uncertain = await _store.GetUncertainAttemptsAsync(process.Id, token.Id, node.Id);
+        await ApplyResultAsync(process, ExecutionGraph(process), token, node, descriptor, step,
             NodeResult.Fail(error, retryable: false), resolution,
-            extraWrites: (write, _, _, effects) => ReleaseTokenWaitAsync(write, process.Id, token, effects));
+            extraWrites: (write, _, _, effects) => ReleaseTokenWaitAsync(write, process.Id, token, effects),
+            settle: new Settlement(uncertain.Where(s => s.Id != step.Id).ToList(), resolution));
         return new ControlResult($"Шаг {Label(node, descriptor)} не выполнен: {error}");
     }
 

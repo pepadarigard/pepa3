@@ -121,14 +121,15 @@ public sealed class JintExpressionEvaluator(ExpressionLimits? limits = null) : I
 
         var engine = CreateEngine(scope);
         var builder = new System.Text.StringBuilder();
-        var afterSubstitution = false;
+        // Предыдущая подстановка была адресом целиком (или его началом): за ней можно подставить путь целиком.
+        var afterLeading = false;
         foreach (var segment in segments)
         {
             switch (segment)
             {
                 case TemplateParser.Literal literal:
                     builder.Append(literal.Text);
-                    afterSubstitution = false;
+                    afterLeading = false;
                     break;
                 case TemplateParser.Expression expression:
                     var value = Stringify(engine, Run(engine, expression.Code));
@@ -137,10 +138,14 @@ public sealed class JintExpressionEvaluator(ExpressionLimits? limits = null) : I
                     {
                         // Адрес целиком или его начало ({{ vars.base }}/orders) — как есть.
                         builder.Append(value);
+                        afterLeading = true;
+                        break;
                     }
-                    else if ((InScheme(builder) || afterSubstitution) && value.Length > 0 && value[0] is '/' or '?' or '#')
+
+                    if ((InScheme(builder) || afterLeading) && builder.ToString().IndexOfAny(['?', '#']) < 0 &&
+                        value.Length > 0 && value[0] is '/' or '?' or '#')
                     {
-                        // Сразу после сайта или другой подстановки — путь целиком ({{ vars.base }}{{ vars.path }}): как есть,
+                        // Сразу после сайта или подстановки адреса целиком — путь целиком ({{ vars.base }}{{ vars.path }}): как есть,
                         // но без «@», «\» и пробелов в пути (части «.» и «..» проверяются у всего адреса ниже).
                         var path = value.Split('?', '#')[0];
                         if (path.IndexOfAny(['@', '\\']) >= 0 || value.Any(char.IsWhiteSpace))
@@ -173,7 +178,7 @@ public sealed class JintExpressionEvaluator(ExpressionLimits? limits = null) : I
                         builder.Append(Uri.EscapeDataString(value));
                     }
 
-                    afterSubstitution = true;
+                    afterLeading = false;
                     break;
             }
         }

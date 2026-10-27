@@ -345,11 +345,19 @@ public sealed partial class ProcessEngine
             result = NodeResult.Fail(readOnlyUnknown.Reason);
         }
 
-        // 5. Неизвестный итог — сверка с внешней системой (это проверка, а не повтор действия).
+        // 5. Неизвестный итог — сверка с внешней системой (это проверка, а не повтор действия). Если в этом посещении блока
+        // уже была попытка, которая могла выполниться, сверяется самая ранняя такая: снимок этой попытки уже видел бы её
+        // результат и ответил бы «не выполнено» — и действие выполнилось бы второй раз.
         string? resolution = null;
+        Settlement? settle = null;
+        var uncertain = token.Attempt > 1 && descriptor is { Effect: NodeEffect.External, SupportsVerification: true } &&
+                        (result is NodeResult.Unknown { AlreadyChecked: false } ||
+                         (result is NodeResult.Failure failed && IsFinalFailure(failed, token, node, descriptor)))
+            ? await _store.GetUncertainAttemptsAsync(process.Id, token.Id, node.Id)
+            : [];
         if (result is NodeResult.Unknown { AlreadyChecked: false } unknown && descriptor.SupportsVerification)
         {
-            var verification = await SafeVerifyAsync(executor, execution);
+            var verification = await SafeVerifyAsync(executor, uncertain.Count > 0 ? VerifyContext(process, node, uncertain[0]) : execution);
             switch (verification.Outcome)
             {
                 case VerificationOutcome.Done:
@@ -359,6 +367,7 @@ public sealed partial class ProcessEngine
                 case VerificationOutcome.NotDone:
                     result = NodeResult.Fail($"{unknown.Reason} Проверка: {verification.Message}");
                     resolution = "Проверено: действие не выполнено.";
+                    settle = uncertain.Count > 0 ? new Settlement(uncertain, $"Проверено: не выполнено. {verification.Message}") : null;
                     break;
                 default:
                     result = new NodeResult.Unknown($"{unknown.Reason} {verification.Message}");
@@ -369,8 +378,7 @@ public sealed partial class ProcessEngine
         // 5б. Окончательная ошибка, а прошлая попытка этого шага могла выполниться: сверить итог той попытки (как «Проверить»).
         // Выполнена — шаг выполнен; не выполнена — ошибка этой попытки окончательная; иначе — «итог неизвестен» (решает
         // пользователь).
-        if (result is NodeResult.Failure final && descriptor.SupportsVerification && IsFinalFailure(final, token, node, descriptor) &&
-            await _store.GetUncertainAttemptsAsync(process.Id, token.Id, node.Id) is { Count: > 0 } uncertain)
+        else if (result is NodeResult.Failure final && IsFinalFailure(final, token, node, descriptor) && uncertain.Count > 0)
         {
             var earlier = await SafeVerifyAsync(executor, VerifyContext(process, node, uncertain[0]));
             if (earlier.Outcome == VerificationOutcome.Done)
@@ -380,12 +388,36 @@ public sealed partial class ProcessEngine
             }
             else if (earlier.Outcome == VerificationOutcome.NotDone)
             {
-                await SettleAsync(process, uncertain, $"Проверено: не выполнено. {earlier.Message}");
+                settle = new Settlement(uncertain, $"Проверено: не выполнено. {earlier.Message}");
             }
         }
 
         // 6. Итог.
-        await ApplyResultAsync(process, graph, token, node, descriptor, step, result, resolution);
+        await ApplyResultAsync(process, graph, token, node, descriptor, step, result, resolution, settle: settle);
+    }
+
+    /// <summary>
+    /// Попытки этого посещения блока, которые могли выполниться, оказались невыполненными (проверка или решение
+    /// пользователя): они отмечаются так в той же записи, что и итог шага, и больше не делают его ошибку «неизвестной».
+    /// </summary>
+    private sealed record Settlement(IReadOnlyList<StepRecord> Steps, string Resolution);
+
+    /// <summary>Попытка, которая могла выполниться, — невыполненная (без отметки «могло выполниться»).</summary>
+    private static StepRecord Settled(StepRecord step, string resolution, DateTimeOffset now)
+    {
+        var output = step.Output?.DeepClone() as JsonObject;
+        if (output?["maybeExecuted"] is not null)
+        {
+            output["maybeExecuted"] = false;
+        }
+
+        return step with
+        {
+            State = step.State == StepState.Unknown ? StepState.Failed : step.State,
+            Output = output,
+            Resolution = resolution,
+            FinishedAt = step.FinishedAt ?? now,
+        };
     }
 
     /// <summary>Ошибка окончательная: повтора по настройкам блока не будет (её поведут в «Ошибку» или к пользователю).</summary>
@@ -404,32 +436,6 @@ public sealed partial class ProcessEngine
         Attempt = step.Attempt,
         Time = _time,
     };
-
-    /// <summary>Попытки, которые могли выполниться, оказались невыполненными (проверка или решение пользователя).</summary>
-    private async Task SettleAsync(ProcessRecord process, IReadOnlyList<StepRecord> steps, string resolution)
-    {
-        var now = _time.GetUtcNow();
-        resolution = Redact(resolution, SecretValues(process, ExecutionGraph(process).Definition))!;
-        await using var write = await _store.BeginWriteAsync();
-        foreach (var step in steps)
-        {
-            var output = step.Output?.DeepClone() as JsonObject;
-            if (output?["maybeExecuted"] is not null)
-            {
-                output["maybeExecuted"] = false;
-            }
-
-            await write.UpdateStepAsync(step with
-            {
-                State = step.State == StepState.Unknown ? StepState.Failed : step.State,
-                Output = output,
-                Resolution = resolution,
-                FinishedAt = step.FinishedAt ?? now,
-            });
-        }
-
-        await write.CommitAsync();
-    }
 
     private async Task CompleteWaitAsync(ProcessRecord process, ScenarioGraph graph, TokenRecord token,
         NodeDefinition node, NodeTypeDescriptor descriptor, long waitingStepId)
@@ -460,11 +466,12 @@ public sealed partial class ProcessEngine
     private async Task<bool> ApplyResultAsync(ProcessRecord process, ScenarioGraph graph, TokenRecord token,
         NodeDefinition node, NodeTypeDescriptor descriptor, StepRecord step, NodeResult result, string? resolution,
         StepState successState = StepState.Succeeded, Func<IStoreWrite, Task<NodeResult?>>? decide = null,
-        Func<IStoreWrite, long, NodeResult, CommitEffects, Task>? extraWrites = null, IReadOnlyList<string>? acquired = null)
+        Func<IStoreWrite, long, NodeResult, CommitEffects, Task>? extraWrites = null, IReadOnlyList<string>? acquired = null,
+        Settlement? settle = null)
     {
         var effects = new CommitEffects();
         var committed = await CommitResultAsync(process, graph, token, node, descriptor, step, result, resolution, successState,
-            decide, extraWrites, effects, acquired);
+            decide, extraWrites, effects, acquired, settle);
         if (committed is null)
         {
             return false;
@@ -479,7 +486,7 @@ public sealed partial class ProcessEngine
     private async Task<ProcessRecord?> CommitResultAsync(ProcessRecord process, ScenarioGraph graph, TokenRecord token,
         NodeDefinition node, NodeTypeDescriptor descriptor, StepRecord step, NodeResult result, string? resolution,
         StepState successState, Func<IStoreWrite, Task<NodeResult?>>? decide, Func<IStoreWrite, long, NodeResult, CommitEffects, Task>? extraWrites,
-        CommitEffects effects, IReadOnlyList<string>? acquired = null)
+        CommitEffects effects, IReadOnlyList<string>? acquired = null, Settlement? settle = null)
     {
         var label = Label(node, descriptor);
 
@@ -554,12 +561,20 @@ public sealed partial class ProcessEngine
         // вычислились, отказ) не значит «действие не выполнено» — иначе процесс ушёл бы по ветке «Ошибка». Это «итог
         // неизвестен»: решает пользователь.
         // Шаг запоминает, какую попытку проверять («Проверить» сверит её итог, а не этой попытки) и какой была ошибка.
+        // Неизвестный итог при такой прошлой попытке — тоже: «Проверить» должна сверить ту попытку. Отмеченные невыполненными
+        // этой же записью (settle) не считаются.
         JsonObject? uncertainOutput = null;
-        if (result is NodeResult.Failure final && IsFinalFailure(final, token, node, descriptor) &&
-            (await _store.GetUncertainAttemptsAsync(process.Id, token.Id, node.Id)).FirstOrDefault(s => s.Id != step.Id) is { } earliest)
+        if (token.Attempt > 1 && descriptor.Effect == NodeEffect.External &&
+            (result is NodeResult.Unknown || (result is NodeResult.Failure candidate && IsFinalFailure(candidate, token, node, descriptor))) &&
+            (await _store.GetUncertainAttemptsAsync(process.Id, token.Id, node.Id))
+            .FirstOrDefault(s => s.Id != step.Id && settle?.Steps.Any(settled => settled.Id == s.Id) != true) is { } earliest)
         {
-            result = new NodeResult.Unknown(final.Error + " Прошлая попытка этого шага могла выполниться — проверьте и решите.");
-            uncertainOutput = new JsonObject { ["uncertainStepId"] = earliest.Id, ["failure"] = Redact(final.Error, secrets) };
+            uncertainOutput = new JsonObject { ["uncertainStepId"] = earliest.Id };
+            if (result is NodeResult.Failure final)
+            {
+                result = new NodeResult.Unknown(final.Error + " Прошлая попытка этого шага могла выполниться — проверьте и решите.");
+                uncertainOutput["failure"] = Redact(final.Error, secrets);
+            }
         }
 
         // Тексты для истории — без значений секретных переменных (и тех, что шаг им присваивает), уже после всех проверок:
@@ -654,6 +669,12 @@ public sealed partial class ProcessEngine
         {
             stepId = finalStep.Id;
             await write.UpdateStepAsync(finalStep);
+        }
+
+        // Прошлые попытки, оказавшиеся невыполненными, — в той же записи, что и итог шага.
+        foreach (var settled in settle?.Steps ?? [])
+        {
+            await write.UpdateStepAsync(Settled(settled, Redact(settle!.Resolution, secrets)!, now));
         }
 
         if (extraWrites is not null)

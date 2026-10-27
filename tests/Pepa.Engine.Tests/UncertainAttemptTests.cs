@@ -137,5 +137,40 @@ public sealed class UncertainAttemptTests
         Assert.Equal(ProcessStatus.NeedsAttention, stopped.Status);
         await h.Engine.CancelAsync(id);
     }
+
+    [Fact]
+    public async Task Unknown_second_attempt_is_verified_against_the_first_one()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        h.World.Plan("order", ActionMode.ThrowAfterEffect, ActionMode.ThrowBeforeEffect);
+        h.World.ForcedVerification["order"] = VerificationOutcome.Inconclusive;
+        var id = await h.RunAsync(Act());
+        await h.WaitForAsync(id, p => p.Attention == AttentionKind.UnknownStep);
+        await h.Engine.ResumeAsync(id, ResumeAction.Retry);
+        await h.WaitForAsync(id, p => p.Attention == AttentionKind.UnknownStep && h.World.Executions("order") == 2);
+
+        // Вторая попытка тоже неизвестна; «Проверить» сверяет первую (её снимок — до всех попыток): выполнено, без третьей.
+        h.World.ForcedVerification.TryRemove("order", out _);
+        await h.Engine.ResumeAsync(id, ResumeAction.Verify);
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Equal(1, h.World.EffectCount("order"));
+        Assert.Equal(2, h.World.Executions("order"));
+    }
+
+    [Fact]
+    public async Task Automatic_check_after_a_second_unknown_uses_the_first_attempt()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        h.World.Plan("order", ActionMode.ThrowAfterEffect, ActionMode.ThrowBeforeEffect);
+        h.World.ForcedVerification["order"] = VerificationOutcome.Inconclusive;
+        var id = await h.RunAsync(Act());
+        await h.WaitForAsync(id, p => p.Attention == AttentionKind.UnknownStep);
+
+        // Теперь проверка честная: вторая попытка неизвестна, движок сам сверяет первую — она выполнилась.
+        h.World.ForcedVerification.TryRemove("order", out _);
+        await h.Engine.ResumeAsync(id, ResumeAction.Retry);
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Equal(1, h.World.EffectCount("order"));
+    }
 }
 
