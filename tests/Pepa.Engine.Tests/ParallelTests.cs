@@ -44,11 +44,11 @@ public sealed class ParallelTests
         var id = await h.RunAsync(ReplyAndTimer());
         await h.WaitForAsync(id, _ => h.World.Executions("act") == 0 && h.Store.GetTokensAsync(id).Result.Count(t => t.State == TokenState.Waiting) == 2);
 
-        // Ответ пришёл, пока вторая ветвь ещё ждёт своё время: процесс не идёт дальше слияния.
+        // Ответ пришёл, пока вторая ветвь ещё ждёт своё время: процесс не идёт дальше слияния. Ветвь дошла до слияния чуть
+        // раньше, чем движок закончил такт и записал «ожидает», — поэтому ждём оба условия вместе.
         await h.Engine.PublishEventAsync(Reply("A-1", "да"));
-        await h.WaitForAsync(id, _ => h.Store.GetTokensAsync(id).Result.Any(t => t.WaitKind == WaitKind.Join));
+        await h.WaitForAsync(id, p => p.Status == ProcessStatus.Waiting && h.Store.GetTokensAsync(id).Result.Any(t => t.WaitKind == WaitKind.Join));
         Assert.Equal(0, h.World.Executions("act"));
-        Assert.Equal(ProcessStatus.Waiting, (await h.ProcessAsync(id)).Status);
 
         var done = await h.WaitForStatusAsync(id, ProcessStatus.Completed, advance: TimeSpan.FromMinutes(1));
         Assert.Equal("Ответ: да; действие: act", done.StatusMessage);
