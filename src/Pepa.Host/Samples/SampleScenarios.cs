@@ -9,7 +9,7 @@ public static class SampleScenarios
     public static IReadOnlyList<ScenarioDefinition> All() => [.. Versioned().Select(s => s.Scenario)];
 
     /// <summary>Текущая версия набора примеров: при обновлении Pepa добавляются только новые.</summary>
-    public const int CurrentVersion = 5;
+    public const int CurrentVersion = 6;
 
     /// <summary>Примеры с номером версии набора, в которой они появились.</summary>
     public static IReadOnlyList<(int Version, ScenarioDefinition Scenario)> Versioned() =>
@@ -19,6 +19,7 @@ public static class SampleScenarios
         (3, BrowserPage()), (3, AdsPowerFlow()),
         (4, TelegramReply()), (4, AdsPowerTelegram()),
         (5, Parallel()),
+        (6, Notepad()),
     ];
 
     private static NodeDefinition N(string id, string type, double x, double y, JsonObject? config = null,
@@ -431,5 +432,39 @@ public static class SampleScenarios
             E("start", "split"), E("split", "wait", "b1"), E("split", "write", "b2"), E("write", "log"), E("log", "join"),
             E("wait", "join", Ports.Event), E("wait", "late", Ports.Timeout), E("join", "done"),
         ],
+    };
+
+    public static ScenarioDefinition Notepad() => new()
+    {
+        Name = "Пример 12. Окна Windows: напечатать в Блокноте",
+        Description = "Запускает Блокнот, дожидается его окна и печатает текст. Работает только в Pepa.exe на Windows. Перед запуском " +
+                      "закройте другие окна Блокнота: если подходит несколько окон, Pepa остановится и спросит, а не напечатает наугад. " +
+                      "Дальше можно добавить «Ввести в окне» или «Прочитать из окна» — поле Блокнота выберите кнопкой «Выбрать элемент в окне». " +
+                      "В Windows на английском замените «Блокнот» на «Notepad» в обоих блоках.",
+        Variables =
+        [
+            new VariableDefinition { Name = "text", Type = VariableType.Text, Default = "Привет от Pepa!", IsInput = true, Description = "Что напечатать" },
+        ],
+        Nodes =
+        [
+            N("start", "start", 0, 100),
+            N("run", "desktop.start", 260, 100, new JsonObject { ["path"] = "notepad", ["window"] = "Блокнот", ["waitSeconds"] = 30 },
+                "Запустить Блокнот"),
+            N("type", "desktop.keys", 540, 100, new JsonObject
+            {
+                ["window"] = "Блокнот", ["process"] = "notepad", ["mode"] = "type", ["text"] = "{{ vars.text }}", ["waitSeconds"] = 10,
+            }, "Напечатать текст"),
+            N("done", "end", 820, 100, new JsonObject
+            {
+                ["outcome"] = "success",
+                ["message"] = "Текст напечатан. Блокнот остаётся открытым — закройте его сами (сохранять не обязательно).",
+            }),
+            N("noWindow", "end", 540, 260, new JsonObject
+            {
+                ["outcome"] = "failure",
+                ["message"] = "Окно Блокнота не появилось за 30 секунд — ничего не напечатано.",
+            }, "Окна нет"),
+        ],
+        Edges = [E("start", "run"), E("run", "type"), E("run", "noWindow", Ports.Timeout), E("type", "done")],
     };
 }

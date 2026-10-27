@@ -145,6 +145,20 @@ public sealed class DesktopApiTests
     }
 
     [Fact]
+    public async Task Notepad_sample_starts_the_program_waits_for_its_window_and_types()
+    {
+        var desktop = new Adapters.Desktop.Tests.FakeDesktop();
+        desktop.OpensWindow["notepad"] = "Безымянный – Блокнот";
+        await using var f = await HostFixture.StartAsync(desktop: desktop);
+        var id = await f.ScenarioIdAsync("Пример 12.");
+        var (_, run) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{id}/run", new { inputs = new { text = "Проверка" } });
+        var done = await f.WaitForProcessAsync(run!["processId"]!.GetValue<string>(), p => HostFixture.Status(p) is "completed" or "needsAttention");
+        Assert.Equal("completed", HostFixture.Status(done["process"]!));
+        Assert.Equal(["notepad"], desktop.Started);
+        Assert.Contains("type Проверка", desktop.Actions);
+    }
+
+    [Fact]
     public async Task Actions_in_windows_are_recorded_into_blocks()
     {
         var desktop = new Adapters.Desktop.Tests.FakeDesktop();
