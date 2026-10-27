@@ -9,7 +9,7 @@ public static class SampleScenarios
     public static IReadOnlyList<ScenarioDefinition> All() => [.. Versioned().Select(s => s.Scenario)];
 
     /// <summary>Текущая версия набора примеров: при обновлении Pepa добавляются только новые.</summary>
-    public const int CurrentVersion = 6;
+    public const int CurrentVersion = 7;
 
     /// <summary>Примеры с номером версии набора, в которой они появились.</summary>
     public static IReadOnlyList<(int Version, ScenarioDefinition Scenario)> Versioned() =>
@@ -20,6 +20,7 @@ public static class SampleScenarios
         (4, TelegramReply()), (4, AdsPowerTelegram()),
         (5, Parallel()),
         (6, Notepad()),
+        (7, ExchangeRate()), (7, AskAndWrite()),
     ];
 
     private static NodeDefinition N(string id, string type, double x, double y, JsonObject? config = null,
@@ -467,4 +468,72 @@ public static class SampleScenarios
         ],
         Edges = [E("start", "run"), E("run", "type"), E("run", "noWindow", Ports.Timeout), E("type", "done")],
     };
+
+    public static ScenarioDefinition ExchangeRate() => new()
+    {
+        Name = "Пример 13. Курс доллара из API",
+        Description = "Получает курсы валют по адресу API (open.er-api.com, без ключа) и записывает курс доллара в рублях в файл. " +
+                      "Нужен интернет. Если сервис не ответит, процесс пойдёт по выходу «Ошибка» и закончится с понятной причиной.",
+        Variables =
+        [
+            new VariableDefinition { Name = "rates", Type = VariableType.Any, Description = "Ответ API" },
+        ],
+        Nodes =
+        [
+            N("start", "start", 0, 100),
+            N("get", "http.get", 260, 100, new JsonObject { ["url"] = "https://open.er-api.com/v6/latest/USD", ["saveTo"] = "rates" },
+                "Получить курсы", new NodeSettings { RetryCount = 2, RetryDelaySeconds = 10 }),
+            N("write", "file.write", 540, 100, new JsonObject
+            {
+                ["path"] = "примеры/курс доллара.txt",
+                ["content"] = "1 USD = {{ vars.rates.rates.RUB }} RUB (обновлено {{ vars.rates.time_last_update_utc }})",
+            }, "Записать курс"),
+            N("done", "end", 820, 100, new JsonObject { ["outcome"] = "success", ["message"] = "1 USD = {{ vars.rates.rates.RUB }} RUB" }),
+            N("failed", "end", 540, 260, new JsonObject { ["outcome"] = "failure", ["message"] = "Курс не получен — смотрите ошибку шага «Получить курсы»." },
+                "Нет ответа"),
+        ],
+        Edges = [E("start", "get"), E("get", "write"), E("get", "failed", Ports.Error), E("write", "done")],
+    };
+
+    public static ScenarioDefinition AskAndWrite() => new()
+    {
+        Name = "Пример 14. Спросить и записать",
+        Description = "Спрашивает, создать ли отчёт, и как его назвать — вопросы появятся на «Главной» (и придут уведомлением, если оно " +
+                      "включено). Без ответа за час процесс закончится сам и ничего не создаст.",
+        Variables =
+        [
+            new VariableDefinition { Name = "create", Type = VariableType.Text, Description = "Создать отчёт?" },
+            new VariableDefinition { Name = "name", Type = VariableType.Text, Description = "Название отчёта" },
+        ],
+        Nodes =
+        [
+            N("start", "start", 0, 100),
+            N("confirm", "user.ask", 260, 100, new JsonObject
+            {
+                ["question"] = "Создать отчёт?", ["options"] = "Создать\nНе нужно",
+                ["timeoutSeconds"] = 3600, ["saveTo"] = "create",
+            }, "Создать отчёт?"),
+            N("check", "condition", 540, 100, new JsonObject { ["expression"] = "vars.create === 'Создать'" }, "Создать?"),
+            N("name", "user.ask", 820, 40, new JsonObject
+            {
+                ["question"] = "Как назвать отчёт?", ["timeoutSeconds"] = 3600, ["saveTo"] = "name",
+            }, "Название"),
+            N("write", "file.write", 1100, 40, new JsonObject
+            {
+                ["path"] = "примеры/отчёты/{{ vars.name }}.txt",
+                ["content"] = "Отчёт «{{ vars.name }}» создан процессом {{ process.id }}.",
+                ["mode"] = "createNew",
+            }, "Записать отчёт"),
+            N("done", "end", 1380, 40, new JsonObject { ["outcome"] = "success", ["message"] = "Отчёт «{{ vars.name }}» создан." }),
+            N("skip", "end", 820, 220, new JsonObject { ["outcome"] = "success", ["message"] = "Отчёт не нужен — ничего не создано." }, "Не нужно"),
+            N("late", "end", 540, 300, new JsonObject { ["outcome"] = "failure", ["message"] = "Ответа не было — ничего не создано." }, "Нет ответа"),
+        ],
+        Edges =
+        [
+            E("start", "confirm"), E("confirm", "check", Ports.Event), E("confirm", "late", Ports.Timeout),
+            E("check", "name", Ports.True), E("check", "skip", Ports.False),
+            E("name", "write", Ports.Event), E("name", "late", Ports.Timeout), E("write", "done"),
+        ],
+    };
 }
+

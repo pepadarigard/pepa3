@@ -84,4 +84,33 @@ public sealed class QuestionApiTests
         var (_, outside) = await AskAsync(f, new { question = "А так?", image = "../pepa.db", saveTo = "answer" });
         Assert.Equal(HttpStatusCode.NotFound, (await f.Client.GetAsync($"/api/questions/{outside["id"]!.GetValue<long>()}/image")).StatusCode);
     }
+
+    [Fact]
+    public async Task Ask_and_write_sample_creates_the_report_after_two_answers()
+    {
+        await using var f = await HostFixture.StartAsync();
+        var scenario = (await f.GetAsync("/api/scenarios")).AsArray()
+            .Single(s => s!["name"]!.GetValue<string>().StartsWith("Пример 14.", StringComparison.Ordinal))!;
+        var (_, run) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{scenario["id"]!.GetValue<string>()}/run", new { });
+        var id = run!["processId"]!.GetValue<string>();
+
+        await f.WaitForProcessAsync(id, p => HostFixture.Status(p) == "waiting");
+        var confirm = (await f.GetAsync($"/api/questions?processId={id}")).AsArray().Single()!;
+        Assert.Equal("Создать отчёт?", confirm["text"]!.GetValue<string>());
+        await f.SendAsync(HttpMethod.Post, $"/api/questions/{confirm["id"]!.GetValue<long>()}/answer", new { option = 0 });
+
+        JsonNode? name = null;
+        for (var i = 0; i < 200 && name is null; i++)
+        {
+            name = (await f.GetAsync($"/api/questions?processId={id}")).AsArray().FirstOrDefault(q => q!["text"]!.GetValue<string>() == "Как назвать отчёт?");
+            await Task.Delay(50);
+        }
+
+        Assert.NotNull(name);
+        Assert.True(name["freeText"]!.GetValue<bool>());
+        await f.SendAsync(HttpMethod.Post, $"/api/questions/{name["id"]!.GetValue<long>()}/answer", new { answer = "Итоги дня" });
+        await f.WaitForProcessAsync(id, p => HostFixture.Status(p) == "completed");
+        Assert.True(File.Exists(Path.Combine(f.Workspace, "примеры", "отчёты", "Итоги дня.txt")));
+    }
 }
+
