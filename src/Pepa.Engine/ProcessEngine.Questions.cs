@@ -141,9 +141,14 @@ public sealed partial class ProcessEngine
             var secrets = SecretsIn(RawSecretValues(question.Process, question.Definition), payload);
             if (question.Secret)
             {
-                // И как введён, и как сохранится (число без пробелов, «да» как true).
+                // И как введён, и как сохранится и покажется числом (без пробелов, с точкой). «Да/нет» как true/false —
+                // нет: скрылись бы все true и false процесса, а выбранная ветвь всё равно показывает ответ.
                 secrets.Add(value);
-                secrets.Add(converted.AsString() ?? converted.ToJsonString());
+                if (converted is JsonValue number && number.GetValueKind() == System.Text.Json.JsonValueKind.Number)
+                {
+                    secrets.Add(number.ToJsonString());
+                    secrets.Add(number.GetValue<double>().ToString("R", System.Globalization.CultureInfo.InvariantCulture));
+                }
             }
 
             process = question.Process;

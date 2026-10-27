@@ -337,10 +337,11 @@ public sealed class HttpNodeTests
         Assert.Contains("ответ не получен", unknown.Reason);
         Assert.False(node.Descriptor.SupportsVerification);
 
-        // С ключом от повтора — повтор, пока он остался по настройкам блока; последняя попытка — снова «итог неизвестен»:
-        // обычная ошибка увела бы процесс по выходу «Ошибка», будто запрос точно не выполнен.
+        // С ключом от повтора — повтор («могло выполниться»), пока он остался по настройкам блока; последняя попытка — снова
+        // «итог неизвестен»: обычная ошибка увела бы процесс по выходу «Ошибка», будто запрос точно не выполнен.
         var safe = Assert.IsType<NodeResult.Failure>(await Run(node, new { url = "https://a.example/orders", body = new { a = 1 }, idempotent = true }, retries: 1));
         Assert.True(safe.Retryable);
+        Assert.True(safe.MaybeExecuted);
         Assert.Contains("Повтор безопасен", safe.Error);
         var last = Assert.IsType<NodeResult.Unknown>(await Run(node, new { url = "https://a.example/orders", body = new { a = 1 }, idempotent = true }, retries: 1, attempt: 2));
         Assert.Contains("Повтор безопасен", last.Reason);
@@ -426,27 +427,6 @@ public sealed class HttpNodeTests
     }
 
     [Fact]
-    public async Task With_a_key_a_later_definitive_failure_is_unknown_because_an_earlier_attempt_may_have_run()
-    {
-        var notSent = new HttpSendNode(Client(new FakeHttp((_, _) =>
-            throw new HttpRequestException(HttpRequestError.ConnectionError, "refused"))));
-        var input = new { url = "https://pay.example/charges", body = new { a = 1 }, idempotent = true };
-        var previous = await notSent.PrepareAsync(Context(input), CancellationToken.None);
-
-        // Вторая и последняя попытка (первая могла выполниться) — «не отправлен» не значит «не выполнен».
-        var unknown = Assert.IsType<NodeResult.Unknown>(await Run(notSent, input, previous, retries: 1, attempt: 2));
-        Assert.Contains("мог", unknown.Reason);
-        // Пока повторы остались — обычная ошибка с повтором (тот же ключ).
-        Assert.IsType<NodeResult.Failure>(await Run(notSent, input, previous, retries: 2, attempt: 2));
-        // Отказ сервера после прошлых попыток — тоже «неизвестно».
-        var rejected = new HttpSendNode(Client(new FakeHttp((_, _) => FakeHttp.Json("{}", HttpStatusCode.BadRequest))));
-        Assert.IsType<NodeResult.Unknown>(await Run(rejected, input, previous, retries: 3, attempt: 2));
-        // Без ключа и с первой попытки — как раньше.
-        Assert.IsType<NodeResult.Failure>(await Run(notSent, new { url = "https://pay.example/charges", body = new { a = 1 } }, attempt: 2));
-        Assert.IsType<NodeResult.Failure>(await Run(rejected, input));
-    }
-
-    [Fact]
     public async Task Cookie_set_during_redirects_is_carried_to_the_next_hop()
     {
         using var server = await LocalServer.StartAsync(request => request.StartsWith("GET /login", StringComparison.Ordinal)
@@ -457,6 +437,21 @@ public sealed class HttpNodeTests
         var ok = Assert.IsType<NodeResult.Success>(await Run(new HttpGetNode(HttpNodes.CreateClient()), new { url = $"{server.Url}/login", saveTo = "x" }));
         Assert.Equal("home", ok.VariableUpdates["x"]!.GetValue<string>());
         Assert.Equal(2, server.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Cookie_for_another_domain_set_during_redirects_is_dropped_and_a_renewed_cookie_replaces_the_old_one()
+    {
+        using var server = await LocalServer.StartAsync(request => request.StartsWith("GET /login", StringComparison.Ordinal)
+            ? "HTTP/1.1 302 Found\r\nLocation: /home\r\nSet-Cookie: wide=W; Domain=example.com; Path=/\r\nSet-Cookie: session=new; Path=/\r\nContent-Length: 0\r\n\r\n"
+            : "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok");
+        await Run(new HttpGetNode(HttpNodes.CreateClient()), new { url = $"{server.Url}/login", headers = new { Cookie = "session=old; theme=dark" }, saveTo = "x" });
+
+        var home = server.Requests[1];
+        Assert.DoesNotContain("wide=W", home);
+        Assert.DoesNotContain("session=old", home);
+        Assert.Contains("session=new", home);
+        Assert.Contains("theme=dark", home);
     }
 }
 

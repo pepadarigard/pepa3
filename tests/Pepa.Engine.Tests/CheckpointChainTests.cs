@@ -72,10 +72,12 @@ public sealed class CheckpointChainTests
             .Chain("start", "send", "end").Build());
 
         await h.WaitForAsync(id, p => p is { Status: ProcessStatus.NeedsAttention, Attention: AttentionKind.UnknownStep });
-        // «Повторить», но подготовка зависает и не успевает — шаг без снимка.
+        // «Повторить», но подготовка зависает и не успевает — шаг без снимка. Первая попытка могла выполниться, поэтому и это
+        // «итог неизвестен», а не «шаг не выполнен».
         node.HangPrepare = true;
         await h.Engine.ResumeAsync(id, ResumeAction.Retry);
-        await h.WaitForAsync(id, p => p is { Status: ProcessStatus.NeedsAttention, Attention: AttentionKind.StepFailed }, advance: TimeSpan.FromSeconds(20));
+        await h.WaitForAsync(id, p => p is { Status: ProcessStatus.NeedsAttention, Attention: AttentionKind.UnknownStep } &&
+                                      p.StatusMessage!.Contains("Прошлая попытка", StringComparison.Ordinal), advance: TimeSpan.FromSeconds(20));
         await h.Engine.ResumeAsync(id, ResumeAction.Retry);
         await h.WaitForStatusAsync(id, ProcessStatus.Completed, advance: TimeSpan.FromSeconds(1));
 

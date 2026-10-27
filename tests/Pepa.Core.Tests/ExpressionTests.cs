@@ -124,22 +124,28 @@ public sealed class ExpressionTests
     [InlineData("https://api.example/items/{{ vars.dots }}", "пути")]
     [InlineData("https://api.example/items/{{ vars.dot }}/delete", "пути")]
     [InlineData("https://{{ vars.tenant }}.example.com/api", "имени сайта")]
-    [InlineData("{{ vars.base }}{{ vars.path }}", "имени сайта")]
+    [InlineData("{{ vars.base }}{{ vars.up }}", "Путь")]
     public void Url_template_refuses_values_that_would_change_the_address(string template, string message)
     {
         var scope = Scope(new JsonObject
         {
-            ["dots"] = "..", ["dot"] = ".", ["tenant"] = "evil.test/#", ["base"] = "https://api.example", ["path"] = "/orders/1",
+            ["dots"] = "..", ["dot"] = ".", ["tenant"] = "evil.test/#", ["base"] = "https://api.example", ["up"] = "/v1/../admin",
         });
         Assert.Contains(message, Assert.Throws<ExpressionException>(() => _evaluator.RenderUrl(template, scope)).Message);
     }
 
     [Fact]
-    public void Url_template_allows_dots_in_parameters_and_a_plain_tenant()
+    public void Url_template_allows_dots_in_parameters_a_plain_tenant_and_a_whole_path()
     {
-        var scope = Scope(new JsonObject { ["dots"] = "..", ["tenant"] = "shop-7" });
+        var scope = Scope(new JsonObject
+        {
+            ["dots"] = "..", ["dot"] = ".", ["tenant"] = "shop-7", ["base"] = "https://api.example", ["path"] = "/v1/orders", ["url"] = "https://a.example/x",
+        });
         Assert.Equal("https://api.example/find?q=..", _evaluator.RenderUrl("https://api.example/find?q={{ vars.dots }}", scope));
         Assert.Equal("https://shop-7.example.com/api", _evaluator.RenderUrl("https://{{ vars.tenant }}.example.com/api", scope));
+        Assert.Equal("https://api.example/v1/orders", _evaluator.RenderUrl("{{ vars.base }}{{ vars.path }}", scope));
+        Assert.Equal(" https://a.example/x", _evaluator.RenderUrl(" {{ vars.url }}", scope));
+        Assert.Equal("https://api.example/v.", _evaluator.RenderUrl("https://api.example/v{{ vars.dot }}", scope));
     }
 }
 

@@ -42,6 +42,7 @@ public sealed class AttentionNotifier : IAsyncDisposable
     /// <summary>О чём уже сообщено: остановка (её состояние) и вопросы (номера — повтор того же текста тоже новый вопрос).</summary>
     private sealed record Known(string? Attention, IReadOnlySet<long> Questions);
     private readonly Dictionary<string, int> _failedReads = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, int> _failedQuestionReads = new(StringComparer.Ordinal);
     private readonly TimeSpan _retryDelay;
     private const int MaxReadRetries = 3;
     private readonly CancellationTokenSource _stop = new();
@@ -130,6 +131,7 @@ public sealed class AttentionNotifier : IAsyncDisposable
                         _logger.LogWarning(ex, "Не удалось прочитать процесс {Id} для уведомления (попытка {Attempt}).", id, failures);
                         if (failures <= MaxReadRetries)
                         {
+                            _background.RemoveAll(t => t.IsCompleted);
                             _background.Add(RetryLaterAsync(id, stop));
                         }
 
@@ -150,15 +152,17 @@ public sealed class AttentionNotifier : IAsyncDisposable
                         try
                         {
                             questions = await _questions(process, stop);
+                            _failedQuestionReads.Remove(id);
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)
                         {
                             questionsRead = false;
-                            var failures = _failedReads.GetValueOrDefault(id) + 1;
-                            _failedReads[id] = failures;
+                            var failures = _failedQuestionReads.GetValueOrDefault(id) + 1;
+                            _failedQuestionReads[id] = failures;
                             _logger.LogWarning(ex, "Не удалось прочитать вопросы процесса {Id} для уведомления (попытка {Attempt}).", id, failures);
                             if (failures <= MaxReadRetries)
                             {
+                                _background.RemoveAll(t => t.IsCompleted);
                                 _background.Add(RetryLaterAsync(id, stop));
                             }
                         }
@@ -320,6 +324,8 @@ public sealed class AttentionNotifier : IAsyncDisposable
     {
         var text = new StringBuilder();
         var asks = notices.All(n => n.Question is not null);
+        var stops = notices.All(n => n.Question is null);
+        var processes = notices.Select(n => n.Process.Id).Distinct(StringComparer.Ordinal).Count();
         if (notices.Count == 1)
         {
             var (p, question) = notices[0];
@@ -340,7 +346,9 @@ public sealed class AttentionNotifier : IAsyncDisposable
         }
         else
         {
-            text.AppendLine(asks ? $"Pepa: процессы задают вопросы — {notices.Count}." : $"Pepa: процессов ждут вашего решения — {notices.Count}.");
+            text.AppendLine(asks ? $"Pepa: вопросов от процессов — {notices.Count}."
+                : stops ? $"Pepa: процессов ждут вашего решения — {processes}."
+                : $"Pepa: процессы ждут вашего решения и ответов (процессов — {processes}).");
             foreach (var (p, question) in notices.Take(MaxListed))
             {
                 text.AppendLine($"• «{p.ScenarioName}» (#{Short(p.Id)}) — " + (question is null ? Title(p.Attention) : "вопрос: " + Cut(question, 120)));
@@ -352,7 +360,9 @@ public sealed class AttentionNotifier : IAsyncDisposable
             }
         }
 
-        text.Append(notices.Any(n => n.Question is not null) ? "Ответить — в Pepa на «Главной»." : "Подробности — в Pepa на странице «Выполнение».");
+        text.Append(asks ? "Ответить — в Pepa на «Главной»."
+            : stops ? "Подробности — в Pepa на странице «Выполнение»."
+            : "Ответить — в Pepa на «Главной», подробности остановок — на странице «Выполнение».");
         return text.ToString();
     }
 

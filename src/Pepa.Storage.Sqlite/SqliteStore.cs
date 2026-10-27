@@ -322,6 +322,24 @@ public sealed partial class SqliteStore : IPepaStore
                 c.Parameters.AddWithValue("$n", nodeId);
             }, ReadStep, cancellationToken)).FirstOrDefault();
 
+    public async Task<bool> HasUncertainAttemptAsync(string processId, string tokenId, string nodeId,
+        CancellationToken cancellationToken = default) =>
+        // Посещение — как у снимков: с последнего шага с попыткой 1.
+        (await QueryAsync("""
+                          SELECT id FROM steps
+                          WHERE process_id = $p AND token_id = $t AND node_id = $n
+                            AND (state = 'Unknown' OR json_extract(output, '$.maybeExecuted') = 1)
+                            AND id >= (SELECT COALESCE(MAX(id), 0) FROM steps
+                                       WHERE process_id = $p AND token_id = $t AND node_id = $n AND attempt = 1)
+                          LIMIT 1;
+                          """,
+            c =>
+            {
+                c.Parameters.AddWithValue("$p", processId);
+                c.Parameters.AddWithValue("$t", tokenId);
+                c.Parameters.AddWithValue("$n", nodeId);
+            }, r => r.GetInt64(0), cancellationToken)).Count > 0;
+
     public Task<IReadOnlyList<StepRecord>> GetOpenStepsAsync(string processId, CancellationToken cancellationToken = default) =>
         QueryAsync("SELECT * FROM steps WHERE process_id = $p AND state IN ('Planned', 'Running', 'Waiting') ORDER BY id;",
             c => c.Parameters.AddWithValue("$p", processId), ReadStep, cancellationToken);

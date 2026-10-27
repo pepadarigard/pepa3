@@ -121,9 +121,9 @@ public sealed class JintExpressionEvaluator(ExpressionLimits? limits = null) : I
 
         var engine = CreateEngine(scope);
         var builder = new System.Text.StringBuilder();
-        foreach (var segment in segments)
+        for (var index = 0; index < segments.Count; index++)
         {
-            switch (segment)
+            switch (segments[index])
             {
                 case TemplateParser.Literal literal:
                     builder.Append(literal.Text);
@@ -131,9 +131,22 @@ public sealed class JintExpressionEvaluator(ExpressionLimits? limits = null) : I
                 case TemplateParser.Expression expression:
                     var value = Stringify(engine, Run(engine, expression.Code));
                     var shown = $"«{{{{ {expression.Code} }}}}»";
-                    if (builder.Length == 0)
+                    var next = index + 1 < segments.Count ? segments[index + 1] : null;
+                    if (string.IsNullOrWhiteSpace(builder.ToString()))
                     {
                         // Адрес целиком или его начало ({{ vars.base }}/orders) — как есть.
+                        builder.Append(value);
+                    }
+                    else if (InScheme(builder) && value.Length > 0 && value[0] is '/' or '?' or '#')
+                    {
+                        // Сайт уже есть, а подстановка — путь целиком ({{ vars.base }}{{ vars.path }}): как есть, но без
+                        // «.» и «..» (они меняют путь) и без «@», «\», пробелов.
+                        var path = value.Split('?', '#')[0];
+                        if (path.Split('/').Any(part => part is "." or "..") || value.IndexOfAny(['@', '\\']) >= 0 || value.Any(char.IsWhiteSpace))
+                        {
+                            throw new ExpressionException($"Путь {shown} — «{value}» — содержит «.», «..», «@», «\\» или пробел: адрес стал бы другим.");
+                        }
+
                         builder.Append(value);
                     }
                     else if (InScheme(builder))
@@ -154,9 +167,10 @@ public sealed class JintExpressionEvaluator(ExpressionLimits? limits = null) : I
                             $"Подстановка {shown} в адресе получилась пустой — адрес стал бы другим " +
                             "(например, без номера заказа). Проверьте переменные.");
                     }
-                    else if (value.All(c => c == '.') && !InQuery(builder))
+                    else if (value is "." or ".." && !InQuery(builder) && builder[^1] == '/' &&
+                             (next is not TemplateParser.Literal { Text: var after } ? next is null : after.Length == 0 || after[0] is '/' or '?' or '#'))
                     {
-                        // «.» и «..» в пути — переход к другой папке сайта (…/items/.. — это …/), кодирование тут не спасает.
+                        // «.» и «..» целой частью пути — переход к другой папке сайта (…/items/.. — это …/): кодирование не спасает.
                         throw new ExpressionException($"Подстановка {shown} в пути адреса — «{value}»: адрес стал бы другим. Проверьте переменные.");
                     }
                     else

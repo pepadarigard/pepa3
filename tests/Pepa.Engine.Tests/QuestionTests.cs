@@ -267,6 +267,8 @@ public sealed class QuestionTests
         Assert.Contains("нулём", zero.Message);
         await Assert.ThrowsAsync<EngineOperationException>(() => h.Engine.AnswerQuestionAsync(question.Subscription.Id, "NaN"));
         await Assert.ThrowsAsync<EngineOperationException>(() => h.Engine.AnswerQuestionAsync(question.Subscription.Id, "1e999"));
+        var account = await Assert.ThrowsAsync<EngineOperationException>(() => h.Engine.AnswerQuestionAsync(question.Subscription.Id, "40817810099910004312"));
+        Assert.Contains("слишком длинное", account.Message);
         await h.Engine.AnswerQuestionAsync(question.Subscription.Id, "48 213");
         var done = await h.WaitForStatusAsync(id, ProcessStatus.Completed);
 
@@ -291,6 +293,23 @@ public sealed class QuestionTests
             .Chain("start", "ask").Edge("ask", "end", Ports.Event).Build());
         var stopped = await h.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
         Assert.Contains("Вариант «Оплатить» не подходит", stopped.StatusMessage);
+    }
+
+    [Fact]
+    public async Task Secret_yes_no_answer_does_not_hide_every_true_of_the_process()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var id = await h.RunAsync(new ScenarioBuilder("Да-нет")
+            .Variable("ok", VariableType.Boolean)
+            .Node("start", "start")
+            .Node("ask", "user.ask", new { question = "Оплачено?", options = "да\nнет", secret = true, saveTo = "ok" })
+            .Node("end", "end", new { message = "флаги {{ JSON.stringify({ paid: true, ok: vars.ok }) }}" })
+            .Chain("start", "ask").Edge("ask", "end", Ports.Event).Build());
+        var question = await WaitQuestionAsync(h, id);
+        await h.Engine.AnswerQuestionAsync(question.Subscription.Id, null, option: 0);
+        var done = await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Equal("флаги {\"paid\":true,\"ok\":true}", done.StatusMessage);
+        Assert.DoesNotContain("true", done.Secrets?.All ?? []);
     }
 
     private static async Task<EventRecord> WaitEventAsync(EngineHarness h, long eventId, EventState state)

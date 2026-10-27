@@ -74,7 +74,7 @@ public sealed class HttpGetNode(HttpClient client) : INodeExecutor
 
                 if (response.Headers.TryGetValues("Set-Cookie", out var setCookies))
                 {
-                    foreach (var header in setCookies)
+                    foreach (var header in setCookies.Where(h => HostOnly(h, request.RequestUri!)))
                     {
                         try
                         {
@@ -126,10 +126,15 @@ public sealed class HttpGetNode(HttpClient client) : INodeExecutor
                     }
                 }
 
-                // Свои куки — тому же сайту, полученные по дороге — по правилам самих кук (сайт и путь).
+                // Свои куки — тому же сайту (кроме тех, что сайт по дороге заменил), полученные по дороге — по правилам самих
+                // кук (сайт и путь).
+                var renewed = cookies.GetCookies(next).Select(c => c.Name).ToHashSet(StringComparer.Ordinal);
                 var cookie = string.Join("; ", new[]
                 {
-                    SameOrigin(origin, next) && first.Headers.TryGetValues("Cookie", out var own) ? string.Join("; ", own) : "",
+                    SameOrigin(origin, next) && first.Headers.TryGetValues("Cookie", out var own)
+                        ? string.Join("; ", own.SelectMany(v => v.Split(';')).Select(p => p.Trim())
+                            .Where(p => p.Length > 0 && !renewed.Contains(p.Split('=')[0].Trim())))
+                        : "",
                     cookies.GetCookieHeader(next),
                 }.Where(c => c.Length > 0));
                 if (cookie.Length > 0)
@@ -173,6 +178,25 @@ public sealed class HttpGetNode(HttpClient client) : INodeExecutor
                 request.Dispose();
             }
         }
+    }
+
+    /// <summary>
+    /// Кука только для сайта, который её поставил: «Domain=» другого (в том числе общего co.uk или github.io) не
+    /// принимается — у Pepa нет списка общих доменов, как у браузера.
+    /// </summary>
+    private static bool HostOnly(string header, Uri uri)
+    {
+        foreach (var part in header.Split(';').Skip(1))
+        {
+            var pair = part.Split('=', 2);
+            if (pair[0].Trim().Equals("domain", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(pair.Length > 1 ? pair[1].Trim().TrimStart('.') : "", uri.Host, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool IsRedirect(HttpStatusCode status) => status is HttpStatusCode.MovedPermanently or HttpStatusCode.Found or
@@ -268,31 +292,7 @@ public sealed class HttpSendNode(HttpClient client) : INodeExecutor
         return ValueTask.FromResult<JsonObject?>(new JsonObject { ["key"] = key });
     }
 
-    /// <summary>
-    /// С ключом от повтора попытки этого шага могли выполниться (ответ потерялся, а повтор безопасен). Поэтому окончательная
-    /// ошибка не первой попытки — «не отправлен», «не сейчас», отказ сервера — не значит «запрос не выполнен»: это «итог
-    /// неизвестен», а не выход «Ошибка» (сверить с сервером Pepa не может).
-    /// </summary>
     public async ValueTask<NodeResult> ExecuteAsync(NodeExecutionContext context, CancellationToken cancellationToken)
-    {
-        var earlier = context.GetBoolean("idempotent") && context.Attempt > 1;
-        NodeResult result;
-        try
-        {
-            result = await SendAsync(context, cancellationToken);
-        }
-        catch (NodeInputException ex) when (earlier)
-        {
-            result = NodeResult.Fail(ex.Message, retryable: false);
-        }
-
-        return earlier && result is NodeResult.Failure failure && (!failure.Retryable || context.Attempt > context.Node.Settings.RetryCount)
-            ? new NodeResult.Unknown(failure.Error + " Раньше в этом шаге запрос уже уходил с тем же ключом от повтора и мог " +
-                                     "выполниться — проверьте на сайте и решите.")
-            : result;
-    }
-
-    private async Task<NodeResult> SendAsync(NodeExecutionContext context, CancellationToken cancellationToken)
     {
         if (!StatusSet.TryParse(context.GetString("accept"), out var accept, out var problem))
         {
@@ -381,10 +381,11 @@ public sealed class HttpSendNode(HttpClient client) : INodeExecutor
         }
 
         // Неизвестный итог: без ключа от повтора — решает пользователь. С ключом повтор безопасен (сервер не выполнит
-        // запрос второй раз) — ошибка с повтором, пока по настройкам блока остались повторы. Последняя попытка — снова
-        // «итог неизвестен»: обычная ошибка увела бы процесс по выходу «Ошибка», будто запрос точно не выполнен.
+        // запрос второй раз) — ошибка с повтором «могло выполниться», пока по настройкам блока остались повторы: по этой
+        // отметке движок и окончательную ошибку следующей попытки («не отправлен», отказ) сочтёт «итогом неизвестен», а не
+        // поведёт по выходу «Ошибка». Последняя попытка — сразу «итог неизвестен».
         NodeResult Unknown(string reason) => idempotent && context.Attempt <= context.Node.Settings.RetryCount
-            ? NodeResult.Fail(reason + " Повтор безопасен: запрос уйдёт с тем же ключом от повтора.")
+            ? new NodeResult.Failure(reason + " Повтор безопасен: запрос уйдёт с тем же ключом от повтора.") { MaybeExecuted = true }
             : new NodeResult.Unknown(reason + (idempotent
                 ? " Повтор безопасен (тот же ключ от повтора) — повторите или проверьте на сайте."
                 : " Проверьте на сайте и решите: повторить или считать выполненным."));

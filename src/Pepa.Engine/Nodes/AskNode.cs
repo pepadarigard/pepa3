@@ -91,7 +91,8 @@ public sealed class AskUserNode : INodeExecutor
                                          "сделайте её текстом или «любой».");
         }
 
-        foreach (var option in context.GetBoolean("allowText") ? [] : options)
+        // И когда можно ответить своим текстом: варианты показываются кнопками, и каждая должна подходить.
+        foreach (var option in options)
         {
             if (!TryConvert(option, type, out _, out var problem))
             {
@@ -136,6 +137,14 @@ public sealed class AskUserNode : INodeExecutor
                 if (!double.TryParse(normalized, NumberStyles.Float, CultureInfo.InvariantCulture, out var number) || !double.IsFinite(number))
                 {
                     problem = "Ответ должен быть числом.";
+                    return false;
+                }
+
+                // Больше 15 значащих цифр число хранит неточно (номер счёта стал бы другим).
+                var mantissa = digits.Split('e', 'E')[0].Replace(".", "", StringComparison.Ordinal).Trim('0');
+                if (mantissa.Length > 15)
+                {
+                    problem = "Ответ — слишком длинное число (номер счёта или карты?): числом он сохранился бы неточно — сохраняйте его в переменную-текст.";
                     return false;
                 }
 

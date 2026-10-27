@@ -140,4 +140,32 @@ public sealed class HttpScenarioTests
         Assert.DoesNotContain("tok-SECRET-77", shown);
         Assert.DoesNotContain("SECRET", string.Join("\n", (await h.Store.GetJournalAsync(id)).Select(j => j.Message)));
     }
+
+    [Fact]
+    public async Task With_a_key_a_definitive_failure_after_a_lost_answer_is_unknown_but_two_refused_connections_are_an_error()
+    {
+        var calls = 0;
+        var fake = new FakeHttp((_, _) => Interlocked.Increment(ref calls) == 1
+            ? throw new HttpRequestException(HttpRequestError.ResponseEnded, "The response ended prematurely.")
+            : throw new HttpRequestException(HttpRequestError.ConnectionError, "refused"));
+        await using var h = await CreateAsync(fake);
+        ScenarioDefinition Pay(string name) => new ScenarioBuilder(name)
+            .Node("start", "start")
+            .Node("pay", "http.send", new { url = "https://pay.example/charges", body = "({ amount: 100 })", idempotent = true },
+                new NodeSettings { RetryCount = 1, RetryDelaySeconds = 0 })
+            .Node("end", "end")
+            .Node("failed", "end", new { outcome = "failure", message = "ветка «Ошибка»" })
+            .Chain("start", "pay", "end").Edge("pay", "failed", Ports.Error).Build();
+
+        // Ответ потерялся (могло выполниться), затем «не отправлен» — это не «не выполнено».
+        var lost = await h.RunAsync(Pay("Потерян ответ"));
+        var stopped = await h.WaitForStatusAsync(lost, ProcessStatus.NeedsAttention);
+        Assert.Contains("Прошлая попытка", stopped.StatusMessage);
+
+        // Оба раза соединение не установилось — запрос точно не уходил: ветка «Ошибка».
+        calls = 10;
+        var refused = await h.RunAsync(Pay("Нет связи"));
+        Assert.Equal("ветка «Ошибка»", (await h.WaitForAsync(refused, p => p.IsTerminal)).StatusMessage);
+    }
 }
+

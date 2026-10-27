@@ -300,4 +300,33 @@ public sealed class AttentionNotifierTests
         notifier.OnProcessChanged(asking.Id);
         await Eventually(() => telegram.Messages.Count == 3);
     }
+
+    [Fact]
+    public async Task Failing_question_lookup_is_retried_a_few_times_not_forever()
+    {
+        var calls = 0;
+        var process = Process("q", ProcessStatus.Waiting);
+        await using var notifier = new AttentionNotifier((_, _) => Task.FromResult<ProcessRecord?>(process), new SavedMessages(), () => true,
+            null, NullLogger.Instance, TimeSpan.FromMilliseconds(10), retryDelay: TimeSpan.FromMilliseconds(20),
+            questions: (_, _) =>
+            {
+                Interlocked.Increment(ref calls);
+                throw new InvalidOperationException("база занята");
+            });
+        notifier.Start([], recovery: null);
+        notifier.OnProcessChanged(process.Id);
+        await Task.Delay(800);
+        Assert.InRange(calls, 2, 4);
+    }
+
+    [Fact]
+    public void Message_about_a_stop_and_a_question_of_one_process_counts_processes_and_says_where_to_look()
+    {
+        var p = Process("a", ProcessStatus.NeedsAttention);
+        var text = AttentionNotifier.Message([new AttentionNotifier.Notice(p, null), new AttentionNotifier.Notice(p, "Код из SMS?")]);
+        Assert.Contains("процессов — 1", text);
+        Assert.Contains("«Главной»", text);
+        Assert.Contains("«Выполнение»", text);
+    }
 }
+

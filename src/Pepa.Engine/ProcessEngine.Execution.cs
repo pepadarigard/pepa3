@@ -488,6 +488,20 @@ public sealed partial class ProcessEngine
                 retryable: false);
         }
 
+        // Прошлая попытка этого шага могла выполниться (итог был неизвестен — пользователь выбрал «Повторить», — или блок
+        // сказал «могло выполниться, повтор безопасен»): окончательная ошибка этой попытки (не отправлено, параметры не
+        // вычислились, отказ) не значит «действие не выполнено» — иначе процесс ушёл бы по ветке «Ошибка». Это «итог
+        // неизвестен»: решает пользователь.
+        if (result is NodeResult.Failure final && token.Attempt > 1 && descriptor.Effect == NodeEffect.External &&
+            (!final.Retryable || token.Attempt >= Math.Max(0, node.Settings.RetryCount) + 1) &&
+            await _store.HasUncertainAttemptAsync(process.Id, token.Id, node.Id))
+        {
+            result = new NodeResult.Unknown(final.Error + " Прошлая попытка этого шага могла выполниться — проверьте и решите.")
+            {
+                AlreadyChecked = true,
+            };
+        }
+
         // Тексты для истории — без значений секретных переменных (и тех, что шаг им присваивает), уже после всех проверок:
         // их сообщения тоже могут содержать значение. Параметры шага (Input) остаются настоящими: по ним проверяется
         // результат после перезапуска; при показе их скрывает SecretMasker.
@@ -549,7 +563,11 @@ public sealed partial class ProcessEngine
                 finalStep = finalStep with { State = successState, Port = Ports.Out };
                 break;
             case NodeResult.Failure failure:
-                finalStep = finalStep with { State = StepState.Failed, Error = failure.Error };
+                finalStep = finalStep with
+                {
+                    State = StepState.Failed, Error = failure.Error,
+                    Output = failure.MaybeExecuted ? new JsonObject { ["maybeExecuted"] = true } : finalStep.Output,
+                };
                 break;
             case NodeResult.Unknown unknown:
                 finalStep = finalStep with { State = StepState.Unknown, Error = unknown.Reason };

@@ -119,7 +119,15 @@ public abstract record NodeResult
     public sealed record RunAgain(string? Message) : NodeResult;
 
     /// <summary>Действие подтверждено НЕ выполненным. Повтор безопасен.</summary>
-    public sealed record Failure(string Error, bool Retryable = true) : NodeResult;
+    public sealed record Failure(string Error, bool Retryable = true) : NodeResult
+    {
+        /// <summary>
+        /// Действие могло выполниться, но повтор безопасен (например, запрос с ключом от повтора: сервер не выполнит его
+        /// второй раз). Повтор — по настройкам блока, а окончательная ошибка этого посещения блока станет «итогом
+        /// неизвестен»: это действие могло выполниться.
+        /// </summary>
+        public bool MaybeExecuted { get; init; }
+    }
 
     /// <summary>Неизвестно, выполнилось ли действие. Автоматически не повторяется.</summary>
     public sealed record Unknown(string Reason) : NodeResult
