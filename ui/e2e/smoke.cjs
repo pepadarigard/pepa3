@@ -128,6 +128,14 @@ async function main() {
     await page.locator(".badge", { hasText: "Завершён" }).first().waitFor({ timeout: 15000 });
     await page.getByText("В файле: Привет, Тест!").waitFor();
     await page.screenshot({ path: path.join(shots, "02-process-completed.png") });
+    // Отчёт о процессе: в буфер обмена, а если браузер не дал — в окне, чтобы скопировать вручную.
+    await page.getByRole("button", { name: "Скопировать отчёт" }).click();
+    await page.getByText("Отчёт скопирован").or(page.getByRole("dialog").getByText("Скопировать автоматически не вышло")).first().waitFor();
+    if (await page.getByRole("dialog").count()) {
+      const reportText = await page.getByRole("dialog").locator("textarea").inputValue();
+      if (!reportText.includes("Отчёт о процессе Pepa") || !reportText.includes("Пример 1")) throw new Error(`Отчёт неполный: ${reportText.slice(0, 200)}`);
+      await page.getByRole("dialog").getByRole("button", { name: "Закрыть" }).click();
+    }
     const hello = fs.readFileSync(path.join(workspace, "примеры", "привет.txt"), "utf8");
     if (!hello.startsWith("Привет, Тест!")) throw new Error(`Неожиданное содержимое файла: ${hello}`);
 

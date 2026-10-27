@@ -1,14 +1,16 @@
 import { useMemo, useState } from "react";
 import { ReactFlow } from "@xyflow/react";
-import { AlertTriangle, ArrowLeft, BellRing, CircleAlert, Info, ListChecks, Lock, Pencil, RotateCw, ScrollText, Workflow, X } from "lucide-react";
-import { useDescriptors, useProcess } from "../api/hooks";
+import { AlertTriangle, ArrowLeft, BellRing, CircleAlert, ClipboardCopy, Info, ListChecks, Lock, Pencil, RotateCw, ScrollText, Workflow, X } from "lucide-react";
+import { useDescriptors, useInfo, useProcess } from "../api/hooks";
 import type { NodeTypeDescriptor, ProcessDetails, ScenarioDefinition, Step, Wait } from "../api/types";
 import { processIcons, ProcessActions, ProcessStatusBadge, ProcessTable, StepStateBadge } from "../components/process";
 import { useRunScenario } from "../components/RunDialog";
+import { Dialog, useFeedback } from "../components/feedback";
 import { Badge, Button, Card, Empty, ErrorState, Loading } from "../components/ui";
 import { ru } from "../i18n/ru";
 import { durationBetween, formatDateTime, formatMoment, preview } from "../lib/format";
 import { toFlowEdges, toFlowNodes, type PepaEdge } from "../lib/graph";
+import { processReport } from "../lib/report";
 import { canvasView, isGroupNodeId, readGroups, type CanvasNode } from "../lib/groups";
 import { attentionAdvice, explainProcess, isActive, processTone, type Tone } from "../lib/status";
 import { navigate } from "../router";
@@ -41,6 +43,9 @@ export function ProcessPage({ id }: { id: string }) {
   const runner = useRunScenario();
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [selectedStep, setSelectedStep] = useState<number | null>(null);
+  const [report, setReport] = useState<string | null>(null);
+  const info = useInfo();
+  const feedback = useFeedback();
 
   if (details.isLoading) return <div className="page"><Loading /></div>;
   if (details.error) return <div className="page"><ErrorState error={details.error} onRetry={() => details.refetch()} /></div>;
@@ -73,6 +78,16 @@ export function ProcessPage({ id }: { id: string }) {
           </p>
         </div>
         <div className="row">
+          <Button icon={ClipboardCopy} title="Ход процесса, ошибки и журнал — без значений переменных и параметров шагов"
+            onClick={() => {
+              const text = processReport(data, info.data?.version ?? null);
+              navigator.clipboard.writeText(text).then(
+                () => feedback.toast("Отчёт скопирован — его можно вставить в сообщение.", "success"),
+                () => setReport(text),
+              );
+            }}>
+            Скопировать отчёт
+          </Button>
           <Button icon={Pencil} onClick={() => navigate({ page: "editor", id: p.scenarioId })}>Сценарий</Button>
           {!isActive(p.status) && <Button icon={RotateCw} onClick={() => runner.run(p.scenarioId)}>Запустить снова</Button>}
         </div>
@@ -167,6 +182,13 @@ export function ProcessPage({ id }: { id: string }) {
         </div>
       </div>
       {runner.element}
+      {report !== null && (
+        <Dialog title="Отчёт о процессе" width={720} onClose={() => setReport(null)}
+          footer={<Button onClick={() => setReport(null)}>Закрыть</Button>}>
+          <p className="small muted">Скопировать автоматически не вышло — выделите текст (Ctrl+A) и скопируйте (Ctrl+C).</p>
+          <textarea className="input mono" readOnly rows={18} value={report} autoFocus onFocus={(e) => e.currentTarget.select()} />
+        </Dialog>
+      )}
     </div>
   );
 }
