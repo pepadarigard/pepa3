@@ -28,7 +28,7 @@ public sealed class HookStore(IPepaStore inner) : IPepaStore
     public Task<IReadOnlyList<StepRecord>> GetStepsAsync(string p, CancellationToken c = default) => inner.GetStepsAsync(p, c);
     public Task<StepRecord?> GetStepAsync(long s, CancellationToken c = default) => inner.GetStepAsync(s, c);
     public Task<StepRecord?> GetLastCheckpointStepAsync(string p, string t, string n, CancellationToken c = default) => inner.GetLastCheckpointStepAsync(p, t, n, c);
-    public Task<bool> HasUncertainAttemptAsync(string p, string t, string n, CancellationToken c = default) => inner.HasUncertainAttemptAsync(p, t, n, c);
+    public Task<IReadOnlyList<StepRecord>> GetUncertainAttemptsAsync(string p, string t, string n, CancellationToken c = default) => inner.GetUncertainAttemptsAsync(p, t, n, c);
     public Task<IReadOnlyList<StepRecord>> GetOpenStepsAsync(string p, CancellationToken c = default) => inner.GetOpenStepsAsync(p, c);
     public Task<IReadOnlyList<JournalEntry>> GetJournalAsync(string p, CancellationToken c = default) => inner.GetJournalAsync(p, c);
     public Task<IReadOnlyList<string>> GetRunnableProcessIdsAsync(DateTimeOffset n, CancellationToken c = default) => inner.GetRunnableProcessIdsAsync(n, c);

@@ -74,11 +74,11 @@ public sealed class HttpGetNode(HttpClient client) : INodeExecutor
 
                 if (response.Headers.TryGetValues("Set-Cookie", out var setCookies))
                 {
-                    foreach (var header in setCookies.Where(h => HostOnly(h, request.RequestUri!)))
+                    foreach (var header in setCookies)
                     {
                         try
                         {
-                            cookies.SetCookies(request.RequestUri!, header);
+                            cookies.SetCookies(request.RequestUri!, HostOnly(header));
                         }
                         catch (System.Net.CookieException)
                         {
@@ -181,23 +181,12 @@ public sealed class HttpGetNode(HttpClient client) : INodeExecutor
     }
 
     /// <summary>
-    /// Кука только для сайта, который её поставил: «Domain=» другого (в том числе общего co.uk или github.io) не
-    /// принимается — у Pepa нет списка общих доменов, как у браузера.
+    /// Кука — только для сайта, который её поставил: «Domain=» убирается (у Pepa нет списка общих доменов вроде co.uk или
+    /// github.io, как у браузера). Кука www.example.com с «Domain=example.com» остаётся куке www.example.com.
     /// </summary>
-    private static bool HostOnly(string header, Uri uri)
-    {
-        foreach (var part in header.Split(';').Skip(1))
-        {
-            var pair = part.Split('=', 2);
-            if (pair[0].Trim().Equals("domain", StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(pair.Length > 1 ? pair[1].Trim().TrimStart('.') : "", uri.Host, StringComparison.OrdinalIgnoreCase))
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
+    private static string HostOnly(string header) =>
+        string.Join(";", header.Split(';').Where((part, index) =>
+            index == 0 || !part.Split('=', 2)[0].Trim().Equals("domain", StringComparison.OrdinalIgnoreCase)));
 
     private static bool IsRedirect(HttpStatusCode status) => status is HttpStatusCode.MovedPermanently or HttpStatusCode.Found or
         HttpStatusCode.SeeOther or HttpStatusCode.TemporaryRedirect or HttpStatusCode.PermanentRedirect;

@@ -30,8 +30,8 @@ public sealed class FaultInjectingStore(IPepaStore inner) : IPepaStore
     public Task<StepRecord?> GetLastCheckpointStepAsync(string processId, string tokenId, string nodeId, CancellationToken cancellationToken = default) =>
         inner.GetLastCheckpointStepAsync(processId, tokenId, nodeId, cancellationToken);
 
-    public Task<bool> HasUncertainAttemptAsync(string processId, string tokenId, string nodeId, CancellationToken cancellationToken = default) =>
-        inner.HasUncertainAttemptAsync(processId, tokenId, nodeId, cancellationToken);
+    public Task<IReadOnlyList<StepRecord>> GetUncertainAttemptsAsync(string processId, string tokenId, string nodeId,
+        CancellationToken cancellationToken = default) => inner.GetUncertainAttemptsAsync(processId, tokenId, nodeId, cancellationToken);
     public Task<IReadOnlyList<StepRecord>> GetOpenStepsAsync(string processId, CancellationToken cancellationToken = default) => inner.GetOpenStepsAsync(processId, cancellationToken);
     public Task<IReadOnlyList<JournalEntry>> GetJournalAsync(string processId, CancellationToken cancellationToken = default) => inner.GetJournalAsync(processId, cancellationToken);
     public Task<IReadOnlyList<string>> GetRunnableProcessIdsAsync(DateTimeOffset now, CancellationToken cancellationToken = default) => inner.GetRunnableProcessIdsAsync(now, cancellationToken);

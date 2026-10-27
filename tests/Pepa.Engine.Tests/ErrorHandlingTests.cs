@@ -106,7 +106,7 @@ public sealed class ErrorHandlingTests
         Assert.Equal(AttentionKind.UnknownStep, process.Attention);
         Assert.Equal(1, h.World.Executions("a"));
         Assert.Equal(0, h.World.Executions("b"));
-        Assert.Equal([ProcessAction.Verify, ProcessAction.Retry, ProcessAction.MarkSucceeded, ProcessAction.Cancel],
+        Assert.Equal([ProcessAction.Verify, ProcessAction.Retry, ProcessAction.MarkSucceeded, ProcessAction.MarkFailed, ProcessAction.Cancel],
             h.Engine.GetAllowedActions(process, await h.Store.GetTokensAsync(id)));
     }
 

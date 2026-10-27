@@ -440,15 +440,16 @@ public sealed class HttpNodeTests
     }
 
     [Fact]
-    public async Task Cookie_for_another_domain_set_during_redirects_is_dropped_and_a_renewed_cookie_replaces_the_old_one()
+    public async Task Cookie_with_a_domain_stays_with_its_site_and_a_renewed_cookie_replaces_the_old_one()
     {
         using var server = await LocalServer.StartAsync(request => request.StartsWith("GET /login", StringComparison.Ordinal)
             ? "HTTP/1.1 302 Found\r\nLocation: /home\r\nSet-Cookie: wide=W; Domain=example.com; Path=/\r\nSet-Cookie: session=new; Path=/\r\nContent-Length: 0\r\n\r\n"
             : "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok");
         await Run(new HttpGetNode(HttpNodes.CreateClient()), new { url = $"{server.Url}/login", headers = new { Cookie = "session=old; theme=dark" }, saveTo = "x" });
 
+        // Кука с «Domain=» — только тому сайту, что её поставил (здесь — тому же).
         var home = server.Requests[1];
-        Assert.DoesNotContain("wide=W", home);
+        Assert.Contains("wide=W", home);
         Assert.DoesNotContain("session=old", home);
         Assert.Contains("session=new", home);
         Assert.Contains("theme=dark", home);

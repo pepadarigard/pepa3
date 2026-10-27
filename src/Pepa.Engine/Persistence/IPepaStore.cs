@@ -28,10 +28,11 @@ public interface IPepaStore
     Task<StepRecord?> GetLastCheckpointStepAsync(string processId, string tokenId, string nodeId, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Была ли в этом посещении блока попытка, которая могла выполниться: с неизвестным итогом или с ошибкой «могло
+    /// Попытки этого посещения блока, которые могли выполниться (по порядку): с неизвестным итогом или с ошибкой «могло
     /// выполниться, но повтор безопасен» (<see cref="Core.Nodes.NodeResult.Failure.MaybeExecuted"/>).
     /// </summary>
-    Task<bool> HasUncertainAttemptAsync(string processId, string tokenId, string nodeId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<StepRecord>> GetUncertainAttemptsAsync(string processId, string tokenId, string nodeId,
+        CancellationToken cancellationToken = default);
 
     /// <summary>Незавершённые шаги: «запланирован», «выполняется», «ожидает».</summary>
     Task<IReadOnlyList<StepRecord>> GetOpenStepsAsync(string processId, CancellationToken cancellationToken = default);

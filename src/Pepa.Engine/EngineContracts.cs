@@ -55,6 +55,9 @@ public enum ResumeAction
     /// <summary>Считать шаг с неизвестным результатом выполненным и идти дальше.</summary>
     MarkSucceeded,
 
+    /// <summary>Считать шаг с неизвестным результатом невыполненным: ветка «Ошибка» или остановка с ошибкой.</summary>
+    MarkFailed,
+
     /// <summary>Пропустить шаг с ошибкой и идти дальше.</summary>
     Skip,
 
@@ -73,6 +76,7 @@ public enum ProcessAction
     MarkSucceeded,
     Skip,
     RunWithoutPauses,
+    MarkFailed,
 }
 
 public sealed record EngineChange(string ProcessId);

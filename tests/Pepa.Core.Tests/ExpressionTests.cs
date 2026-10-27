@@ -124,7 +124,7 @@ public sealed class ExpressionTests
     [InlineData("https://api.example/items/{{ vars.dots }}", "пути")]
     [InlineData("https://api.example/items/{{ vars.dot }}/delete", "пути")]
     [InlineData("https://{{ vars.tenant }}.example.com/api", "имени сайта")]
-    [InlineData("{{ vars.base }}{{ vars.up }}", "Путь")]
+    [InlineData("{{ vars.base }}{{ vars.up }}", "«..»")]
     public void Url_template_refuses_values_that_would_change_the_address(string template, string message)
     {
         var scope = Scope(new JsonObject
@@ -146,6 +146,23 @@ public sealed class ExpressionTests
         Assert.Equal("https://api.example/v1/orders", _evaluator.RenderUrl("{{ vars.base }}{{ vars.path }}", scope));
         Assert.Equal(" https://a.example/x", _evaluator.RenderUrl(" {{ vars.url }}", scope));
         Assert.Equal("https://api.example/v.", _evaluator.RenderUrl("https://api.example/v{{ vars.dot }}", scope));
+    }
+
+    [Theory]
+    [InlineData("https://api.example/a/{{ vars.dot }}{{ vars.dot }}/admin")]
+    [InlineData("https://api.example/a/.{{ vars.dot }}/admin")]
+    [InlineData("https://api.example/a/{{ vars.dot }}./admin")]
+    public void Dot_segments_assembled_from_several_substitutions_are_refused(string template) =>
+        Assert.Throws<ExpressionException>(() => _evaluator.RenderUrl(template, Scope(new JsonObject { ["dot"] = "." })));
+
+    [Fact]
+    public void Path_after_a_base_with_a_path_and_a_whole_query_are_kept()
+    {
+        var scope = Scope(new JsonObject { ["base"] = "https://api.example/v1", ["path"] = "/orders/1", ["query"] = "?email=a@b.com" });
+        Assert.Equal("https://api.example/v1/orders/1", _evaluator.RenderUrl("{{ vars.base }}{{ vars.path }}", scope));
+        Assert.Equal("https://api.example/v1?email=a@b.com", _evaluator.RenderUrl("{{ vars.base }}{{ vars.query }}", scope));
+        // После постоянной части пути «?» в значении — часть значения (кодируется), а не начало параметров.
+        Assert.Equal("https://api.example/v1/find%3Femail%3Da%40b.com", _evaluator.RenderUrl("{{ vars.base }}/find{{ vars.query }}", scope));
     }
 }
 

@@ -162,17 +162,14 @@ public sealed partial class ProcessEngine
     private async Task<ControlResult> VerifyCoreAsync(ProcessRecord process, IReadOnlyList<TokenRecord> tokens)
     {
         var (step, token, node, executor) = await LoadAttentionAsync(process, tokens);
-        var context = new NodeExecutionContext
+        // Итог неизвестен из-за прошлой попытки (эта окончательно не удалась): сверяется та попытка — с её параметрами и
+        // снимком; не выполнена — значит, окончательна ошибка этой попытки.
+        if (step.Output?["uncertainStepId"]?.AsNumber() is { } uncertainId && await _store.GetStepAsync((long)uncertainId) is { } earlier)
         {
-            ProcessId = process.Id,
-            Node = node,
-            Input = (step.Input?.DeepClone() as System.Text.Json.Nodes.JsonObject) ?? [],
-            Checkpoint = step.Checkpoint?.DeepClone() as System.Text.Json.Nodes.JsonObject,
-            Variables = (System.Text.Json.Nodes.JsonObject)process.Variables.DeepClone(),
-            Attempt = step.Attempt,
-            Time = _time,
-        };
-        var verification = await SafeVerifyAsync(executor, context);
+            return await VerifyEarlierAsync(process, step, earlier, token, node, executor);
+        }
+
+        var verification = await SafeVerifyAsync(executor, VerifyContext(process, node, step));
         // Пояснение проверки может содержать значения (адрес страницы, текст расширения) — без секретов.
         var secrets = SecretValues(process, ExecutionGraph(process).Definition, NodeResult.Ok(verification.Port, verification.VariableUpdates ?? EmptyUpdates));
         verification = verification with { Message = Redact(verification.Message, secrets)! };
@@ -231,6 +228,66 @@ public sealed partial class ProcessEngine
                 return new ControlResult(message);
             }
         }
+    }
+
+    private async Task<ControlResult> VerifyEarlierAsync(ProcessRecord process, StepRecord step, StepRecord earlier, TokenRecord token,
+        NodeDefinition node, INodeExecutor executor)
+    {
+        var verification = await SafeVerifyAsync(executor, VerifyContext(process, node, earlier));
+        var secrets = SecretValues(process, ExecutionGraph(process).Definition, NodeResult.Ok(verification.Port, verification.VariableUpdates ?? EmptyUpdates));
+        verification = verification with { Message = Redact(verification.Message, secrets)! };
+        switch (verification.Outcome)
+        {
+            case VerificationOutcome.Done:
+                await ApplyResultAsync(process, ExecutionGraph(process), token, node, executor.Descriptor, step,
+                    NodeResult.Ok(verification.Port, verification.VariableUpdates ?? EmptyUpdates, verification.Output),
+                    $"проверено — прошлая попытка выполнила действие. {verification.Message}",
+                    extraWrites: (write, _, _, effects) => ReleaseTokenWaitAsync(write, process.Id, token, effects));
+                return new ControlResult($"Проверка подтвердила, что действие выполнено (прошлой попыткой). Процесс продолжен. {verification.Message}");
+
+            case VerificationOutcome.NotDone:
+                return await NotExecutedAsync(process, step, token, node, executor.Descriptor,
+                    $"Проверено: не выполнено. {verification.Message}",
+                    step.Output?["failure"]?.AsString() ?? step.Error ?? "Шаг не выполнен.");
+
+            default:
+            {
+                var message = $"Проверка не дала однозначного ответа: {verification.Message} " +
+                              "Решите вручную: считать шаг выполненным или невыполненным, выполнить его ещё раз или остановить процесс.";
+                var updated = process with { StatusMessage = message, UpdatedAt = _time.GetUtcNow() };
+                await using (var write = await _store.BeginWriteAsync())
+                {
+                    await write.UpdateProcessAsync(updated);
+                    await write.AddJournalAsync(Journal(process.Id, JournalLevel.Warning, message, step.Id, node.Id));
+                    await write.CommitAsync();
+                }
+
+                AfterCommit(updated);
+                return new ControlResult(message);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Действие шага не выполнено (решение пользователя или проверка прошлой попытки): попытки этого посещения, которые
+    /// могли выполниться, становятся невыполненными, а сам шаг — ошибкой без повтора: процесс идёт по ветке «Ошибка», а
+    /// если её нет — останавливается (шаг можно повторить или пропустить).
+    /// </summary>
+    private async Task<ControlResult> NotExecutedAsync(ProcessRecord process, StepRecord step, TokenRecord token, NodeDefinition node,
+        NodeTypeDescriptor descriptor, string resolution, string error)
+    {
+        await SettleAsync(process, await _store.GetUncertainAttemptsAsync(process.Id, token.Id, node.Id), resolution);
+        await ApplyResultAsync(process, ExecutionGraph(process), token, node, descriptor, step with { State = StepState.Failed },
+            NodeResult.Fail(error, retryable: false), resolution,
+            extraWrites: (write, _, _, effects) => ReleaseTokenWaitAsync(write, process.Id, token, effects));
+        return new ControlResult($"Шаг {Label(node, descriptor)} не выполнен: {error}");
+    }
+
+    private async Task<ControlResult> MarkFailedCoreAsync(ProcessRecord process, IReadOnlyList<TokenRecord> tokens)
+    {
+        var (step, token, node, executor) = await LoadAttentionAsync(process, tokens);
+        return await NotExecutedAsync(process, step, token, node, executor.Descriptor, "Пользователь: действие не выполнено.",
+            $"Пользователь отметил шаг {Label(node, executor.Descriptor)} невыполненным.");
     }
 
     private async Task<ControlResult> RetryCoreAsync(ProcessRecord process, IReadOnlyList<TokenRecord> tokens)

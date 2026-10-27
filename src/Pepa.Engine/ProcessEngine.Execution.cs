@@ -366,8 +366,69 @@ public sealed partial class ProcessEngine
             }
         }
 
+        // 5б. Окончательная ошибка, а прошлая попытка этого шага могла выполниться: сверить итог той попытки (как «Проверить»).
+        // Выполнена — шаг выполнен; не выполнена — ошибка этой попытки окончательная; иначе — «итог неизвестен» (решает
+        // пользователь).
+        if (result is NodeResult.Failure final && descriptor.SupportsVerification && IsFinalFailure(final, token, node, descriptor) &&
+            await _store.GetUncertainAttemptsAsync(process.Id, token.Id, node.Id) is { Count: > 0 } uncertain)
+        {
+            var earlier = await SafeVerifyAsync(executor, VerifyContext(process, node, uncertain[0]));
+            if (earlier.Outcome == VerificationOutcome.Done)
+            {
+                result = NodeResult.Ok(earlier.Port, earlier.VariableUpdates ?? EmptyUpdates, earlier.Output);
+                resolution = $"Попытка не удалась ({final.Error}), но прошлая выполнилась. Проверка: {earlier.Message}";
+            }
+            else if (earlier.Outcome == VerificationOutcome.NotDone)
+            {
+                await SettleAsync(process, uncertain, $"Проверено: не выполнено. {earlier.Message}");
+            }
+        }
+
         // 6. Итог.
         await ApplyResultAsync(process, graph, token, node, descriptor, step, result, resolution);
+    }
+
+    /// <summary>Ошибка окончательная: повтора по настройкам блока не будет (её поведут в «Ошибку» или к пользователю).</summary>
+    private static bool IsFinalFailure(NodeResult.Failure failure, TokenRecord token, NodeDefinition node, NodeTypeDescriptor descriptor) =>
+        token.Attempt > 1 && descriptor.Effect == NodeEffect.External &&
+        (!failure.Retryable || token.Attempt >= Math.Max(0, node.Settings.RetryCount) + 1);
+
+    /// <summary>Контекст для проверки итога прошлой попытки — с её параметрами и снимком.</summary>
+    private NodeExecutionContext VerifyContext(ProcessRecord process, NodeDefinition node, StepRecord step) => new()
+    {
+        ProcessId = process.Id,
+        Node = node,
+        Input = (step.Input?.DeepClone() as JsonObject) ?? [],
+        Checkpoint = step.Checkpoint?.DeepClone() as JsonObject,
+        Variables = (JsonObject)process.Variables.DeepClone(),
+        Attempt = step.Attempt,
+        Time = _time,
+    };
+
+    /// <summary>Попытки, которые могли выполниться, оказались невыполненными (проверка или решение пользователя).</summary>
+    private async Task SettleAsync(ProcessRecord process, IReadOnlyList<StepRecord> steps, string resolution)
+    {
+        var now = _time.GetUtcNow();
+        resolution = Redact(resolution, SecretValues(process, ExecutionGraph(process).Definition))!;
+        await using var write = await _store.BeginWriteAsync();
+        foreach (var step in steps)
+        {
+            var output = step.Output?.DeepClone() as JsonObject;
+            if (output?["maybeExecuted"] is not null)
+            {
+                output["maybeExecuted"] = false;
+            }
+
+            await write.UpdateStepAsync(step with
+            {
+                State = step.State == StepState.Unknown ? StepState.Failed : step.State,
+                Output = output,
+                Resolution = resolution,
+                FinishedAt = step.FinishedAt ?? now,
+            });
+        }
+
+        await write.CommitAsync();
     }
 
     private async Task CompleteWaitAsync(ProcessRecord process, ScenarioGraph graph, TokenRecord token,
@@ -492,14 +553,13 @@ public sealed partial class ProcessEngine
         // сказал «могло выполниться, повтор безопасен»): окончательная ошибка этой попытки (не отправлено, параметры не
         // вычислились, отказ) не значит «действие не выполнено» — иначе процесс ушёл бы по ветке «Ошибка». Это «итог
         // неизвестен»: решает пользователь.
-        if (result is NodeResult.Failure final && token.Attempt > 1 && descriptor.Effect == NodeEffect.External &&
-            (!final.Retryable || token.Attempt >= Math.Max(0, node.Settings.RetryCount) + 1) &&
-            await _store.HasUncertainAttemptAsync(process.Id, token.Id, node.Id))
+        // Шаг запоминает, какую попытку проверять («Проверить» сверит её итог, а не этой попытки) и какой была ошибка.
+        JsonObject? uncertainOutput = null;
+        if (result is NodeResult.Failure final && IsFinalFailure(final, token, node, descriptor) &&
+            (await _store.GetUncertainAttemptsAsync(process.Id, token.Id, node.Id)).FirstOrDefault(s => s.Id != step.Id) is { } earliest)
         {
-            result = new NodeResult.Unknown(final.Error + " Прошлая попытка этого шага могла выполниться — проверьте и решите.")
-            {
-                AlreadyChecked = true,
-            };
+            result = new NodeResult.Unknown(final.Error + " Прошлая попытка этого шага могла выполниться — проверьте и решите.");
+            uncertainOutput = new JsonObject { ["uncertainStepId"] = earliest.Id, ["failure"] = Redact(final.Error, secrets) };
         }
 
         // Тексты для истории — без значений секретных переменных (и тех, что шаг им присваивает), уже после всех проверок:
@@ -570,7 +630,7 @@ public sealed partial class ProcessEngine
                 };
                 break;
             case NodeResult.Unknown unknown:
-                finalStep = finalStep with { State = StepState.Unknown, Error = unknown.Reason };
+                finalStep = finalStep with { State = StepState.Unknown, Error = unknown.Reason, Output = uncertainOutput ?? finalStep.Output };
                 break;
         }
 
@@ -671,8 +731,10 @@ public sealed partial class ProcessEngine
             }
 
             case NodeResult.RunAgain again:
+                // Номер попытки сохраняется: получение ресурса — не новая попытка и не новое посещение блока (иначе забылись
+                // бы прошлые попытки — и могло ли действие уже выполниться).
                 p = Cleared(p) with { Status = ProcessStatus.Running };
-                t = t with { State = TokenState.Ready, Attempt = 1, WaitKind = WaitKind.None, WakeAt = null, WaitingStepId = null, WaitRef = null };
+                t = t with { State = TokenState.Ready, WaitKind = WaitKind.None, WakeAt = null, WaitingStepId = null, WaitRef = null };
                 if (!string.IsNullOrWhiteSpace(again.Message))
                 {
                     journal.Add((JournalLevel.Info, again.Message));

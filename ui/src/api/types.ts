@@ -149,8 +149,8 @@ export type ProcessStatus =
 
 export type AttentionKind = "none" | "unknownStep" | "stepFailed" | "stepLimit" | "engineError" | "restoredFromBackup";
 export type PauseReason = "none" | "user" | "restart" | "breakpoint";
-export type ProcessAction = "pause" | "cancel" | "continue" | "verify" | "retry" | "markSucceeded" | "skip" | "runWithoutPauses";
-export type ResumeAction = "continue" | "verify" | "retry" | "markSucceeded" | "skip" | "runWithoutPauses";
+export type ProcessAction = "pause" | "cancel" | "continue" | "verify" | "retry" | "markSucceeded" | "markFailed" | "skip" | "runWithoutPauses";
+export type ResumeAction = "continue" | "verify" | "retry" | "markSucceeded" | "markFailed" | "skip" | "runWithoutPauses";
 
 export interface ProcessBrief {
   id: string;

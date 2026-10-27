@@ -1,4 +1,4 @@
-import { AlertTriangle, Ban, CheckCircle2, FastForward, Hourglass, Loader2, Pause, Play, RotateCcw, SearchCheck, SkipForward, Square, ThumbsUp, XCircle, type LucideIcon } from "lucide-react";
+import { AlertTriangle, Ban, CheckCircle2, FastForward, Hourglass, Loader2, Pause, Play, RotateCcw, SearchCheck, SkipForward, Square, ThumbsDown, ThumbsUp, XCircle, type LucideIcon } from "lucide-react";
 import type { ProcessAction, ProcessStatus, ProcessSummary, ResumeAction, StepState } from "../api/types";
 import { useProcessControl } from "../api/hooks";
 import { ru } from "../i18n/ru";
@@ -41,6 +41,7 @@ const actionIcons: Record<ProcessAction, LucideIcon> = {
   verify: SearchCheck,
   retry: RotateCcw,
   markSucceeded: ThumbsUp,
+  markFailed: ThumbsDown,
   skip: SkipForward,
   runWithoutPauses: FastForward,
 };
@@ -96,6 +97,8 @@ function confirmationFor(process: ProcessSummary, action: ProcessAction): string
       return process.attention === "restoredFromBackup" ? ru.confirmations.continueRestored : null;
     case "markSucceeded":
       return ru.confirmations.markSucceeded;
+    case "markFailed":
+      return ru.confirmations.markFailed;
     case "skip":
       return ru.confirmations.skip;
     default:
@@ -142,7 +145,7 @@ export function ProcessTable({ processes, showScenario = true, showActions = tru
               <td className="muted">{p.stepCount}</td>
               {showActions && (
                 <td style={{ textAlign: "right" }}>
-                  <ProcessActions process={p} size="small" exclude={["verify", "markSucceeded", "skip", "retry"]} />
+                  <ProcessActions process={p} size="small" exclude={["verify", "markSucceeded", "markFailed", "skip", "retry"]} />
                 </td>
               )}
             </tr>

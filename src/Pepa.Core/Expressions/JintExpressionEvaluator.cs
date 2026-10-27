@@ -121,30 +121,31 @@ public sealed class JintExpressionEvaluator(ExpressionLimits? limits = null) : I
 
         var engine = CreateEngine(scope);
         var builder = new System.Text.StringBuilder();
-        for (var index = 0; index < segments.Count; index++)
+        var afterSubstitution = false;
+        foreach (var segment in segments)
         {
-            switch (segments[index])
+            switch (segment)
             {
                 case TemplateParser.Literal literal:
                     builder.Append(literal.Text);
+                    afterSubstitution = false;
                     break;
                 case TemplateParser.Expression expression:
                     var value = Stringify(engine, Run(engine, expression.Code));
                     var shown = $"«{{{{ {expression.Code} }}}}»";
-                    var next = index + 1 < segments.Count ? segments[index + 1] : null;
                     if (string.IsNullOrWhiteSpace(builder.ToString()))
                     {
                         // Адрес целиком или его начало ({{ vars.base }}/orders) — как есть.
                         builder.Append(value);
                     }
-                    else if (InScheme(builder) && value.Length > 0 && value[0] is '/' or '?' or '#')
+                    else if ((InScheme(builder) || afterSubstitution) && value.Length > 0 && value[0] is '/' or '?' or '#')
                     {
-                        // Сайт уже есть, а подстановка — путь целиком ({{ vars.base }}{{ vars.path }}): как есть, но без
-                        // «.» и «..» (они меняют путь) и без «@», «\», пробелов.
+                        // Сразу после сайта или другой подстановки — путь целиком ({{ vars.base }}{{ vars.path }}): как есть,
+                        // но без «@», «\» и пробелов в пути (части «.» и «..» проверяются у всего адреса ниже).
                         var path = value.Split('?', '#')[0];
-                        if (path.Split('/').Any(part => part is "." or "..") || value.IndexOfAny(['@', '\\']) >= 0 || value.Any(char.IsWhiteSpace))
+                        if (path.IndexOfAny(['@', '\\']) >= 0 || value.Any(char.IsWhiteSpace))
                         {
-                            throw new ExpressionException($"Путь {shown} — «{value}» — содержит «.», «..», «@», «\\» или пробел: адрес стал бы другим.");
+                            throw new ExpressionException($"Путь {shown} — «{value}» — содержит «@», «\\» или пробел: адрес стал бы другим.");
                         }
 
                         builder.Append(value);
@@ -167,22 +168,41 @@ public sealed class JintExpressionEvaluator(ExpressionLimits? limits = null) : I
                             $"Подстановка {shown} в адресе получилась пустой — адрес стал бы другим " +
                             "(например, без номера заказа). Проверьте переменные.");
                     }
-                    else if (value is "." or ".." && !InQuery(builder) && builder[^1] == '/' &&
-                             (next is not TemplateParser.Literal { Text: var after } ? next is null : after.Length == 0 || after[0] is '/' or '?' or '#'))
-                    {
-                        // «.» и «..» целой частью пути — переход к другой папке сайта (…/items/.. — это …/): кодирование не спасает.
-                        throw new ExpressionException($"Подстановка {shown} в пути адреса — «{value}»: адрес стал бы другим. Проверьте переменные.");
-                    }
                     else
                     {
                         builder.Append(Uri.EscapeDataString(value));
                     }
 
+                    afterSubstitution = true;
                     break;
             }
         }
 
-        return builder.ToString();
+        var url = builder.ToString();
+        // Сравнение с шаблоном, где каждая подстановка — буква: «.» и «..», написанные в шаблоне самим автором, — его выбор.
+        if (HasDotSegment(url) && !HasDotSegment(string.Concat(segments.Select(s => s is TemplateParser.Literal l ? l.Text : "x"))))
+        {
+            // «.» и «..» частью пути — переход к другой папке сайта (…/items/.. — это …/), кодирование тут не спасает: адрес
+            // сам убирает такие части. Из подстановок (в том числе сложившиеся из нескольких) — ошибка.
+            throw new ExpressionException($"В пути адреса «{url.Split('?', '#')[0]}» после подстановок появилась часть «.» или «..» — " +
+                                          "адрес стал бы другим. Проверьте переменные.");
+        }
+
+        return url;
+    }
+
+    /// <summary>Есть ли в пути адреса (после «схема://сайт», до «?»/«#») часть «.» или «..» (и закодированные %2E).</summary>
+    private static bool HasDotSegment(string url)
+    {
+        var scheme = url.IndexOf("://", StringComparison.Ordinal);
+        var start = scheme < 0 ? 0 : url.IndexOf('/', scheme + 3);
+        if (start < 0)
+        {
+            return false;
+        }
+
+        var path = url[start..].Split('?', '#')[0];
+        return path.Split('/').Any(part => part.Replace("%2e", ".", StringComparison.OrdinalIgnoreCase) is "." or "..");
     }
 
     /// <summary>Подстановка ещё до пути: адрес не начат или пока только «схема://сайт».</summary>
@@ -192,9 +212,6 @@ public sealed class JintExpressionEvaluator(ExpressionLimits? limits = null) : I
         var scheme = text.IndexOf("://", StringComparison.Ordinal);
         return scheme < 0 || text.IndexOfAny(['/', '?', '#'], scheme + 3) < 0;
     }
-
-    /// <summary>Подстановка уже в параметрах или после «#».</summary>
-    private static bool InQuery(System.Text.StringBuilder built) => built.ToString().IndexOfAny(['?', '#']) >= 0;
 
     private Engine CreateEngine(ExpressionScope scope)
     {

@@ -340,6 +340,7 @@ public sealed partial class ProcessEngine : IAsyncDisposable
                 ResumeAction.Verify => await VerifyCoreAsync(process, tokens),
                 ResumeAction.Retry => await RetryCoreAsync(process, tokens),
                 ResumeAction.MarkSucceeded => await ProceedCoreAsync(process, tokens, StepState.Succeeded),
+                ResumeAction.MarkFailed => await MarkFailedCoreAsync(process, tokens),
                 ResumeAction.Skip => await ProceedCoreAsync(process, tokens, StepState.Skipped),
                 ResumeAction.RunWithoutPauses => await ContinueCoreAsync(process with
                 {
@@ -391,6 +392,7 @@ public sealed partial class ProcessEngine : IAsyncDisposable
                     actions.Add(ProcessAction.MarkSucceeded);
                 }
 
+                actions.Add(ProcessAction.MarkFailed);
                 break;
             case AttentionKind.StepFailed:
                 actions.Add(ProcessAction.Retry);
@@ -476,6 +478,7 @@ public sealed partial class ProcessEngine : IAsyncDisposable
         ResumeAction.Verify => ProcessAction.Verify,
         ResumeAction.Retry => ProcessAction.Retry,
         ResumeAction.MarkSucceeded => ProcessAction.MarkSucceeded,
+        ResumeAction.MarkFailed => ProcessAction.MarkFailed,
         ResumeAction.Skip => ProcessAction.Skip,
         ResumeAction.RunWithoutPauses => ProcessAction.RunWithoutPauses,
         _ => throw new ArgumentOutOfRangeException(nameof(action)),
