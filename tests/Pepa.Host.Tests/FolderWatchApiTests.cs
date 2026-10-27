@@ -202,4 +202,46 @@ public sealed class FolderWatchApiTests
         await f.WaitForProcessAsync(id, p => HostFixture.Status(p) == "cancelled");
         Assert.Equal(200, (await f.SendAsync(HttpMethod.Put, "/api/watches", new { watches = Array.Empty<object>() })).Status);
     }
+
+    [Fact]
+    public async Task Watch_used_by_a_trigger_cannot_be_turned_off_but_the_trigger_can()
+    {
+        await using var f = await HostFixture.StartAsync(seedSamples: false);
+        await f.SendAsync(HttpMethod.Put, "/api/watches", new { watches = new[] { new { folder = "входящие", pattern = "*" } } });
+        var scenarioId = await CreateScenarioAsync(f);
+        var trigger = (await f.GetAsync($"/api/triggers?scenarioId={scenarioId}")).AsArray().Single()!;
+        var watchId = (await f.GetAsync("/api/watches"))["watches"]![0]!["id"]!.GetValue<string>();
+
+        var (status, error) = await f.SendAsync(HttpMethod.Put, "/api/watches", new
+        {
+            watches = new[] { new { id = watchId, folder = "входящие", pattern = "*", enabled = false } },
+        });
+        Assert.Equal(409, status);
+        Assert.Contains("автозапуски", error!["error"]!.GetValue<string>());
+        // Отказ ничего не создаёт и не меняет.
+        Assert.False(Directory.Exists(Path.Combine(f.Workspace, "другая")));
+        Assert.Equal(409, (await f.SendAsync(HttpMethod.Put, "/api/watches", new
+        {
+            watches = new object[] { new { folder = "другая", pattern = "*" } },
+        })).Status);
+        Assert.False(Directory.Exists(Path.Combine(f.Workspace, "другая")));
+
+        // Выключить автозапуск можно, потом — и слежение; выключенный автозапуск сохраняется и без слежения.
+        var off = new
+        {
+            scenarioId, kind = "event", enabled = false,
+            config = new { source = "files", eventType = "created", correlationKey = "входящие" },
+            inputs = new { path = "event.payload.path", name = "event.payload.name" },
+        };
+        Assert.Equal(200, (await f.SendAsync(HttpMethod.Put, $"/api/triggers/{trigger["id"]!.GetValue<string>()}", off)).Status);
+        Assert.Equal(200, (await f.SendAsync(HttpMethod.Put, "/api/watches", new
+        {
+            watches = new[] { new { id = watchId, folder = "входящие", pattern = "*", enabled = false } },
+        })).Status);
+        Assert.Equal(200, (await f.SendAsync(HttpMethod.Put, $"/api/triggers/{trigger["id"]!.GetValue<string>()}", off)).Status);
+        // Включить по выключенному слежению — нельзя.
+        var (refused, why) = await f.SendAsync(HttpMethod.Put, $"/api/triggers/{trigger["id"]!.GetValue<string>()}", off with { enabled = true });
+        Assert.Equal(400, refused);
+        Assert.Contains("выключено", why!["error"]!.GetValue<string>());
+    }
 }

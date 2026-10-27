@@ -104,11 +104,11 @@ public sealed partial class SettingsService
     }
 
     /// <summary>Проверить и привести к виду, в котором сохранятся (без сохранения).</summary>
-    public Task<PlatformSettings> ValidateAsync(PlatformSettings settings) => Task.FromResult(Validate(settings));
+    public Task<PlatformSettings> ValidateAsync(PlatformSettings settings) => Task.FromResult(Validate(settings, apply: false));
 
     public async Task<PlatformSettings> SaveAsync(PlatformSettings settings)
     {
-        var normalized = Validate(settings);
+        var normalized = Validate(settings, apply: true);
         await using (var write = await _store.BeginWriteAsync())
         {
             await write.SetSettingAsync(Key, PepaJson.Serialize(normalized));
@@ -119,7 +119,8 @@ public sealed partial class SettingsService
         return normalized;
     }
 
-    private PlatformSettings Validate(PlatformSettings settings)
+    /// <param name="apply">Создать рабочую папку и папки слежения (при проверке без сохранения — нет).</param>
+    private PlatformSettings Validate(PlatformSettings settings, bool apply)
     {
         var root = settings.WorkspaceRoot?.Trim() ?? "";
         if (!Path.IsPathFullyQualified(root))
@@ -166,7 +167,10 @@ public sealed partial class SettingsService
 
         try
         {
-            Directory.CreateDirectory(root);
+            if (apply)
+            {
+                Directory.CreateDirectory(root);
+            }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -188,10 +192,11 @@ public sealed partial class SettingsService
         Check(settings.StepBudget, 100, 10_000_000, "Лимит шагов");
         Check(settings.ActionTimeoutSeconds, 1, 86_400, "Тайм-аут действия");
         Check(settings.HistoryDays, 0, 3650, "Хранить историю, дней");
-        return settings with { WorkspaceRoot = root, FolderWatches = ValidateWatches(root, settings.FolderWatches ?? []) };
+        return settings with { WorkspaceRoot = root, FolderWatches = ValidateWatches(root, settings.FolderWatches ?? [], Current.FolderWatches, apply) };
     }
 
-    private static IReadOnlyList<FolderWatchSettings> ValidateWatches(string root, IReadOnlyList<FolderWatchSettings> watches)
+    private static IReadOnlyList<FolderWatchSettings> ValidateWatches(string root, IReadOnlyList<FolderWatchSettings> watches,
+        IReadOnlyList<FolderWatchSettings> previous, bool apply)
     {
         if (watches.Count > PlatformSettings.MaxFolderWatches)
         {
@@ -228,6 +233,13 @@ public sealed partial class SettingsService
             }
 
             var folder = workspace.ToRelative(full);
+            // На Windows «Входящие» и «входящие» — одна папка: прежнее написание остаётся (по нему ключ событий, ожидания и
+            // автозапуски), иначе смена одной буквы оставила бы их без событий.
+            if (previous.FirstOrDefault(p => p.Id == id) is { } old && old.Folder != folder && comparer.Equals(old.Folder, folder))
+            {
+                folder = old.Folder;
+            }
+
             if (!folders.Add(folder))
             {
                 throw new SettingsValidationException($"За папкой «{folder}» уже следит другая строка — о каждом файле было бы два события.");
@@ -240,7 +252,10 @@ public sealed partial class SettingsService
 
             try
             {
-                Directory.CreateDirectory(full);
+                if (apply)
+                {
+                    Directory.CreateDirectory(full);
+                }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {

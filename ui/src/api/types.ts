@@ -480,6 +480,8 @@ export interface FolderWatch {
 }
 
 export interface FolderWatchStatus {
+  /** Как сохранено (а не как сейчас в форме). */
+  enabled: boolean;
   files: number;
   /** Файлы, которые ещё дописываются. */
   pending: number;

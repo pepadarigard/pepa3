@@ -59,26 +59,33 @@ internal static class ApiEndpoints
         api.MapPut("/watches", async (WatchesRequest request, SettingsService settings, Adapters.FileSystem.FolderWatcher watcher,
             IPepaStore store, CancellationToken ct) =>
         {
-            var before = settings.Current.FolderWatches;
-            var validated = settings.Current with { FolderWatches = request.Watches ?? [] };
-            var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
-            var stillWatched = (await settings.ValidateAsync(validated)).FolderWatches.Where(w => w.Enabled).Select(w => w.Folder).ToHashSet(comparer);
-            // Процесс, который ждёт файла из папки, иначе ждал бы вечно: слежение за ней сначала нужно освободить.
-            var orphaned = (await store.GetActiveSubscriptionsAsync(Adapters.FileSystem.FileEvents.Source, ct))
-                .Where(sub => sub.CorrelationKey is { } folder && before.Any(w => w.Enabled && w.Folder == folder) && !stillWatched.Contains(folder))
-                .ToList();
-            if (orphaned.Count > 0)
+            await WatchesGate.WaitAsync(ct);
+            try
             {
-                var processes = string.Join(", ", orphaned.Select(sub => $"#{sub.ProcessId[^Math.Min(6, sub.ProcessId.Length)..]}").Distinct());
-                var folders = string.Join(", ", orphaned.Select(sub => $"«{sub.CorrelationKey}»").Distinct());
-                return Results.Json(new ErrorDto($"Файлов из папки {folders} ждут процессы {processes} — без слежения они ждали бы вечно. " +
-                                                 "Остановите их (или дождитесь окончания), потом выключите слежение."),
-                    Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status409Conflict);
-            }
+                var before = settings.Current;
+                var requested = before with { FolderWatches = request.Watches ?? [] };
+                var after = (await settings.ValidateAsync(requested)).FolderWatches;
+                if (await WatchConflictAsync(before.FolderWatches, after, store, ct) is { } conflict)
+                {
+                    return Results.Json(new ErrorDto(conflict), Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status409Conflict);
+                }
 
-            await settings.SaveAsync(validated);
-            watcher.Configure(settings.Current.FolderWatches);
-            return Results.Ok(WatchesDto(settings, watcher));
+                await settings.SaveAsync(requested);
+                watcher.Configure(settings.Current.FolderWatches);
+                // Процесс мог начать ждать файла в то же мгновение — тогда слежение возвращается как было.
+                if (await WatchConflictAsync(before.FolderWatches, settings.Current.FolderWatches, store, ct) is { } late)
+                {
+                    await settings.SaveAsync(before);
+                    watcher.Configure(settings.Current.FolderWatches);
+                    return Results.Json(new ErrorDto(late), Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status409Conflict);
+                }
+
+                return Results.Ok(WatchesDto(settings, watcher));
+            }
+            finally
+            {
+                WatchesGate.Release();
+            }
         });
 
         // ───────────── Интеграции ─────────────
@@ -734,7 +741,8 @@ internal static class ApiEndpoints
         ProcessMapper mapper, IPepaStore store, SettingsService settings, CancellationToken ct)
     {
         var config = (System.Text.Json.Nodes.JsonObject)request.Config.DeepClone();
-        if (string.Equals(config.GetString("source")?.Trim(), Adapters.FileSystem.FileEvents.Source, StringComparison.OrdinalIgnoreCase) &&
+        // Выключенный автозапуск не проверяется: его можно выключить, даже если слежения за папкой уже нет.
+        if (request.Enabled && string.Equals(config.GetString("source")?.Trim(), Adapters.FileSystem.FileEvents.Source, StringComparison.OrdinalIgnoreCase) &&
             config.GetString("correlationKey") is { Length: > 0 } key)
         {
             // Ключ событий о файлах — папка слежения, записанная так же, как в слежении (иначе запуск не сработал бы никогда).
@@ -750,9 +758,10 @@ internal static class ApiEndpoints
             }
 
             var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-            var watch = settings.Current.FolderWatches.FirstOrDefault(w => string.Equals(w.Folder, relative, comparison))
+            var watch = settings.Current.FolderWatches.FirstOrDefault(w => w.Enabled && string.Equals(w.Folder, relative, comparison))
                         ?? throw new SettingsValidationException(
-                            $"За папкой «{relative}» Pepa не следит — добавьте её в «Настройки» → «Слежение за папками»: иначе запуск не сработает.");
+                            $"За папкой «{relative}» Pepa не следит (или слежение выключено) — добавьте или включите её в «Настройки» → " +
+                            "«Слежение за папками»: иначе запуск не сработает.");
             config["correlationKey"] = watch.Folder;
         }
 
@@ -790,6 +799,46 @@ internal static class ApiEndpoints
     private const string RecordingHolder = ProcessEngine.RecordingHolder;
 
     private static readonly SemaphoreSlim RecordingGate = new(1, 1);
+
+    private static readonly SemaphoreSlim WatchesGate = new(1, 1);
+
+    /// <summary>
+    /// Чему помешало бы выключить слежение за папками: процессам, которые ждут из них файлов (ждали бы вечно), и включённым
+    /// автозапускам по этим папкам (молча перестали бы срабатывать). null — ничему.
+    /// </summary>
+    private static async Task<string?> WatchConflictAsync(IReadOnlyList<Adapters.FileSystem.FolderWatchSettings> before,
+        IReadOnlyList<Adapters.FileSystem.FolderWatchSettings> after, IPepaStore store, CancellationToken ct)
+    {
+        // Ключ событий — папка в точности как записана: «Входящие» и «входящие» — разные ключи.
+        var lost = before.Where(w => w.Enabled).Select(w => w.Folder)
+            .Except(after.Where(w => w.Enabled).Select(w => w.Folder), StringComparer.Ordinal).ToHashSet(StringComparer.Ordinal);
+        if (lost.Count == 0)
+        {
+            return null;
+        }
+
+        var waiting = (await store.GetActiveSubscriptionsAsync(Adapters.FileSystem.FileEvents.Source, ct))
+            .Where(sub => sub.CorrelationKey is { } folder && lost.Contains(folder)).ToList();
+        if (waiting.Count > 0)
+        {
+            var processes = string.Join(", ", waiting.Select(sub => $"#{sub.ProcessId[^Math.Min(6, sub.ProcessId.Length)..]}").Distinct());
+            var folders = string.Join(", ", waiting.Select(sub => $"«{sub.CorrelationKey}»").Distinct());
+            return $"Файлов из папки {folders} ждут процессы {processes} — без слежения они ждали бы вечно. Остановите их (или " +
+                   "дождитесь окончания), потом выключите слежение.";
+        }
+
+        var triggers = (await store.ListTriggersAsync(null, ct)).Where(t => t is { Kind: TriggerKind.Event, Enabled: true } &&
+            string.Equals(t.Config.GetString("source")?.Trim(), Adapters.FileSystem.FileEvents.Source, StringComparison.OrdinalIgnoreCase) &&
+            t.Config.GetString("correlationKey") is { } key && lost.Contains(key)).ToList();
+        if (triggers.Count > 0)
+        {
+            var names = string.Join(", ", triggers.Select(t => $"«{(string.IsNullOrWhiteSpace(t.Name) ? ProcessMapper.DescribeTrigger(t) : t.Name)}»"));
+            return $"По файлам из этой папки запускаются автозапуски {names} — без слежения они перестали бы срабатывать. Выключите " +
+                   "или удалите их, потом выключите слежение.";
+        }
+
+        return null;
+    }
 
     private static async Task<IResult> StartRecordingAsync(Adapters.Desktop.DesktopRecorder recorder, ProcessEngine engine, EventHub events,
         CancellationToken ct)

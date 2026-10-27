@@ -97,6 +97,14 @@ public sealed class WaitFileNode(IWorkspace workspace, Func<IReadOnlyList<Folder
             if (configuredName is { } template && TemplateParser.HasExpressions(template))
             {
                 var literal = string.Concat(TemplateParser.Parse(template).OfType<TemplateParser.Literal>().Select(l => l.Text));
+                // Переменные дали пустое значение — от имени остался только шаблон («{{ vars.client }}*.pdf» → «*.pdf»): так
+                // подошёл бы файл любого клиента.
+                if (string.Concat(name.Where(c => !char.IsWhiteSpace(c))) == string.Concat(literal.Where(c => !char.IsWhiteSpace(c))))
+                {
+                    throw new NodeInputException(
+                        $"Подстановка в имени файла «{configuredName}» получилась пустой — подошёл бы любой файл «{name}». Проверьте переменные.");
+                }
+
                 if ("*?;".Any(c => name.Count(x => x == c) > literal.Count(x => x == c)))
                 {
                     throw new NodeInputException(

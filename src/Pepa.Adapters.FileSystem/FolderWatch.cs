@@ -162,7 +162,7 @@ public sealed class FolderWatcher : IAsyncDisposable
     public IReadOnlyList<FolderWatchStatus> Status => Volatile.Read(ref _status);
 
     /// <summary>Будет ли после запуска досмотр того, что появилось без Pepa.</summary>
-    public bool WillCatchUp => Watches.Any(w => w.Enabled && File.Exists(SnapshotPath(w.Id)));
+    public bool WillCatchUp => Watches.Any(w => w.Enabled && (File.Exists(SnapshotPath(w.Id)) || File.Exists(LegacySnapshotPath(w.Id))));
 
     /// <summary>Какие папки отслеживать. Новая или изменённая папка начинает с того, что в ней уже есть.</summary>
     public void Configure(IReadOnlyList<FolderWatchSettings> watches)
@@ -236,7 +236,7 @@ public sealed class FolderWatcher : IAsyncDisposable
             var now = _time.GetUtcNow();
             foreach (var state in _states.Values)
             {
-                if (state.NextScanAt > now)
+                if (state.NextScanTimestamp > _time.GetTimestamp())
                 {
                     continue;
                 }
@@ -254,9 +254,9 @@ public sealed class FolderWatcher : IAsyncDisposable
 
                 // Большое дерево папок проверяется реже, чтобы проверка не занимала диск постоянно.
                 var took = Stopwatch.GetElapsedTime(started);
-                state.NextScanAt = took > TimeSpan.FromMilliseconds(200)
-                    ? now + TimeSpan.FromTicks(Math.Min(TimeSpan.FromSeconds(30).Ticks, took.Ticks * 10))
-                    : DateTimeOffset.MinValue;
+                state.NextScanTimestamp = took > TimeSpan.FromMilliseconds(200)
+                    ? _time.GetTimestamp() + (long)(Math.Min(30, took.TotalSeconds * 10) * _time.TimestampFrequency)
+                    : 0;
                 SaveIfDue(state, now);
             }
 
@@ -302,6 +302,12 @@ public sealed class FolderWatcher : IAsyncDisposable
         {
             if (_states.TryGetValue(watch.Id, out var state))
             {
+                if (state.Settings != watch)
+                {
+                    // Настройки изменились — проверить сразу, не дожидаясь отложенной проверки большой папки.
+                    state.NextScanTimestamp = 0;
+                }
+
                 state.Settings = watch;
                 continue;
             }
@@ -310,6 +316,7 @@ public sealed class FolderWatcher : IAsyncDisposable
             // Только при запуске Pepa: досмотреть, что появилось без неё. Включённое позже начинает с того, что есть.
             if (!_loadedFromDisk)
             {
+                MigrateLegacySnapshot(watch.Id);
                 LoadSnapshot(state);
             }
 
@@ -321,12 +328,13 @@ public sealed class FolderWatcher : IAsyncDisposable
             // Списки слежений, которых больше нет.
             try
             {
-                foreach (var orphan in Directory.Exists(_stateDirectory) ? Directory.GetFiles(_stateDirectory, "watch-*.json") : [])
+                foreach (var orphan in Directory.Exists(_stateDirectory) ? Directory.GetFiles(_stateDirectory, "*.json") : [])
                 {
-                    var id = Path.GetFileNameWithoutExtension(orphan)["watch-".Length..];
-                    if (!_states.ContainsKey(id))
+                    var name = Path.GetFileNameWithoutExtension(orphan);
+                    var id = name.StartsWith("watch-", StringComparison.Ordinal) ? name["watch-".Length..] : name;
+                    if (name != "checked" && !_states.ContainsKey(id))
                     {
-                        DeleteSnapshot(id);
+                        File.Delete(orphan);
                     }
                 }
             }
@@ -353,7 +361,9 @@ public sealed class FolderWatcher : IAsyncDisposable
         }
         catch (NodeInputException ex)
         {
+            // Как пропавшая папка: когда путь снова годится, слежение начнётся с того, что в папке будет.
             state.Error = ex.Message;
+            state.WasMissing = true;
             state.FirstScan = false;
             return;
         }
@@ -390,7 +400,6 @@ public sealed class FolderWatcher : IAsyncDisposable
             state.ResetNote = state.LoadProblem ?? (state.WasMissing && state.Known is not null
                 ? $"Папка была недоступна; файлы, появившиеся за это время, не считаются новыми (с {FormatLocal(now)})."
                 : null);
-            state.Note = state.ResetNote;
             state.LoadProblem = null;
             state.Known = listing.Files.ToDictionary(p => p.Key, p => p.Value.Version, StringComparer.Ordinal);
             state.Key = key;
@@ -398,26 +407,44 @@ public sealed class FolderWatcher : IAsyncDisposable
             state.FirstScan = false;
             state.Pending.Clear();
             state.Tombstones.Clear();
+            // Нечитаемые вложенные папки — тоже часть того, что уже есть: когда их прочитают, их файлы не новые.
+            state.Skipped = listing.Skipped;
+            state.Note = Notes(state, listing);
             state.Dirty = true;
             state.SaveNow = true;
             return;
         }
 
-        var unreadable = listing.Unreadable.Count == 0
-            ? null
-            : $"Не читаются вложенные папки ({string.Join(", ", listing.Unreadable.Take(3).Select(f => $"«{f}»"))}" +
-              (listing.Unreadable.Count > 3 ? $" и ещё {listing.Unreadable.Count - 3}" : "") + ") — их файлы не проверяются.";
-        state.Note = state.ResetNote is null ? unreadable : unreadable is null ? state.ResetNote : $"{state.ResetNote} {unreadable}";
+        // Вложенные папки, которые в прошлый раз не читались, а теперь читаются: их файлы не новые.
+        var reappeared = state.Skipped.Where(f => !listing.Skipped.Contains(f)).ToList();
 
         // Исчезнувшие файлы (кроме лежащих в папках, которые сейчас не читаются).
-        var gone = state.Known.Where(p => !listing.Files.ContainsKey(p.Key) && !listing.IsUnreadable(p.Key))
+        var gone = state.Known.Where(p => !listing.Files.ContainsKey(p.Key) && !listing.IsSkipped(p.Key))
             .ToDictionary(p => p.Key, p => p.Value, StringComparer.Ordinal);
-        var moved = gone.Where(p => p.Value.Created != 0).GroupBy(p => p.Value).ToDictionary(g => g.Key, g => new Queue<string>(g.Select(p => p.Key)));
-        foreach (var path in state.Pending.Keys.Where(p => !listing.Files.ContainsKey(p)).ToList())
+
+        // Откуда мог прийти переименованный файл: исчезнувшие и заменённые (x → x.bak, а на месте x — новый файл).
+        var moved = new Dictionary<FileVersion, Queue<string>>();
+        foreach (var (path, version) in state.Known)
         {
+            var replaced = listing.Files.TryGetValue(path, out var current) && !current.Version.SameContent(version);
+            if (version.Created != 0 && (gone.ContainsKey(path) || replaced))
+            {
+                (moved.TryGetValue(version, out var queue) ? queue : moved[version] = new Queue<string>()).Enqueue(path);
+            }
+        }
+
+        // Ожидающие записи, которых нет на месте (их переименовали): пометка «появился без Pepa» переходит к новому имени.
+        var lostPending = new Dictionary<FileVersion, Queue<PendingFile>>();
+        foreach (var path in state.Pending.Keys.Where(p => !listing.Files.ContainsKey(p) && !listing.IsSkipped(p)).ToList())
+        {
+            var lost = state.Pending[path];
+            (lostPending.TryGetValue(lost.Version, out var queue) ? queue : lostPending[lost.Version] = new Queue<PendingFile>()).Enqueue(lost);
             state.Pending.Remove(path);
         }
 
+        var canPublish = true;
+        var saveNow = false;
+        var absorbed = 0;
         foreach (var (path, seen) in listing.Files)
         {
             var known = state.Known.TryGetValue(path, out var version) ? version : (FileVersion?)null;
@@ -426,10 +453,14 @@ public sealed class FolderWatcher : IAsyncDisposable
                 // Переименован или перенесён внутри папки (то же содержимое, время создания и изменения) — не новый.
                 if (moved.TryGetValue(seen.Version, out var from) && from.TryDequeue(out var oldPath))
                 {
-                    state.Known.Remove(oldPath);
-                    gone.Remove(oldPath);
+                    if (gone.Remove(oldPath))
+                    {
+                        state.Known.Remove(oldPath);
+                    }
+
                     state.Known[path] = seen.Version;
                     state.Dirty = true;
+                    saveNow = true;
                     continue;
                 }
 
@@ -441,6 +472,14 @@ public sealed class FolderWatcher : IAsyncDisposable
                     state.Dirty = true;
                     continue;
                 }
+
+                if (seen.Quiet || reappeared.Any(f => path.StartsWith(f + "/", StringComparison.Ordinal)))
+                {
+                    state.Known[path] = seen.Version;
+                    state.Dirty = true;
+                    absorbed += seen.Quiet ? 0 : 1;
+                    continue;
+                }
             }
 
             if (known is { } k && k.SameContent(seen.Version))
@@ -449,7 +488,7 @@ public sealed class FolderWatcher : IAsyncDisposable
                 continue;
             }
 
-            if (known is not null && !settings.Changes)
+            if (known is not null && (!settings.Changes || seen.Quiet))
             {
                 state.Known[path] = seen.Version;
                 state.Pending.Remove(path);
@@ -459,13 +498,19 @@ public sealed class FolderWatcher : IAsyncDisposable
 
             if (!state.Pending.TryGetValue(path, out var pending) || !pending.Version.SameContent(seen.Version))
             {
+                if (pending is null && lostPending.TryGetValue(seen.Version, out var renamed) && renamed.TryDequeue(out var carried))
+                {
+                    state.Pending[path] = carried;
+                    continue;
+                }
+
                 // Новый или ещё меняется: ждём, пока перестанет.
                 state.Pending[path] = new PendingFile(seen.Version, pending?.FirstSeen ?? now, now, pending?.CatchUp ?? state.FirstScan);
                 continue;
             }
 
             var settle = seen.Version.Size == 0 ? _options.Settle * EmptySettleFactor : _options.Settle;
-            if (now - pending.StableSince < settle || listing.HasTemporaryNear(seen.FullPath) || !CanRead(seen.FullPath))
+            if (!canPublish || now - pending.StableSince < settle || listing.HasTemporaryNear(seen.FullPath) || !CanRead(seen.FullPath))
             {
                 continue;
             }
@@ -483,15 +528,18 @@ public sealed class FolderWatcher : IAsyncDisposable
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                // Событие не передано — попробуем при следующей проверке (повтор того же файла Pepa распознает).
+                // Событие не передано — попробуем при следующей проверке (повтор того же файла Pepa распознает). Остальные
+                // файлы этой проверки разбираются как обычно (переименования), но событий больше не передаём.
                 state.Error = $"Не удалось передать событие о файле «{path}»: {ex.Message}";
                 _logger.LogWarning(ex, "Не удалось передать событие о файле {Path}.", path);
-                break;
+                canPublish = false;
+                continue;
             }
 
             state.Known[path] = seen.Version;
             state.Pending.Remove(path);
             state.Dirty = true;
+            saveNow = true;
         }
 
         foreach (var (path, old) in gone)
@@ -503,12 +551,48 @@ public sealed class FolderWatcher : IAsyncDisposable
             }
         }
 
-        foreach (var expired in state.Tombstones.Where(t => now - t.Value.At > TombstoneLife).Select(t => t.Key).ToList())
+        TrimTombstones(state, now);
+        if (absorbed > 0)
         {
-            state.Tombstones.Remove(expired);
+            state.ResetNote = $"Вложенная папка снова читается — её файлы ({absorbed}) не считаются новыми (с {FormatLocal(now)}).";
         }
 
+        state.Skipped = listing.Skipped;
+        state.Note = Notes(state, listing);
+        // После события или переименования список сохраняется сразу: иначе после сбоя переименованный обработанный файл
+        // стал бы «новым» (ключ от повторов включает путь).
+        state.SaveNow |= saveNow;
         state.FirstScan = false;
+    }
+
+    private static string? Notes(WatchState state, Listing listing)
+    {
+        var unreadable = listing.Unreadable.Count == 0
+            ? null
+            : $"Не читаются вложенные папки ({string.Join(", ", listing.Unreadable.Take(3).Select(f => $"«{f}»"))}" +
+              (listing.Unreadable.Count > 3 ? $" и ещё {listing.Unreadable.Count - 3}" : "") + ") — их файлы не проверяются.";
+        return state.ResetNote is null ? unreadable : unreadable is null ? state.ResetNote : $"{state.ResetNote} {unreadable}";
+    }
+
+    /// <summary>Удалённые файлы помнятся не дольше суток и не больше <see cref="FolderWatcherOptions.MaxFiles"/>.</summary>
+    private void TrimTombstones(WatchState state, DateTimeOffset now)
+    {
+        if (now - state.TombstonesSweptAt > TimeSpan.FromMinutes(10))
+        {
+            state.TombstonesSweptAt = now;
+            foreach (var expired in state.Tombstones.Where(t => now - t.Value.At > TombstoneLife).Select(t => t.Key).ToList())
+            {
+                state.Tombstones.Remove(expired);
+            }
+        }
+
+        if (state.Tombstones.Count > _options.MaxFiles)
+        {
+            foreach (var oldest in state.Tombstones.OrderBy(t => t.Value.At).Take(state.Tombstones.Count - _options.MaxFiles).Select(t => t.Key).ToList())
+            {
+                state.Tombstones.Remove(oldest);
+            }
+        }
     }
 
     private EventInput Event(FolderWatchSettings settings, string path, FileSeen seen, string type, PendingFile pending)
@@ -557,14 +641,17 @@ public sealed class FolderWatcher : IAsyncDisposable
         {
             RecurseSubdirectories = false,
             // Ссылки (symlink, junction) не проходим: они могут вести за пределы рабочей папки.
-            AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.Hidden | FileAttributes.System,
+            AttributesToSkip = FileAttributes.ReparsePoint,
             IgnoreInaccessible = false,
         };
         var entries = 0;
-        var folders = new Stack<string>();
-        folders.Push(folder);
-        while (folders.TryPop(out var directory))
+        // Папка и «тихая» ли она: файлы скрытых папок известны Pepa, но событий не дают (когда папку покажут или
+        // переименуют, её файлы не новые).
+        var folders = new Stack<(string Path, bool Quiet)>();
+        folders.Push((folder, false));
+        while (folders.TryPop(out var current))
         {
+            var directory = current.Path;
             try
             {
                 foreach (var entry in new DirectoryInfo(directory).EnumerateFileSystemInfos("*", options))
@@ -574,13 +661,19 @@ public sealed class FolderWatcher : IAsyncDisposable
                         throw new TooManyFilesException(allEntries: true);
                     }
 
+                    var hidden = (entry.Attributes & (FileAttributes.Hidden | FileAttributes.System)) != 0;
                     if (entry is DirectoryInfo subfolder)
                     {
                         if (settings.Subfolders)
                         {
-                            folders.Push(subfolder.FullName);
+                            folders.Push((subfolder.FullName, current.Quiet || hidden));
                         }
 
+                        continue;
+                    }
+
+                    if (hidden)
+                    {
                         continue;
                     }
 
@@ -601,22 +694,27 @@ public sealed class FolderWatcher : IAsyncDisposable
                         throw new TooManyFilesException(allEntries: false);
                     }
 
-                    var relative = settings.Folder + "/" + Path.GetRelativePath(folder, file.FullName).Replace(Path.DirectorySeparatorChar, '/');
+                    var relative = Relative(folder, settings, file.FullName);
                     var written = file.LastWriteTimeUtc;
                     var created = file.CreationTimeUtc;
                     listing.Files[relative] = new FileSeen(new FileVersion(file.Length, written.Ticks, created.Ticks),
-                        new DateTimeOffset(created > written ? created : written, TimeSpan.Zero), file.FullName);
+                        new DateTimeOffset(created > written ? created : written, TimeSpan.Zero), file.FullName, current.Quiet);
                 }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && directory != folder)
             {
                 // Вложенная папка не читается (нет доступа, удалили во время проверки): её файлы считаем прежними.
-                listing.Unreadable.Add(settings.Folder + "/" + Path.GetRelativePath(folder, directory).Replace(Path.DirectorySeparatorChar, '/'));
+                var relative = Relative(folder, settings, directory);
+                listing.Unreadable.Add(relative);
+                listing.Skipped.Add(relative);
             }
         }
 
         return listing;
     }
+
+    private static string Relative(string folder, FolderWatchSettings settings, string fullPath) =>
+        settings.Folder + "/" + Path.GetRelativePath(folder, fullPath).Replace(Path.DirectorySeparatorChar, '/');
 
     /// <summary>Файл дописан: его можно открыть для чтения, не разрешая другим запись (не получится, пока его пишут).</summary>
     /// <remarks>На Linux и macOS такая проверка не действует (блокировки там только рекомендательные) — там остаётся только
@@ -637,6 +735,24 @@ public sealed class FolderWatcher : IAsyncDisposable
     // ───────────── Список известных файлов на диске ─────────────
 
     private string SnapshotPath(string id) => Path.Combine(_stateDirectory, $"watch-{id}.json");
+
+    /// <summary>Первая версия слежения называла список «{id}.json».</summary>
+    private string LegacySnapshotPath(string id) => Path.Combine(_stateDirectory, $"{id}.json");
+
+    private void MigrateLegacySnapshot(string id)
+    {
+        try
+        {
+            if (!File.Exists(SnapshotPath(id)) && File.Exists(LegacySnapshotPath(id)))
+            {
+                File.Move(LegacySnapshotPath(id), SnapshotPath(id));
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(ex, "Не удалось переименовать старый список файлов слежения {Id}.", id);
+        }
+    }
 
     private string CheckedPath => Path.Combine(_stateDirectory, "checked.json");
 
@@ -825,7 +941,8 @@ public sealed class FolderWatcher : IAsyncDisposable
         public bool SameContent(FileVersion other) => Size == other.Size && Ticks == other.Ticks;
     }
 
-    private readonly record struct FileSeen(FileVersion Version, DateTimeOffset AppearedAt, string FullPath);
+    /// <param name="Quiet">Файл в скрытой вложенной папке: известен, но событий о нём нет.</param>
+    private readonly record struct FileSeen(FileVersion Version, DateTimeOffset AppearedAt, string FullPath, bool Quiet = false);
 
     /// <param name="StableSince">С какой проверки размер и время изменения не менялись.</param>
     /// <param name="CatchUp">Файл замечен при первой проверке после запуска Pepa (мог появиться без неё).</param>
@@ -843,10 +960,13 @@ public sealed class FolderWatcher : IAsyncDisposable
         /// <summary>Вложенные папки, которые не прочитались (путь в рабочей папке).</summary>
         public List<string> Unreadable { get; } = [];
 
+        /// <summary>Вложенные папки, которые не прочитались (путь в рабочей папке) — их файлы считаются прежними.</summary>
+        public HashSet<string> Skipped { get; } = new(StringComparer.Ordinal);
+
         public bool HasTemporaryNear(string fullPath) => Temporary.Count > 0 && TemporarySuffixes.Any(s => Temporary.Contains(fullPath + s));
 
-        public bool IsUnreadable(string path) =>
-            Unreadable.Any(u => path.StartsWith(u + "/", StringComparison.Ordinal)) && path.StartsWith(folder + "/", StringComparison.Ordinal);
+        public bool IsSkipped(string path) =>
+            path.StartsWith(folder + "/", StringComparison.Ordinal) && Skipped.Any(u => path.StartsWith(u + "/", StringComparison.Ordinal));
     }
 
     private sealed class WatchState(FolderWatchSettings settings)
@@ -857,7 +977,13 @@ public sealed class FolderWatcher : IAsyncDisposable
         public Dictionary<string, PendingFile> Pending { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, Tombstone> Tombstones { get; } = new(StringComparer.Ordinal);
         public DateTimeOffset? LastScanAt { get; set; }
-        public DateTimeOffset NextScanAt { get; set; } = DateTimeOffset.MinValue;
+        /// <summary>Когда проверять снова (по монотонным часам: перевод часов назад не останавливает слежение).</summary>
+        public long NextScanTimestamp { get; set; }
+
+        /// <summary>Вложенные папки, которых в прошлую проверку не было видно.</summary>
+        public HashSet<string> Skipped { get; set; } = new(StringComparer.Ordinal);
+
+        public DateTimeOffset TombstonesSweptAt { get; set; } = DateTimeOffset.MinValue;
         public string? Error { get; set; }
         public string? Note { get; set; }
 

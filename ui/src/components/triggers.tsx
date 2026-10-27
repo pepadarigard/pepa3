@@ -347,7 +347,7 @@ function TriggerEditor({ scenarioId, scenarioName, inputs, trigger, kind, onDone
             <input className="input" value={correlationKey} placeholder="любой" list={source.trim().toLowerCase() === "files" ? "watched-folders" : undefined}
               onChange={(e) => setCorrelationKey(e.target.value)} />
             <datalist id="watched-folders">
-              {(watches.data?.watches ?? []).map((w) => <option key={w.id} value={w.folder}>{w.pattern}</option>)}
+              {(watches.data?.watches ?? []).filter((w) => w.enabled).map((w) => <option key={w.id} value={w.folder}>{w.pattern}</option>)}
             </datalist>
             <span className="field-help">Необязательно. Запуск — только для событий с этим ключом (точное совпадение).</span>
           </label>
