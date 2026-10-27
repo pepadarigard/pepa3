@@ -119,5 +119,27 @@ public sealed class ExpressionTests
         Assert.Contains("пустой", error.Message);
         Assert.Throws<ExpressionException>(() => _evaluator.RenderUrl("https://api.example/items/{{ vars.empty }}", scope));
     }
+
+    [Theory]
+    [InlineData("https://api.example/items/{{ vars.dots }}", "пути")]
+    [InlineData("https://api.example/items/{{ vars.dot }}/delete", "пути")]
+    [InlineData("https://{{ vars.tenant }}.example.com/api", "имени сайта")]
+    [InlineData("{{ vars.base }}{{ vars.path }}", "имени сайта")]
+    public void Url_template_refuses_values_that_would_change_the_address(string template, string message)
+    {
+        var scope = Scope(new JsonObject
+        {
+            ["dots"] = "..", ["dot"] = ".", ["tenant"] = "evil.test/#", ["base"] = "https://api.example", ["path"] = "/orders/1",
+        });
+        Assert.Contains(message, Assert.Throws<ExpressionException>(() => _evaluator.RenderUrl(template, scope)).Message);
+    }
+
+    [Fact]
+    public void Url_template_allows_dots_in_parameters_and_a_plain_tenant()
+    {
+        var scope = Scope(new JsonObject { ["dots"] = "..", ["tenant"] = "shop-7" });
+        Assert.Equal("https://api.example/find?q=..", _evaluator.RenderUrl("https://api.example/find?q={{ vars.dots }}", scope));
+        Assert.Equal("https://shop-7.example.com/api", _evaluator.RenderUrl("https://{{ vars.tenant }}.example.com/api", scope));
+    }
 }
 

@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Text.Json.Nodes;
 using Pepa.Core;
 using Pepa.Core.Model;
 using Pepa.Core.Nodes;
@@ -74,9 +76,27 @@ public sealed class AskUserNode : INodeExecutor
         }
 
         // Варианты заданы, но получились пустыми (переменная не заполнена): без них подошёл бы любой ответ.
-        if (!string.IsNullOrWhiteSpace(context.Node.Config.GetString("options")) && Options(context.GetString("options")).Count == 0)
+        var options = Options(context.GetString("options"));
+        if (!string.IsNullOrWhiteSpace(context.Node.Config.GetString("options")) && options.Count == 0)
         {
             throw new NodeInputException("Варианты ответа получились пустыми — проверьте переменные в них.");
+        }
+
+        // Ответ должен поместиться в переменную: иначе на вопрос нельзя было бы ответить ни одним вариантом.
+        var saveTo = context.RequireString("saveTo");
+        var type = context.Graph?.Definition.Variables.FirstOrDefault(v => v.Name == saveTo)?.Type ?? VariableType.Any;
+        if (type is VariableType.List or VariableType.Object)
+        {
+            throw new NodeInputException($"Ответ — текст, а переменная «{saveTo}» — {(type == VariableType.List ? "список" : "объект")}: " +
+                                         "сделайте её текстом или «любой».");
+        }
+
+        foreach (var option in context.GetBoolean("allowText") ? [] : options)
+        {
+            if (!TryConvert(option, type, out _, out var problem))
+            {
+                throw new NodeInputException($"Вариант «{option}» не подходит для переменной «{saveTo}»: {problem}");
+            }
         }
 
         var spec = new EventSubscriptionSpec
@@ -85,10 +105,62 @@ public sealed class AskUserNode : INodeExecutor
             EventType = AnswerType,
             // Свой ключ у каждого вопроса: ответ на него не достанется никому другому.
             CorrelationKey = $"{context.ProcessId}:{Guid.NewGuid():N}",
-            SaveTo = context.RequireString("saveTo"),
+            SaveTo = saveTo,
             Purpose = SubscriptionPurpose.Question,
         };
         return ValueTask.FromResult<NodeResult>(new NodeResult.WaitForEvent(spec, FlowNodes.TimeoutAt(context)));
+    }
+
+    /// <summary>
+    /// Ответ — в тип переменной: текст и «любой» — как есть; число — с запятой или точкой, с пробелами между разрядами, но
+    /// без нулей в начале (код «048213» числом стал бы другим) и конечное; «да/нет» — true/false.
+    /// </summary>
+    public static bool TryConvert(string value, VariableType type, out JsonNode converted, out string problem)
+    {
+        converted = JsonValue.Create(value);
+        problem = "";
+        switch (type)
+        {
+            case VariableType.Any or VariableType.Text:
+                return true;
+            case VariableType.Number:
+            {
+                var normalized = value.Trim().Replace(" ", "", StringComparison.Ordinal).Replace(',', '.');
+                var digits = normalized.TrimStart('-', '+');
+                if (digits.Length > 1 && digits[0] == '0' && char.IsAsciiDigit(digits[1]))
+                {
+                    problem = "Ответ с нулём в начале — не число (это код?): сохраняйте его в переменную-текст.";
+                    return false;
+                }
+
+                if (!double.TryParse(normalized, NumberStyles.Float, CultureInfo.InvariantCulture, out var number) || !double.IsFinite(number))
+                {
+                    problem = "Ответ должен быть числом.";
+                    return false;
+                }
+
+                converted = JsonValue.Create(number);
+                return true;
+            }
+
+            case VariableType.Boolean:
+                switch (value.Trim().ToLowerInvariant())
+                {
+                    case "да" or "true" or "yes":
+                        converted = JsonValue.Create(true);
+                        return true;
+                    case "нет" or "false" or "no":
+                        converted = JsonValue.Create(false);
+                        return true;
+                    default:
+                        problem = "Ответ должен быть «да» или «нет».";
+                        return false;
+                }
+
+            default:
+                problem = "ответ — текст, а переменная — список или объект: сделайте её текстом или «любой».";
+                return false;
+        }
     }
 
     /// <summary>Варианты ответа: непустые строки без пробелов по краям, без повторов.</summary>

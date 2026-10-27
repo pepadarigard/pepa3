@@ -247,20 +247,23 @@ public sealed class AttentionNotifierTests
     public async Task Question_is_reported_once_per_question_whatever_the_process_does_meanwhile()
     {
         var processes = new ConcurrentDictionary<string, ProcessRecord>();
-        var questions = new ConcurrentDictionary<string, AskedQuestion>();
+        var questions = new ConcurrentDictionary<string, IReadOnlyList<AskedQuestion>>();
+        var failLookup = 0;
         var telegram = new SavedMessages();
         await using var notifier = new AttentionNotifier((id, _) => Task.FromResult(processes.GetValueOrDefault(id)), telegram, () => true,
-            null, NullLogger.Instance, TimeSpan.FromMilliseconds(30),
-            question: (process, _) => Task.FromResult(questions.GetValueOrDefault(process.Id)));
+            null, NullLogger.Instance, TimeSpan.FromMilliseconds(30), retryDelay: TimeSpan.FromMilliseconds(50),
+            questions: (process, _) => Interlocked.Exchange(ref failLookup, 0) == 1
+                ? throw new InvalidOperationException("база занята")
+                : Task.FromResult(questions.GetValueOrDefault(process.Id) ?? []));
         var old = Process("old", ProcessStatus.Waiting);
         processes[old.Id] = old;
-        questions[old.Id] = new AskedQuestion(1, "Вопрос до запуска");
+        questions[old.Id] = [new AskedQuestion(1, "Вопрос до запуска")];
         notifier.Start([], recovery: null, [KeyValuePair.Create(old.Id, 1L)]);
 
         // Вопрос у процесса, другая ветвь которого работает, — тоже новость.
         var asking = Process("q", ProcessStatus.Running);
         processes[asking.Id] = asking;
-        questions[asking.Id] = new AskedQuestion(2, "Оплатить заказ A-17 на 900 ₽?");
+        questions[asking.Id] = [new AskedQuestion(2, "Оплатить заказ A-17 на 900 ₽?")];
         notifier.OnProcessChanged(old.Id);
         notifier.OnProcessChanged(asking.Id);
         await Eventually(() => telegram.Messages.Count == 1);
@@ -271,21 +274,29 @@ public sealed class AttentionNotifierTests
         Assert.Contains("Ответить — в Pepa на «Главной»", message);
         Assert.DoesNotContain("до запуска", message);
 
-        // Пауза и продолжение, решение по другой ветви — не новость: вопрос тот же.
+        // Пауза и продолжение — не новость; вопрос не прочитался — известный остаётся известным.
         processes[asking.Id] = asking with { Status = ProcessStatus.Paused };
         notifier.OnProcessChanged(asking.Id);
         await Task.Delay(120);
-        processes[asking.Id] = asking with { Status = ProcessStatus.NeedsAttention, Attention = AttentionKind.StepFailed };
-        notifier.OnProcessChanged(asking.Id);
-        await Eventually(() => telegram.Messages.Count == 2);
+        failLookup = 1;
         processes[asking.Id] = asking with { Status = ProcessStatus.Waiting };
         notifier.OnProcessChanged(asking.Id);
-        await Task.Delay(150);
-        Assert.Equal(2, telegram.Messages.Count);
-        Assert.Contains("ждёт вашего решения", telegram.Messages.Last());
+        await Task.Delay(250);
+        Assert.Single(telegram.Messages);
+
+        // Остановка ветви и второй вопрос другой ветви — в одной пачке: обе новости.
+        processes[asking.Id] = asking with { Status = ProcessStatus.NeedsAttention, Attention = AttentionKind.StepFailed };
+        questions[asking.Id] = [new AskedQuestion(2, "Оплатить заказ A-17 на 900 ₽?"), new AskedQuestion(3, "Код из SMS?")];
+        notifier.OnProcessChanged(asking.Id);
+        await Eventually(() => telegram.Messages.Count == 2);
+        var both = telegram.Messages.Last();
+        Assert.Contains("шаг не выполнен", both);
+        Assert.Contains("вопрос: Код из SMS?", both);
+        Assert.DoesNotContain("A-17", both);
 
         // Ответили и спросили снова тем же текстом (новая капча) — новый вопрос, новая новость.
-        questions[asking.Id] = new AskedQuestion(3, "Оплатить заказ A-17 на 900 ₽?");
+        processes[asking.Id] = asking with { Status = ProcessStatus.Waiting };
+        questions[asking.Id] = [new AskedQuestion(4, "Код из SMS?")];
         notifier.OnProcessChanged(asking.Id);
         await Eventually(() => telegram.Messages.Count == 3);
     }

@@ -250,6 +250,49 @@ public sealed class QuestionTests
         Assert.Empty(await h.Engine.ListQuestionsAsync(id));
     }
 
+    [Fact]
+    public async Task Secret_answer_saved_as_a_number_stays_hidden_and_a_code_with_a_leading_zero_is_refused()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var scenario = new ScenarioBuilder("Код числом")
+            .Variable("code", VariableType.Number)
+            .Node("start", "start")
+            .Node("ask", "user.ask", new { question = "Код?", secret = true, saveTo = "code" })
+            .Node("end", "end", new { message = "код {{ vars.code }}" })
+            .Chain("start", "ask").Edge("ask", "end", Ports.Event).Build();
+        var id = await h.RunAsync(scenario);
+        var question = await WaitQuestionAsync(h, id);
+
+        var zero = await Assert.ThrowsAsync<EngineOperationException>(() => h.Engine.AnswerQuestionAsync(question.Subscription.Id, "048213"));
+        Assert.Contains("нулём", zero.Message);
+        await Assert.ThrowsAsync<EngineOperationException>(() => h.Engine.AnswerQuestionAsync(question.Subscription.Id, "NaN"));
+        await Assert.ThrowsAsync<EngineOperationException>(() => h.Engine.AnswerQuestionAsync(question.Subscription.Id, "1e999"));
+        await h.Engine.AnswerQuestionAsync(question.Subscription.Id, "48 213");
+        var done = await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+
+        Assert.Equal(48213, done.Variables["code"]!.GetValue<double>());
+        var journal = string.Join("\n", (await h.Store.GetJournalAsync(id)).Select(j => j.Message));
+        Assert.DoesNotContain("48213", journal);
+        Assert.DoesNotContain("48213", done.StatusMessage);
+        var masker = new SecretMasker(done, scenario);
+        Assert.DoesNotContain("48213", masker.Variables(done.Variables).ToJsonString());
+        Assert.DoesNotContain("48213", string.Join("\n", (await h.StepsAsync(id)).Select(masker.Step).Select(s => s.Output?.ToJsonString())));
+    }
+
+    [Fact]
+    public async Task Options_that_do_not_fit_the_variable_stop_the_step()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var id = await h.RunAsync(new ScenarioBuilder("Да-нет")
+            .Variable("ok", VariableType.Boolean)
+            .Node("start", "start")
+            .Node("ask", "user.ask", new { question = "Оплатить?", options = "Оплатить\nОтменить", saveTo = "ok" })
+            .Node("end", "end")
+            .Chain("start", "ask").Edge("ask", "end", Ports.Event).Build());
+        var stopped = await h.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
+        Assert.Contains("Вариант «Оплатить» не подходит", stopped.StatusMessage);
+    }
+
     private static async Task<EventRecord> WaitEventAsync(EngineHarness h, long eventId, EventState state)
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);

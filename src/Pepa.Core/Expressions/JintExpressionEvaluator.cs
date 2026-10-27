@@ -130,16 +130,34 @@ public sealed class JintExpressionEvaluator(ExpressionLimits? limits = null) : I
                     break;
                 case TemplateParser.Expression expression:
                     var value = Stringify(engine, Run(engine, expression.Code));
-                    if (InScheme(builder))
+                    var shown = $"«{{{{ {expression.Code} }}}}»";
+                    if (builder.Length == 0)
                     {
-                        // Начало адреса или сайт (https://{{ vars.base }}) — как есть.
+                        // Адрес целиком или его начало ({{ vars.base }}/orders) — как есть.
+                        builder.Append(value);
+                    }
+                    else if (InScheme(builder))
+                    {
+                        // Часть имени сайта (https://{{ vars.tenant }}.example.com): «/», «?», «#», «@» увели бы запрос на другой сайт.
+                        if (value.Length == 0 || value.IndexOfAny(['/', '?', '#', '@', '\\']) >= 0 || value.Any(char.IsWhiteSpace))
+                        {
+                            throw new ExpressionException(
+                                $"Подстановка {shown} в имени сайта получилась пустой или с «/», «?», «#», «@» — запрос ушёл бы на " +
+                                "другой адрес. Адрес целиком подставляйте одной подстановкой в начале: {{ vars.url }}.");
+                        }
+
                         builder.Append(value);
                     }
                     else if (value.Length == 0)
                     {
                         throw new ExpressionException(
-                            $"Подстановка «{{{{ {expression.Code} }}}}» в адресе получилась пустой — адрес стал бы другим " +
+                            $"Подстановка {shown} в адресе получилась пустой — адрес стал бы другим " +
                             "(например, без номера заказа). Проверьте переменные.");
+                    }
+                    else if (value.All(c => c == '.') && !InQuery(builder))
+                    {
+                        // «.» и «..» в пути — переход к другой папке сайта (…/items/.. — это …/), кодирование тут не спасает.
+                        throw new ExpressionException($"Подстановка {shown} в пути адреса — «{value}»: адрес стал бы другим. Проверьте переменные.");
                     }
                     else
                     {
@@ -160,6 +178,9 @@ public sealed class JintExpressionEvaluator(ExpressionLimits? limits = null) : I
         var scheme = text.IndexOf("://", StringComparison.Ordinal);
         return scheme < 0 || text.IndexOfAny(['/', '?', '#'], scheme + 3) < 0;
     }
+
+    /// <summary>Подстановка уже в параметрах или после «#».</summary>
+    private static bool InQuery(System.Text.StringBuilder built) => built.ToString().IndexOfAny(['?', '#']) >= 0;
 
     private Engine CreateEngine(ExpressionScope scope)
     {

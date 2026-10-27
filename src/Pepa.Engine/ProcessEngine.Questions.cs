@@ -136,11 +136,14 @@ public sealed partial class ProcessEngine
                 throw new EngineOperationException("Выберите один из вариантов ответа.");
             }
 
-            var payload = new JsonObject { ["answer"] = Converted(value, question) };
+            var converted = Converted(value, question);
+            var payload = new JsonObject { ["answer"] = converted };
             var secrets = SecretsIn(RawSecretValues(question.Process, question.Definition), payload);
             if (question.Secret)
             {
+                // И как введён, и как сохранится (число без пробелов, «да» как true).
                 secrets.Add(value);
+                secrets.Add(converted.AsString() ?? converted.ToJsonString());
             }
 
             process = question.Process;
@@ -180,33 +183,15 @@ public sealed partial class ProcessEngine
     }
 
     /// <summary>
-    /// Ответ — в тип переменной, куда он сохраняется: число и «да/нет» разбираются, текст и «любой» — как есть. Иначе ответ
-    /// не принимается: принятый, он бы не поместился в переменную, а вопрос был бы уже закрыт.
+    /// Ответ — в тип переменной, куда он сохраняется (см. <see cref="AskUserNode.TryConvert"/>). Иначе ответ не принимается:
+    /// принятый, он бы не поместился в переменную, а вопрос был бы уже закрыт.
     /// </summary>
     private static JsonNode Converted(string value, QuestionInfo question)
     {
         var type = question.Definition.Variables.FirstOrDefault(v => v.Name == question.Subscription.SaveTo)?.Type ?? VariableType.Any;
-        switch (type)
-        {
-            case VariableType.Any or VariableType.Text:
-                return JsonValue.Create(value);
-            case VariableType.Number:
-                var normalized = value.Trim().Replace(" ", "", StringComparison.Ordinal).Replace(',', '.');
-                return double.TryParse(normalized, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var number)
-                    ? JsonValue.Create(number)
-                    : throw new EngineOperationException("Ответ должен быть числом.");
-            case VariableType.Boolean:
-                return value.Trim().ToLowerInvariant() switch
-                {
-                    "да" or "true" or "yes" => JsonValue.Create(true),
-                    "нет" or "false" or "no" => JsonValue.Create(false),
-                    _ => throw new EngineOperationException("Ответ должен быть «да» или «нет»."),
-                };
-            default:
-                throw new EngineOperationException(
-                    $"Ответ сохраняется в переменную «{question.Subscription.SaveTo}» с типом, в который текст не превратить — " +
-                    "сделайте её текстом или «любой».");
-        }
+        return AskUserNode.TryConvert(value, type, out var converted, out var problem)
+            ? converted
+            : throw new EngineOperationException(problem);
     }
 
     private static string ExternalId(SubscriptionRecord subscription) => $"answer:{subscription.Id}";

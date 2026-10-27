@@ -51,6 +51,8 @@ public sealed class HttpGetNode(HttpClient client) : INodeExecutor
         using var first = HttpNodes.BuildRequest(context, HttpMethod.Get, null);
         var request = first;
         var origin = first.RequestUri!;
+        // Куки, которые сайт ставит по дороге (вход с перенаправлениями), — только на время этого запроса.
+        var cookies = new System.Net.CookieContainer();
         HttpResponseMessage? response = null;
         try
         {
@@ -68,6 +70,21 @@ public sealed class HttpGetNode(HttpClient client) : INodeExecutor
                 catch (OperationCanceledException ex) when (HttpNodes.ConnectTimedOut(ex, cancellationToken))
                 {
                     return NodeResult.Fail($"Не удалось получить «{HttpNodes.Display(request.RequestUri!)}»: {HttpNodes.ConnectTimeoutText}.");
+                }
+
+                if (response.Headers.TryGetValues("Set-Cookie", out var setCookies))
+                {
+                    foreach (var header in setCookies)
+                    {
+                        try
+                        {
+                            cookies.SetCookies(request.RequestUri!, header);
+                        }
+                        catch (System.Net.CookieException)
+                        {
+                            // Неправильная кука — без неё (как у браузера).
+                        }
+                    }
                 }
 
                 if (!IsRedirect(response.StatusCode) || response.Headers.Location is not { } location)
@@ -103,7 +120,21 @@ public sealed class HttpGetNode(HttpClient client) : INodeExecutor
                         continue;
                     }
 
-                    redirected.Headers.TryAddWithoutValidation(name, values);
+                    if (!name.Equals("Cookie", StringComparison.OrdinalIgnoreCase))
+                    {
+                        redirected.Headers.TryAddWithoutValidation(name, values);
+                    }
+                }
+
+                // Свои куки — тому же сайту, полученные по дороге — по правилам самих кук (сайт и путь).
+                var cookie = string.Join("; ", new[]
+                {
+                    SameOrigin(origin, next) && first.Headers.TryGetValues("Cookie", out var own) ? string.Join("; ", own) : "",
+                    cookies.GetCookieHeader(next),
+                }.Where(c => c.Length > 0));
+                if (cookie.Length > 0)
+                {
+                    redirected.Headers.TryAddWithoutValidation("Cookie", cookie);
                 }
 
                 response.Dispose();
@@ -237,7 +268,31 @@ public sealed class HttpSendNode(HttpClient client) : INodeExecutor
         return ValueTask.FromResult<JsonObject?>(new JsonObject { ["key"] = key });
     }
 
+    /// <summary>
+    /// С ключом от повтора попытки этого шага могли выполниться (ответ потерялся, а повтор безопасен). Поэтому окончательная
+    /// ошибка не первой попытки — «не отправлен», «не сейчас», отказ сервера — не значит «запрос не выполнен»: это «итог
+    /// неизвестен», а не выход «Ошибка» (сверить с сервером Pepa не может).
+    /// </summary>
     public async ValueTask<NodeResult> ExecuteAsync(NodeExecutionContext context, CancellationToken cancellationToken)
+    {
+        var earlier = context.GetBoolean("idempotent") && context.Attempt > 1;
+        NodeResult result;
+        try
+        {
+            result = await SendAsync(context, cancellationToken);
+        }
+        catch (NodeInputException ex) when (earlier)
+        {
+            result = NodeResult.Fail(ex.Message, retryable: false);
+        }
+
+        return earlier && result is NodeResult.Failure failure && (!failure.Retryable || context.Attempt > context.Node.Settings.RetryCount)
+            ? new NodeResult.Unknown(failure.Error + " Раньше в этом шаге запрос уже уходил с тем же ключом от повтора и мог " +
+                                     "выполниться — проверьте на сайте и решите.")
+            : result;
+    }
+
+    private async Task<NodeResult> SendAsync(NodeExecutionContext context, CancellationToken cancellationToken)
     {
         if (!StatusSet.TryParse(context.GetString("accept"), out var accept, out var problem))
         {

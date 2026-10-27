@@ -424,4 +424,39 @@ public sealed class HttpNodeTests
             Id = "n", Type = HttpGetNode.TypeName, Config = new JsonObject { ["url"] = "{{ vars.base }}/api", ["accept"] = "2xx" },
         }));
     }
+
+    [Fact]
+    public async Task With_a_key_a_later_definitive_failure_is_unknown_because_an_earlier_attempt_may_have_run()
+    {
+        var notSent = new HttpSendNode(Client(new FakeHttp((_, _) =>
+            throw new HttpRequestException(HttpRequestError.ConnectionError, "refused"))));
+        var input = new { url = "https://pay.example/charges", body = new { a = 1 }, idempotent = true };
+        var previous = await notSent.PrepareAsync(Context(input), CancellationToken.None);
+
+        // Вторая и последняя попытка (первая могла выполниться) — «не отправлен» не значит «не выполнен».
+        var unknown = Assert.IsType<NodeResult.Unknown>(await Run(notSent, input, previous, retries: 1, attempt: 2));
+        Assert.Contains("мог", unknown.Reason);
+        // Пока повторы остались — обычная ошибка с повтором (тот же ключ).
+        Assert.IsType<NodeResult.Failure>(await Run(notSent, input, previous, retries: 2, attempt: 2));
+        // Отказ сервера после прошлых попыток — тоже «неизвестно».
+        var rejected = new HttpSendNode(Client(new FakeHttp((_, _) => FakeHttp.Json("{}", HttpStatusCode.BadRequest))));
+        Assert.IsType<NodeResult.Unknown>(await Run(rejected, input, previous, retries: 3, attempt: 2));
+        // Без ключа и с первой попытки — как раньше.
+        Assert.IsType<NodeResult.Failure>(await Run(notSent, new { url = "https://pay.example/charges", body = new { a = 1 } }, attempt: 2));
+        Assert.IsType<NodeResult.Failure>(await Run(rejected, input));
+    }
+
+    [Fact]
+    public async Task Cookie_set_during_redirects_is_carried_to_the_next_hop()
+    {
+        using var server = await LocalServer.StartAsync(request => request.StartsWith("GET /login", StringComparison.Ordinal)
+            ? "HTTP/1.1 302 Found\r\nLocation: /home\r\nSet-Cookie: sid=S-1; Path=/\r\nContent-Length: 0\r\n\r\n"
+            : request.Contains("sid=S-1", StringComparison.Ordinal)
+                ? "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 4\r\n\r\nhome"
+                : "HTTP/1.1 302 Found\r\nLocation: /login\r\nContent-Length: 0\r\n\r\n");
+        var ok = Assert.IsType<NodeResult.Success>(await Run(new HttpGetNode(HttpNodes.CreateClient()), new { url = $"{server.Url}/login", saveTo = "x" }));
+        Assert.Equal("home", ok.VariableUpdates["x"]!.GetValue<string>());
+        Assert.Equal(2, server.Requests.Count);
+    }
 }
+

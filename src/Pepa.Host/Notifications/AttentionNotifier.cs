@@ -30,7 +30,7 @@ public sealed class AttentionNotifier : IAsyncDisposable
     private const int MaxListed = 8;
 
     private readonly Func<string, CancellationToken, Task<ProcessRecord?>> _load;
-    private readonly Func<ProcessRecord, CancellationToken, Task<AskedQuestion?>>? _question;
+    private readonly Func<ProcessRecord, CancellationToken, Task<IReadOnlyList<AskedQuestion>>>? _questions;
     private readonly ITelegramGateway _telegram;
     private readonly Func<bool> _telegramEnabled;
     private readonly IDesktopAlerts? _desktop;
@@ -39,8 +39,8 @@ public sealed class AttentionNotifier : IAsyncDisposable
     private readonly Channel<string> _changes = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
     private readonly Dictionary<string, Known> _notified = new(StringComparer.Ordinal);
 
-    /// <summary>О чём уже сообщено: остановка (её состояние) и вопрос (номер — повтор того же текста тоже новый вопрос).</summary>
-    private sealed record Known(string? Attention, long? Question);
+    /// <summary>О чём уже сообщено: остановка (её состояние) и вопросы (номера — повтор того же текста тоже новый вопрос).</summary>
+    private sealed record Known(string? Attention, IReadOnlySet<long> Questions);
     private readonly Dictionary<string, int> _failedReads = new(StringComparer.Ordinal);
     private readonly TimeSpan _retryDelay;
     private const int MaxReadRetries = 3;
@@ -52,12 +52,12 @@ public sealed class AttentionNotifier : IAsyncDisposable
     /// <param name="telegramEnabled">Включено ли уведомление в Telegram (настройка может меняться на ходу).</param>
     /// <param name="batchDelay">Сколько собирать изменения в одну пачку.</param>
     /// <param name="retryDelay">Через сколько снова прочитать процесс, если чтение не удалось.</param>
-    /// <param name="question">Вопрос, которого ждёт процесс («Спросить пользователя»), уже без секретов; null — не ждёт.</param>
+    /// <param name="questions">Вопросы, которых ждёт процесс («Спросить пользователя»), уже без секретов.</param>
     public AttentionNotifier(Func<string, CancellationToken, Task<ProcessRecord?>> load, ITelegramGateway telegram, Func<bool> telegramEnabled,
         IDesktopAlerts? desktop, ILogger logger, TimeSpan? batchDelay = null, TimeSpan? retryDelay = null,
-        Func<ProcessRecord, CancellationToken, Task<AskedQuestion?>>? question = null)
+        Func<ProcessRecord, CancellationToken, Task<IReadOnlyList<AskedQuestion>>>? questions = null)
     {
-        _question = question;
+        _questions = questions;
         _retryDelay = retryDelay ?? TimeSpan.FromSeconds(30);
         _load = load;
         _telegram = telegram;
@@ -80,12 +80,13 @@ public sealed class AttentionNotifier : IAsyncDisposable
     {
         foreach (var process in waitingAtStart)
         {
-            _notified[process.Id] = new Known(Signature(process), null);
+            _notified[process.Id] = new Known(Signature(process), new HashSet<long>());
         }
 
         foreach (var (processId, question) in askedAtStart ?? [])
         {
-            _notified[processId] = (_notified.GetValueOrDefault(processId) ?? new Known(null, null)) with { Question = question };
+            var known = _notified.GetValueOrDefault(processId);
+            _notified[processId] = new Known(known?.Attention, new HashSet<long>((IEnumerable<long>?)known?.Questions ?? []) { question });
         }
 
         _background.Add(Task.Run(() => LoopAsync(_stop.Token)));
@@ -137,39 +138,51 @@ public sealed class AttentionNotifier : IAsyncDisposable
 
                     _failedReads.Remove(id);
 
-                    // Процесс задал вопрос — о нём тоже сообщается (без ответа процесс дальше не пойдёт), в каком бы состоянии
-                    // процесс ни был: другая ветвь может работать или ждать решения.
-                    AskedQuestion? question = null;
-                    if (process is { IsTerminal: false } && _question is not null)
+                    var known = _notified.GetValueOrDefault(id);
+
+                    // Процесс задал вопросы — о них тоже сообщается (без ответа процесс дальше не пойдёт), в каком бы
+                    // состоянии процесс ни был: другая ветвь может работать или ждать решения. Не прочитались — известные
+                    // остаются известными (иначе о них сообщили бы снова), а прочитать попробуем ещё раз.
+                    IReadOnlyList<AskedQuestion> questions = [];
+                    var questionsRead = true;
+                    if (process is { IsTerminal: false } && _questions is not null)
                     {
                         try
                         {
-                            question = await _question(process, stop);
+                            questions = await _questions(process, stop);
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)
                         {
-                            _logger.LogWarning(ex, "Не удалось прочитать вопрос процесса {Id} для уведомления.", id);
+                            questionsRead = false;
+                            var failures = _failedReads.GetValueOrDefault(id) + 1;
+                            _failedReads[id] = failures;
+                            _logger.LogWarning(ex, "Не удалось прочитать вопросы процесса {Id} для уведомления (попытка {Attempt}).", id, failures);
+                            if (failures <= MaxReadRetries)
+                            {
+                                _background.Add(RetryLaterAsync(id, stop));
+                            }
                         }
                     }
 
                     var attention = process is { Status: ProcessStatus.NeedsAttention } ? Signature(process) : null;
-                    if (process is null || (attention is null && question is null))
+                    var asked = questionsRead ? questions.Select(q => q.Id).ToHashSet() : new HashSet<long>((IEnumerable<long>?)known?.Questions ?? []);
+                    if (process is null || (attention is null && asked.Count == 0))
                     {
                         // Решение принято, ответ дан (или процесс удалён) — следующая остановка снова будет новостью.
                         _notified.Remove(id);
                         continue;
                     }
 
-                    // Новость — новая остановка или новый вопрос; пауза и продолжение, решение по другой ветви — нет.
-                    var known = _notified.GetValueOrDefault(id);
-                    _notified[id] = new Known(attention, question?.Id);
-                    if (question is not null && question.Id != known?.Question)
-                    {
-                        fresh.Add(new Notice(process, question.Text));
-                    }
-                    else if (attention is not null && attention != known?.Attention)
+                    // Новость — новая остановка и каждый новый вопрос; пауза и продолжение, решение по другой ветви — нет.
+                    _notified[id] = new Known(attention, asked);
+                    if (attention is not null && attention != known?.Attention)
                     {
                         fresh.Add(new Notice(process, null));
+                    }
+
+                    foreach (var question in questions.Where(q => known?.Questions.Contains(q.Id) != true))
+                    {
+                        fresh.Add(new Notice(process, question.Text));
                     }
                 }
 

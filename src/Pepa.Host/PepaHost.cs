@@ -165,10 +165,8 @@ public sealed class PepaHost : IAsyncDisposable
         builder.Services.AddSingleton(desktopRecorder);
         builder.Services.AddSingleton(sp => new Notifications.AttentionNotifier((id, ct) => store.GetProcessAsync(id, ct), telegram,
             () => settings.Current.NotifyTelegram, options.DesktopAlerts, sp.GetRequiredService<ILogger<Notifications.AttentionNotifier>>(),
-            question: async (process, ct) =>
-                (await sp.GetRequiredService<ProcessEngine>().ListQuestionsAsync(process.Id, ct)).FirstOrDefault() is { } asked
-                    ? new Notifications.AskedQuestion(asked.Subscription.Id, ProcessMapper.Question(asked).Text)
-                    : null));
+            questions: async (process, ct) => (await sp.GetRequiredService<ProcessEngine>().ListQuestionsAsync(process.Id, ct))
+                .Select(asked => new Notifications.AskedQuestion(asked.Subscription.Id, ProcessMapper.Question(asked).Text)).ToList()));
         builder.Services.AddSingleton(sp => new Backups.HistoryRetention(store, () => settings.Current.HistoryDays, TimeProvider.System,
             sp.GetRequiredService<ILogger<Backups.HistoryRetention>>()));
         builder.Services.AddSingleton(sp => new Backups.DatabaseBackups(store, TimeProvider.System, sp.GetRequiredService<ILogger<Backups.DatabaseBackups>>()));
@@ -256,7 +254,7 @@ public sealed class PepaHost : IAsyncDisposable
         // Уже ждавшие решения до запуска — не новость (их видно на «Главной»); после перезапуска — одно общее сообщение.
         // Вопросы, заданные до запуска, — тоже не новость (они на «Главной»).
         var asked = (await engine.ListQuestionsAsync(cancellationToken: cancellationToken))
-            .GroupBy(q => q.Process.Id).Select(g => KeyValuePair.Create(g.Key, g.First().Subscription.Id)).ToList();
+            .Select(q => KeyValuePair.Create(q.Process.Id, q.Subscription.Id)).ToList();
         notifier.Start(unfinished.Where(p => p.Status == ProcessStatus.NeedsAttention), hostContext.Recovery, asked);
         // Подключение к уже авторизованному Telegram — в фоне, чтобы не задерживать запуск окна.
         _ = Task.Run(async () =>
