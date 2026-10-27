@@ -13,6 +13,9 @@ public interface IDesktopAlerts
     void RequestAttention(string text);
 }
 
+/// <summary>Вопрос процесса для уведомления: номер (новый вопрос — новый номер) и текст без секретов.</summary>
+public sealed record AskedQuestion(long Id, string Text);
+
 /// <summary>
 /// Сообщает, что процесс остановился и ждёт решения: окну Pepa (мигание на панели задач) и, если включено в «Настройках»,
 /// в Telegram — в «Избранное» своего аккаунта (полезно, когда вас нет у компьютера). Сообщения собираются в пачку
@@ -27,14 +30,17 @@ public sealed class AttentionNotifier : IAsyncDisposable
     private const int MaxListed = 8;
 
     private readonly Func<string, CancellationToken, Task<ProcessRecord?>> _load;
-    private readonly Func<ProcessRecord, CancellationToken, Task<string?>>? _question;
+    private readonly Func<ProcessRecord, CancellationToken, Task<AskedQuestion?>>? _question;
     private readonly ITelegramGateway _telegram;
     private readonly Func<bool> _telegramEnabled;
     private readonly IDesktopAlerts? _desktop;
     private readonly ILogger _logger;
     private readonly TimeSpan _batchDelay;
     private readonly Channel<string> _changes = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
-    private readonly Dictionary<string, string> _notified = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Known> _notified = new(StringComparer.Ordinal);
+
+    /// <summary>О чём уже сообщено: остановка (её состояние) и вопрос (номер — повтор того же текста тоже новый вопрос).</summary>
+    private sealed record Known(string? Attention, long? Question);
     private readonly Dictionary<string, int> _failedReads = new(StringComparer.Ordinal);
     private readonly TimeSpan _retryDelay;
     private const int MaxReadRetries = 3;
@@ -49,7 +55,7 @@ public sealed class AttentionNotifier : IAsyncDisposable
     /// <param name="question">Вопрос, которого ждёт процесс («Спросить пользователя»), уже без секретов; null — не ждёт.</param>
     public AttentionNotifier(Func<string, CancellationToken, Task<ProcessRecord?>> load, ITelegramGateway telegram, Func<bool> telegramEnabled,
         IDesktopAlerts? desktop, ILogger logger, TimeSpan? batchDelay = null, TimeSpan? retryDelay = null,
-        Func<ProcessRecord, CancellationToken, Task<string?>>? question = null)
+        Func<ProcessRecord, CancellationToken, Task<AskedQuestion?>>? question = null)
     {
         _question = question;
         _retryDelay = retryDelay ?? TimeSpan.FromSeconds(30);
@@ -68,18 +74,18 @@ public sealed class AttentionNotifier : IAsyncDisposable
 
     /// <param name="waitingAtStart">Процессы, которые ждали решения ещё до запуска: о них отдельно не сообщается.</param>
     /// <param name="recovery">Итог восстановления: если после перезапуска процессы ждут решения — одно сообщение об этом.</param>
-    /// <param name="askedAtStart">Вопросы, заданные ещё до запуска (процесс → вопрос): о них тоже не сообщается снова.</param>
+    /// <param name="askedAtStart">Вопросы, заданные ещё до запуска (процесс → номер вопроса): о них тоже не сообщается снова.</param>
     public void Start(IEnumerable<ProcessRecord> waitingAtStart, RecoveryReport? recovery,
-        IEnumerable<KeyValuePair<string, string>>? askedAtStart = null)
+        IEnumerable<KeyValuePair<string, long>>? askedAtStart = null)
     {
         foreach (var process in waitingAtStart)
         {
-            _notified[process.Id] = Signature(process);
+            _notified[process.Id] = new Known(Signature(process), null);
         }
 
         foreach (var (processId, question) in askedAtStart ?? [])
         {
-            _notified[processId] = QuestionSignature(question);
+            _notified[processId] = (_notified.GetValueOrDefault(processId) ?? new Known(null, null)) with { Question = question };
         }
 
         _background.Add(Task.Run(() => LoopAsync(_stop.Token)));
@@ -131,9 +137,10 @@ public sealed class AttentionNotifier : IAsyncDisposable
 
                     _failedReads.Remove(id);
 
-                    // Процесс задал вопрос — о нём тоже сообщается (без ответа процесс дальше не пойдёт).
-                    string? question = null;
-                    if (process is { Status: ProcessStatus.Waiting } && _question is not null)
+                    // Процесс задал вопрос — о нём тоже сообщается (без ответа процесс дальше не пойдёт), в каком бы состоянии
+                    // процесс ни был: другая ветвь может работать или ждать решения.
+                    AskedQuestion? question = null;
+                    if (process is { IsTerminal: false } && _question is not null)
                     {
                         try
                         {
@@ -145,18 +152,24 @@ public sealed class AttentionNotifier : IAsyncDisposable
                         }
                     }
 
-                    if (process is null || (process.Status != ProcessStatus.NeedsAttention && question is null))
+                    var attention = process is { Status: ProcessStatus.NeedsAttention } ? Signature(process) : null;
+                    if (process is null || (attention is null && question is null))
                     {
-                        // Решение принято (или процесс удалён) — следующая остановка снова будет новостью.
+                        // Решение принято, ответ дан (или процесс удалён) — следующая остановка снова будет новостью.
                         _notified.Remove(id);
                         continue;
                     }
 
-                    var signature = question is null ? Signature(process) : QuestionSignature(question);
-                    if (_notified.GetValueOrDefault(id) != signature)
+                    // Новость — новая остановка или новый вопрос; пауза и продолжение, решение по другой ветви — нет.
+                    var known = _notified.GetValueOrDefault(id);
+                    _notified[id] = new Known(attention, question?.Id);
+                    if (question is not null && question.Id != known?.Question)
                     {
-                        _notified[id] = signature;
-                        fresh.Add(new Notice(process, question));
+                        fresh.Add(new Notice(process, question.Text));
+                    }
+                    else if (attention is not null && attention != known?.Attention)
+                    {
+                        fresh.Add(new Notice(process, null));
                     }
                 }
 
@@ -284,7 +297,6 @@ public sealed class AttentionNotifier : IAsyncDisposable
 
     private static string Signature(ProcessRecord process) => $"{(int)process.Attention}|{process.AttentionStepId}|{process.StatusMessage}";
 
-    private static string QuestionSignature(string question) => "?" + question;
 
     /// <summary>О чём сообщить: процесс ждёт решения или (если есть вопрос) ответа на вопрос.</summary>
     internal sealed record Notice(ProcessRecord Process, string? Question);

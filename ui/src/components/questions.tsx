@@ -41,6 +41,7 @@ function QuestionItem({ question, showProcess }: { question: Question; showProce
   const [busy, setBusy] = useState(false);
 
   const send = async (answer: { answer?: string; option?: number }) => {
+    if (busy) return;
     setBusy(true);
     try {
       const result = await api.answer(question.id, answer);
@@ -82,7 +83,7 @@ function QuestionItem({ question, showProcess }: { question: Question; showProce
           <input
             className="input"
             type={question.secret ? "password" : "text"}
-            autoComplete="off"
+            autoComplete={question.secret ? "new-password" : "off"}
             aria-label="Ответ"
             placeholder={question.secret ? "Ответ (не сохранится в истории)" : question.options.length > 0 ? "Или свой ответ" : "Ответ"}
             value={text}

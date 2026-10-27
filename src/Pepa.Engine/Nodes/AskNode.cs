@@ -48,8 +48,9 @@ public sealed class AskUserNode : INodeExecutor
             },
             new FieldDescriptor
             {
-                Name = "image", Label = "Картинка к вопросу", Kind = FieldKind.Path, Placeholder = "снимки/капча.png",
-                Help = "Файл в рабочей папке (например, снимок из «Снимок страницы»): PNG, JPEG, GIF, WebP или BMP.",
+                Name = "image", Label = "Картинка к вопросу", Kind = FieldKind.Path, Placeholder = "снимки/капча-{{ process.id }}.png",
+                Help = "Файл в рабочей папке (например, снимок из «Снимок страницы»): PNG, JPEG, GIF, WebP или BMP. Показывается " +
+                       "файл таким, какой он сейчас, — у каждого процесса должно быть своё имя файла ({{ process.id }}).",
             },
             FlowNodes.TimeoutField("Если ответа не будет за это время — процесс пойдёт по выходу «Тайм-аут»."),
             new FieldDescriptor { Name = "saveTo", Label = "Сохранить ответ в", Kind = FieldKind.Variable, Required = true },
@@ -70,6 +71,12 @@ public sealed class AskUserNode : INodeExecutor
         if (string.IsNullOrWhiteSpace(context.GetString("question")))
         {
             throw new NodeInputException("Вопрос получился пустым — проверьте переменные в нём.");
+        }
+
+        // Варианты заданы, но получились пустыми (переменная не заполнена): без них подошёл бы любой ответ.
+        if (!string.IsNullOrWhiteSpace(context.Node.Config.GetString("options")) && Options(context.GetString("options")).Count == 0)
+        {
+            throw new NodeInputException("Варианты ответа получились пустыми — проверьте переменные в них.");
         }
 
         var spec = new EventSubscriptionSpec

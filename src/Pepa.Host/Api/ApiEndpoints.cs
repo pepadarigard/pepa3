@@ -646,18 +646,7 @@ internal static class ApiEndpoints
             (await engine.ListQuestionsAsync(string.IsNullOrWhiteSpace(processId) ? null : processId, ct)).Select(ProcessMapper.Question).ToList());
 
         api.MapPost("/questions/{id:long}/answer", async (long id, AnswerRequest request, ProcessEngine engine, CancellationToken ct) =>
-        {
-            var answer = request.Answer;
-            if (request.Option is { } option)
-            {
-                var question = await engine.GetQuestionAsync(id, ct);
-                answer = question is not null && option >= 0 && option < question.Options.Count
-                    ? question.Options[option]
-                    : throw new EngineOperationException("Такого варианта ответа нет.");
-            }
-
-            return new AnswerResponse((await engine.AnswerQuestionAsync(id, answer, ct)).Duplicate);
-        });
+            new AnswerResponse((await engine.AnswerQuestionAsync(id, request.Answer, request.Option, ct)).Duplicate));
 
         api.MapGet("/questions/{id:long}/image", async (long id, ProcessEngine engine, Adapters.FileSystem.IWorkspace workspace, CancellationToken ct) =>
         {

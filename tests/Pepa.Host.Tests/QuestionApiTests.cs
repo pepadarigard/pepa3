@@ -54,11 +54,12 @@ public sealed class QuestionApiTests
         var (status, first) = await f.SendAsync(HttpMethod.Post, $"/api/questions/{questionId}/answer", new { option = 1 });
         Assert.Equal(200, status);
         Assert.False(first!["duplicate"]!.GetValue<bool>());
-        var (_, again) = await f.SendAsync(HttpMethod.Post, $"/api/questions/{questionId}/answer", new { option = 0 });
-        Assert.True(again!["duplicate"]!.GetValue<bool>());
-
         var done = await f.WaitForProcessAsync(id, p => HostFixture.Status(p) == "completed");
         Assert.Equal("ответ Нет", done["process"]!["statusMessage"]!.GetValue<string>());
+
+        // Вторая вкладка отвечает уже после того, как процесс получил ответ: «уже ответили», а не ошибка.
+        var (_, again) = await f.SendAsync(HttpMethod.Post, $"/api/questions/{questionId}/answer", new { option = 0 });
+        Assert.True(again!["duplicate"]!.GetValue<bool>());
         Assert.Empty((await f.GetAsync("/api/questions")).AsArray());
     }
 

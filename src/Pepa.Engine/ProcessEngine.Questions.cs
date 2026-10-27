@@ -25,13 +25,18 @@ public sealed partial class ProcessEngine
 {
     private const int MaxAnswerLength = 10_000;
 
-    /// <summary>Вопросы, которые ждут ответа (у незавершённых процессов), — все или одного процесса.</summary>
+    /// <summary>
+    /// Вопросы, которые ждут ответа (у незавершённых процессов), — все или одного процесса. Вопрос, срок ответа на который
+    /// вышел, не показывается: ответ на него не примут (у приостановленного процесса тайм-аут наступит после «Продолжить»).
+    /// </summary>
     public async Task<IReadOnlyList<QuestionInfo>> ListQuestionsAsync(string? processId = null, CancellationToken cancellationToken = default)
     {
         var result = new List<QuestionInfo>();
+        var now = _time.GetUtcNow();
         foreach (var subscription in await _store.GetActiveSubscriptionsAsync(EventSources.Question, cancellationToken))
         {
-            if (subscription.Purpose != SubscriptionPurpose.Question || (processId is not null && subscription.ProcessId != processId))
+            if (subscription.Purpose != SubscriptionPurpose.Question || (processId is not null && subscription.ProcessId != processId) ||
+                subscription.ExpiresAt <= now)
             {
                 continue;
             }
@@ -69,11 +74,12 @@ public sealed partial class ProcessEngine
             : null;
 
     /// <summary>
-    /// Ответить на вопрос процесса. Ответ — событие с ключом вопроса: его получит только этот процесс (приостановленный —
-    /// после «Продолжить»), а второй ответ на тот же вопрос не создаётся (<see cref="PublishResult.Duplicate"/>).
-    /// Секретный ответ — секрет события: в истории и на странице «События» он скрыт.
+    /// Ответить на вопрос процесса — текстом или номером варианта. Ответ сразу отдаётся своему вопросу (под правом записи,
+    /// без общего сопоставления событий): его не получит ни другой процесс, ни автозапуск, а после срока ответа он не
+    /// принимается. Приостановленный процесс применит ответ после «Продолжить». Второй ответ на тот же вопрос не создаётся
+    /// (<see cref="PublishResult.Duplicate"/>). Секретный ответ и секреты в вариантах — секреты события.
     /// </summary>
-    public async Task<PublishResult> AnswerQuestionAsync(long id, string? answer, CancellationToken cancellationToken = default)
+    public async Task<PublishResult> AnswerQuestionAsync(long id, string? answer, int? option = null, CancellationToken cancellationToken = default)
     {
         EnsureRunning();
         var subscription = await _store.GetSubscriptionAsync(id, cancellationToken);
@@ -83,6 +89,7 @@ public sealed partial class ProcessEngine
         }
 
         PublishResult result;
+        ProcessRecord process;
         await using (var write = await _store.BeginWriteAsync(cancellationToken))
         {
             // Второй ответ на тот же вопрос (двойное нажатие, вторая вкладка) — не ошибка и не новое событие.
@@ -91,12 +98,25 @@ public sealed partial class ProcessEngine
                 return new PublishResult(earlier.Id, true);
             }
 
-            // Состояние — под правом записи: вопрос мог только что закрыться по тайм-ауту.
+            // Состояние и срок — под правом записи: вопрос мог только что закрыться по тайм-ауту. Срок проверяется и у
+            // приостановленного процесса (его тайм-аут наступит после «Продолжить»).
+            var now = _time.GetUtcNow();
             var current = await write.GetSubscriptionAsync(id);
-            var question = current is { State: SubscriptionState.Active } ? await QuestionAsync(current, cancellationToken) : null;
+            var question = current is { State: SubscriptionState.Active } && (current.ExpiresAt is not { } expires || now < expires)
+                ? await QuestionAsync(current, cancellationToken)
+                : null;
             if (question is null)
             {
-                throw new EngineOperationException("Процесс больше не ждёт ответа на этот вопрос.");
+                throw new EngineOperationException(current is { State: SubscriptionState.Active }
+                    ? "Время ответа на этот вопрос вышло."
+                    : "Процесс больше не ждёт ответа на этот вопрос.");
+            }
+
+            if (option is { } index)
+            {
+                answer = index >= 0 && index < question.Options.Count
+                    ? question.Options[index]
+                    : throw new EngineOperationException("Такого варианта ответа нет.");
             }
 
             // Секрет — как есть (пробелы в пароле важны), остальное — без пробелов по краям.
@@ -116,28 +136,77 @@ public sealed partial class ProcessEngine
                 throw new EngineOperationException("Выберите один из вариантов ответа.");
             }
 
+            var payload = new JsonObject { ["answer"] = Converted(value, question) };
+            var secrets = SecretsIn(RawSecretValues(question.Process, question.Definition), payload);
+            if (question.Secret)
+            {
+                secrets.Add(value);
+            }
+
+            process = question.Process;
             var record = NewEventRecord(new EventInput
             {
                 Source = EventSources.Question,
                 Type = AskUserNode.AnswerType,
                 ExternalId = ExternalId(subscription),
                 CorrelationKey = subscription.CorrelationKey,
-                Payload = new JsonObject { ["answer"] = value },
-            }, _time.GetUtcNow()) with { Secrets = question.Secret ? [value] : null };
-            var eventId = await write.TryInsertEventAsync(record);
-            result = eventId is null
-                ? new PublishResult((await write.FindEventByExternalIdAsync(EventSources.Question, record.ExternalId!))!.Id, true)
-                : new PublishResult(eventId.Value, false);
+                Payload = payload,
+            }, now) with
+            {
+                State = EventState.Matched,
+                ProcessId = process.Id,
+                SubscriptionId = subscription.Id,
+                Note = process.Status is ProcessStatus.Paused or ProcessStatus.NeedsAttention
+                    ? "Ответ на вопрос; будет применён после возобновления процесса."
+                    : null,
+                HandledAt = now,
+                Secrets = secrets.Count > 0 ? secrets.Distinct(StringComparer.Ordinal).ToList() : null,
+            };
+            var eventId = await write.TryInsertEventAsync(record)
+                          ?? throw new EngineOperationException("На этот вопрос уже ответили.");
+            if (!await write.TrySetSubscriptionStateAsync(subscription.Id, SubscriptionState.Active, SubscriptionState.Fulfilled, eventId))
+            {
+                throw new EngineOperationException("Процесс больше не ждёт ответа на этот вопрос.");
+            }
+
             await write.CommitAsync();
+            result = new PublishResult(eventId, false);
         }
 
-        if (!result.Duplicate)
-        {
-            SignalRouter();
-        }
-
+        Enqueue(process.Id);
+        Notify(process.Id);
         EventsChanged?.Invoke();
         return result;
+    }
+
+    /// <summary>
+    /// Ответ — в тип переменной, куда он сохраняется: число и «да/нет» разбираются, текст и «любой» — как есть. Иначе ответ
+    /// не принимается: принятый, он бы не поместился в переменную, а вопрос был бы уже закрыт.
+    /// </summary>
+    private static JsonNode Converted(string value, QuestionInfo question)
+    {
+        var type = question.Definition.Variables.FirstOrDefault(v => v.Name == question.Subscription.SaveTo)?.Type ?? VariableType.Any;
+        switch (type)
+        {
+            case VariableType.Any or VariableType.Text:
+                return JsonValue.Create(value);
+            case VariableType.Number:
+                var normalized = value.Trim().Replace(" ", "", StringComparison.Ordinal).Replace(',', '.');
+                return double.TryParse(normalized, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var number)
+                    ? JsonValue.Create(number)
+                    : throw new EngineOperationException("Ответ должен быть числом.");
+            case VariableType.Boolean:
+                return value.Trim().ToLowerInvariant() switch
+                {
+                    "да" or "true" or "yes" => JsonValue.Create(true),
+                    "нет" or "false" or "no" => JsonValue.Create(false),
+                    _ => throw new EngineOperationException("Ответ должен быть «да» или «нет»."),
+                };
+            default:
+                throw new EngineOperationException(
+                    $"Ответ сохраняется в переменную «{question.Subscription.SaveTo}» с типом, в который текст не превратить — " +
+                    "сделайте её текстом или «любой».");
+        }
     }
 
     private static string ExternalId(SubscriptionRecord subscription) => $"answer:{subscription.Id}";

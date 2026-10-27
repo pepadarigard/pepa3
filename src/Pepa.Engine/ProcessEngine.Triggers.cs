@@ -178,6 +178,12 @@ public sealed partial class ProcessEngine
     private async Task<List<string>> StartByEventTriggersAsync(EventRecord record, CancellationToken cancellationToken)
     {
         var started = new List<string>();
+        // Ответ на вопрос (даже не доставленный) — только своему вопросу, никаких запусков по нему.
+        if (IsQuestionSource(record.Source))
+        {
+            return started;
+        }
+
         var triggers = (await _store.ListTriggersAsync(null, cancellationToken))
             .Where(t => t is { Kind: TriggerKind.Event, Enabled: true });
         var eventScope = new ExpressionScope(new JsonObject(), Extra: new JsonObject { ["event"] = EventJson(record) });
@@ -288,6 +294,11 @@ public sealed partial class ProcessEngine
             if (string.IsNullOrWhiteSpace(trigger.Config.GetString("source")))
             {
                 throw new EngineOperationException("Укажите источник события.");
+            }
+
+            if (IsQuestionSource(trigger.Config.GetString("source")))
+            {
+                throw new EngineOperationException($"Источник «{EventSources.Question}» служебный: ответ на вопрос получает только тот, кто спросил.");
             }
 
             if (trigger.Config.GetString("filter") is { Length: > 0 } filter && _expressions.CheckExpression(filter) is { } error)

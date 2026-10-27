@@ -43,6 +43,9 @@ public sealed partial class ProcessEngine
         Manual,
     }
 
+    internal static bool IsQuestionSource(string? source) =>
+        string.Equals(source?.Trim(), EventSources.Question, StringComparison.OrdinalIgnoreCase);
+
     /// <summary>Источник служебных событий платформы (завершение процессов, ответы на вопросы): снаружи его отправить нельзя.</summary>
     internal static bool IsPlatformSource(string? source) =>
         string.Equals(source?.Trim(), EventSources.Platform, StringComparison.OrdinalIgnoreCase) ||
@@ -437,7 +440,9 @@ public sealed partial class ProcessEngine
             {
                 var subscription = await write.GetSubscriptionAsync(subscriptionId.Value)
                                    ?? throw new EngineOperationException("Ожидание не найдено.");
+                // Ответ на вопрос — только тому вопросу, на который отвечали.
                 if (subscription.Source != record.Source ||
+                    (IsQuestionSource(record.Source) && subscription.CorrelationKey != record.CorrelationKey) ||
                     !await write.TrySetSubscriptionStateAsync(subscription.Id, SubscriptionState.Active, SubscriptionState.Fulfilled, record.Id))
                 {
                     throw new EngineOperationException("Этот процесс уже не ждёт такое событие.");
