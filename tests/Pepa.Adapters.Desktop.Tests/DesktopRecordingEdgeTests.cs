@@ -418,4 +418,21 @@ public sealed class DesktopRecordingEdgeTests
 
         Assert.Equal(["Backspace", "Enter"], steps.Select(s => Text(s, "keys")));
     }
+
+    [Theory]
+    [InlineData("Подсказка к паролю", "Edit")]
+    [InlineData("Password hint", "Edit")]
+    [InlineData("Требования к паролю", "Edit")]
+    [InlineData("Сменить пароль — Госуслуги", "Document")]
+    public async Task Field_that_only_mentions_a_password_is_not_a_password(string name, string type)
+    {
+        var d = new FakeDesktop();
+        var window = d.AddWindow("Вход");
+        var field = window.Add(name, type: type, hasValue: true);
+        var (recorder, monitor) = await StartAsync();
+        monitor.Send(new DesktopTextInput(At(0), Target(window, field), "кличка кота"));
+        var step = Assert.Single(await recorder.StopAsync(CancellationToken.None));
+        Assert.False(step.Secret);
+        Assert.Equal("кличка кота", Text(step));
+    }
 }

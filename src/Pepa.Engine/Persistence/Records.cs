@@ -102,10 +102,10 @@ public sealed record ProcessRecord
     public JsonObject? Memory { get; init; }
 
     /// <summary>
-    /// Значения, которые в этом процессе секретны и не показываются: начальные и прежние значения секретных переменных,
-    /// секреты вызвавшего процесса, переданные в этот, и секреты из полученных событий.
+    /// Значения, которые в этом процессе секретны и не показываются (кроме текущих значений секретных переменных — они
+    /// и так известны): прежние значения секретных переменных, секреты вызвавшего процесса и полученных событий.
     /// </summary>
-    public IReadOnlyList<string>? Secrets { get; init; }
+    public ProcessSecrets? Secrets { get; init; }
 
     /// <summary>Отладка (null — обычный запуск).</summary>
     public DebugState? Debug { get; init; }
@@ -438,3 +438,16 @@ public sealed record TriggerRecord
     public required DateTimeOffset CreatedAt { get; init; }
     public required DateTimeOffset UpdatedAt { get; init; }
 }
+
+/// <summary>Секретные значения процесса, кроме текущих значений его секретных переменных.</summary>
+public sealed record ProcessSecrets
+{
+    /// <summary>Пришли извне — от вызвавшего процесса, с событиями. Не забываются: их больше негде узнать.</summary>
+    public IReadOnlyList<string> Carried { get; init; } = [];
+
+    /// <summary>Прежние значения собственных секретных переменных (помнятся последние).</summary>
+    public IReadOnlyList<string> Previous { get; init; } = [];
+
+    public IEnumerable<string> All => Carried.Concat(Previous);
+}
+

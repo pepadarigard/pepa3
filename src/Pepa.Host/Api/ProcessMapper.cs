@@ -46,9 +46,12 @@ internal sealed class ProcessMapper(ProcessEngine engine, IPepaStore store)
                     ?? active.FirstOrDefault(t => t.WaitKind != WaitKind.Join)
                     ?? active.FirstOrDefault();
         string? label = null;
+        var graph = engine.Graph(process);
+        // Пояснение и «чего ждёт» могут содержать секрет (ключ события из секретной переменной) — и в списках процессов.
+        var masker = process.Secrets is not null || graph.Definition.Variables.Any(v => v.Secret) ? new SecretMasker(process, graph.Definition) : null;
         if (token is not null)
         {
-            var node = engine.Graph(process).FindNode(token.NodeId);
+            var node = graph.FindNode(token.NodeId);
             if (node is not null)
             {
                 label = ScenarioValidator.DisplayName(node, engine.Registry.FindDescriptor(node.Type)).Trim('«', '»');
@@ -65,7 +68,7 @@ internal sealed class ProcessMapper(ProcessEngine engine, IPepaStore store)
             process.Status,
             process.Attention,
             process.PauseReason,
-            process.StatusMessage,
+            masker is null ? process.StatusMessage : masker.Text(process.StatusMessage),
             process.CreatedAt,
             process.UpdatedAt,
             process.FinishedAt,
@@ -75,7 +78,8 @@ internal sealed class ProcessMapper(ProcessEngine engine, IPepaStore store)
             waiting?.WakeAt,
             engine.GetAllowedActions(process, tokens),
             waiting?.WaitKind ?? WaitKind.None,
-            waiting is null || process.IsTerminal ? null : DescribeWait(process, waiting, subscriptions),
+            waiting is null || process.IsTerminal ? null : masker is null ? DescribeWait(process, waiting, subscriptions)
+                : masker.Text(DescribeWait(process, waiting, subscriptions)),
             process.ParentProcessId);
     }
 

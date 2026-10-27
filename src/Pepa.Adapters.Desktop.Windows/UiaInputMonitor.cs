@@ -99,6 +99,9 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
             /// разбор нажатий мышью.
             /// </summary>
             public bool SkipReads { get; set; }
+
+            /// <summary>Сколько клавиш набора нажато после последнего прочтения: больше одной — прочтённое устарело.</summary>
+            public int KeysSinceRead { get; set; }
         }
 
         /// <summary>Чтение поля во время набора дольше этого — дальше поле во время набора не читается.</summary>
@@ -451,6 +454,7 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
                     if (_typing is { } active)
                     {
                         active.LastKeyErased = vk is 0x08 or 0x2E || (ctrl && vk == 0x58);
+                        active.KeysSinceRead++;
                     }
 
                     break;
@@ -500,6 +504,10 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
             if (!string.IsNullOrEmpty(text) || typing.LastKeyErased)
             {
                 typing.LastSeen = text ?? typing.LastSeen;
+                if (text is not null)
+                {
+                    typing.KeysSinceRead = 0;
+                }
             }
         }
 
@@ -518,7 +526,9 @@ public sealed class UiaInputMonitor : IDesktopInputMonitor
                 // Поле пустое (или закрылось), хотя последним вводили символ, — программа очистила его сама (Enter отправил
                 // сообщение). Берём прочтённое во время набора — с пометкой, что последний символ мог не попасть; не прочли
                 // ничего — текст неизвестен (шаг попросит вписать его), а не пустой.
-                text = typing.LastSeen is { Length: > 0 } seen ? seen : null;
+                // Если после прочтения нажато больше одной клавиши (поле перестали читать — оно медленное), прочтённое — лишь
+                // начало текста: текст неизвестен.
+                text = typing.LastSeen is { Length: > 0 } seen && typing.KeysSinceRead <= 1 ? seen : null;
                 early = text is not null;
             }
 

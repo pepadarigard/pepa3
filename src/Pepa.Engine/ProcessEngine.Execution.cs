@@ -433,6 +433,13 @@ public sealed partial class ProcessEngine
             }
         }
 
+        // Секреты — до проверок (сообщение о неверном типе содержит присвоенное значение) и до права записи (запись в базу
+        // одна на все процессы — долгие вычисления её не держат). С ними — секреты полученного события: секреты отправителя
+        // становятся секретами этого процесса.
+        var rawSecrets = RawSecretValues(process, graph.Definition, result);
+        rawSecrets.AddRange(acquired ?? []);
+        var secrets = Expand(rawSecrets);
+
         await using var write = await _store.BeginWriteAsync();
 
         // Время — после получения права записи: подписка и событие, записанные позже, не должны получить более раннее время.
@@ -445,14 +452,15 @@ public sealed partial class ProcessEngine
                 return null;
             }
 
+            if (decided is NodeResult.Success { VariableUpdates.Count: > 0 })
+            {
+                secrets = Expand(rawSecrets.Concat(RawSecretValues(process, graph.Definition, decided)));
+            }
+
             result = decided;
         }
 
-        // Секреты — до проверок: сообщение о неверном типе содержит присвоенное значение. С ними — секреты полученного
-        // события (секреты отправителя становятся секретами этого процесса).
-        var rawSecrets = RawSecretValues(process, graph.Definition, result);
-        rawSecrets.AddRange(acquired ?? []);
-        var secrets = Expand(rawSecrets);
+        var replacedSecrets = ReplacedSecretValues(process, graph.Definition, result);
         result = CheckVariableTypes(result, graph.Definition, descriptor);
         result = await ResolveIntentAsync(write, process, token, label, result, effects, now);
 
@@ -534,11 +542,12 @@ public sealed partial class ProcessEngine
         }
 
         var isNew = step.Id == 0;
-        // Процесс помнит все значения, которые были секретными: и прежнее значение секретной переменной (его видно в
-        // параметрах прошлых шагов) остаётся скрытым.
+        // Процесс помнит прежние значения секретных переменных (их видно в параметрах прошлых шагов) и секреты, пришедшие
+        // с событием.
         var p = process with
         {
-            UpdatedAt = now, StepCount = isNew ? process.StepCount + 1 : process.StepCount, Secrets = Remember(process.Secrets, rawSecrets),
+            UpdatedAt = now, StepCount = isNew ? process.StepCount + 1 : process.StepCount,
+            Secrets = Remember(process.Secrets, replacedSecrets, acquired ?? []),
         };
         var t = token;
         var journal = new List<(JournalLevel Level, string Message)>();

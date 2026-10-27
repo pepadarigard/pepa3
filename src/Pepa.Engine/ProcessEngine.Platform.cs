@@ -188,7 +188,8 @@ public sealed partial class ProcessEngine
                 var senderSecrets = RawSecretValues(process, Graph(process).Definition);
                 var carried = senderSecrets.Count == 0
                     ? null
-                    : Remember(null, SecretsIn(senderSecrets, input.Payload, JsonValue.Create(input.CorrelationKey), JsonValue.Create(input.ExternalId)));
+                    : SecretsIn(senderSecrets, input.Payload, JsonValue.Create(input.CorrelationKey), JsonValue.Create(input.ExternalId)) is
+                        { Count: > 0 } found ? found : null;
                 var id = await write.TryInsertEventAsync(NewEventRecord(input, now) with { Secrets = carried });
                 long eventId;
                 var duplicate = false;
@@ -713,7 +714,7 @@ public sealed partial class ProcessEngine
                 ExternalId = $"finished:{process.Id}",
                 CorrelationKey = process.Id,
                 Payload = payload,
-            }, now) with { Secrets = Remember(null, SecretsIn(RawSecretValues(process, definition), payload)) });
+            }, now) with { Secrets = SecretsIn(RawSecretValues(process, definition), payload) is { Count: > 0 } carried ? carried : null });
             effects.RouteEvents = true;
         }
 
@@ -832,7 +833,7 @@ public sealed partial class ProcessEngine
             OriginKey = originKey,
             CreatedAt = now,
             UpdatedAt = now,
-            Secrets = Remember(null, prepared.Secrets ?? []),
+            Secrets = Remember(null, [], prepared.Secrets ?? []),
         };
         var token = new TokenRecord
         {

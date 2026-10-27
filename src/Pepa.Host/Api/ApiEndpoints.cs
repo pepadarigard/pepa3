@@ -592,6 +592,8 @@ internal static class ApiEndpoints
             var parent = process.ParentProcessId is { } parentId ? await store.GetProcessAsync(parentId, ct) : null;
             var children = await store.GetChildProcessesAsync(id, ct);
             var held = (await store.ListResourcesAsync(ct)).Where(r => r.HolderProcessId == id).Select(r => r.Key).ToList();
+            // Процесс — ещё раз, после шагов: шаг, записанный между чтениями, мог принести новый секрет.
+            process = await store.GetProcessAsync(id, ct) ?? process;
             var definition = Core.Serialization.PepaJson.Deserialize<ScenarioDefinition>(process.DefinitionJson);
             // Секретные переменные (пароли) не показываются: ни сами, ни в параметрах шагов, где их использовали.
             var masker = new SecretMasker(process, definition);
@@ -605,7 +607,10 @@ internal static class ApiEndpoints
                 masker.Definition(),
                 parent is null ? null : ProcessMapper.Ref(parent),
                 await mapper.SummariesAsync(children, ct),
-                subscriptions.Select(ProcessMapper.Wait).ToList(),
+                subscriptions.Select(sub => ProcessMapper.Wait(sub) with
+                {
+                    CorrelationKey = masker.Text(sub.CorrelationKey), MatchExpression = masker.Text(sub.MatchExpression),
+                }).ToList(),
                 held,
                 // Где сейчас ветви процесса (у параллельного участка их несколько).
                 tokens.Where(t => t.State != TokenState.Completed).Select(t => t.NodeId).Distinct().ToList()));

@@ -126,4 +126,39 @@ public sealed class SecretApiTests
         Assert.Contains("finished", events);
         Assert.DoesNotContain("S3cr3t-Pa55", events);
     }
+
+    [Fact]
+    public async Task Secret_key_of_an_awaited_event_is_hidden_in_process_lists_and_details()
+    {
+        await using var f = await HostFixture.StartAsync(seedSamples: false);
+        var (_, scenario) = await f.SendAsync(HttpMethod.Post, "/api/scenarios", new
+        {
+            name = "Ждёт по токену",
+            variables = new object[] { new { name = "token", type = "text", isInput = true, secret = true } },
+            nodes = new object[]
+            {
+                new { id = "start", type = "start" },
+                new { id = "wait", type = "event.wait", config = new { source = "manual", correlationKey = "{{ vars.token }}" } },
+                new { id = "end", type = "end" },
+            },
+            edges = new object[]
+            {
+                new { id = "a", source = "start", sourcePort = "out", target = "wait" },
+                new { id = "b", source = "wait", sourcePort = "event", target = "end" },
+            },
+        });
+        var (_, run) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{scenario!["id"]!.GetValue<string>()}/run",
+            new { inputs = new { token = "tok-7f3a9c2e11" } });
+        var id = run!["processId"]!.GetValue<string>();
+        await f.WaitForProcessAsync(id, p => HostFixture.Status(p) == "waiting");
+
+        foreach (var path in new[] { $"/api/processes/{id}", "/api/processes", "/api/overview" })
+        {
+            Assert.DoesNotContain("tok-7f3a9c2e11", await f.Client.GetStringAsync(path));
+        }
+
+        var details = await f.GetAsync($"/api/processes/{id}");
+        Assert.Contains("••••", details["process"]!["waitingFor"]!.GetValue<string>());
+        await f.SendAsync(HttpMethod.Post, $"/api/processes/{id}/cancel");
+    }
 }

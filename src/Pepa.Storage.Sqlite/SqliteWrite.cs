@@ -467,7 +467,7 @@ internal sealed class SqliteWrite(SqliteConnection connection, SqliteTransaction
         c.Parameters.AddWithValue("$last_error", JsonOrNull(p.LastError));
         c.Parameters.AddWithValue("$memory", JsonOrNull(p.Memory));
         c.Parameters.AddWithValue("$debug", p.Debug is null ? DBNull.Value : System.Text.Json.JsonSerializer.Serialize(p.Debug));
-        c.Parameters.AddWithValue("$secrets", Secrets(p.Secrets));
+        c.Parameters.AddWithValue("$secrets", p.Secrets is null ? DBNull.Value : System.Text.Json.JsonSerializer.Serialize(p.Secrets));
         c.Parameters.AddWithValue("$parent_process_id", OrNull(p.ParentProcessId));
         c.Parameters.AddWithValue("$origin_key", OrNull(p.OriginKey));
         c.Parameters.AddWithValue("$depth", p.Depth);

@@ -96,7 +96,7 @@ public sealed class SecretTests
 
         // Во вызванном сценарии переменная не отмечена секретной, но значение пришло из секретной — оно секретно и там.
         var called = (await h.Store.ListProcessesAsync(new ProcessQuery { Limit = 10 })).Single(p => p.ParentProcessId == parent);
-        Assert.Contains("S3cr3t-Pa55", called.Secrets!);
+        Assert.Contains("S3cr3t-Pa55", called.Secrets!.Carried);
         var definition = Core.Serialization.PepaJson.Deserialize<ScenarioDefinition>(called.DefinitionJson);
         Assert.False(definition.Variables.Single(v => v.Name == "password").Secret);
         var journal = string.Join("\n", (await h.Store.GetJournalAsync(called.Id)).Select(j => j.Message));
@@ -122,7 +122,7 @@ public sealed class SecretTests
         await h.WaitForStatusAsync(parent, ProcessStatus.Completed);
 
         var called = (await h.Store.ListProcessesAsync(new ProcessQuery { Limit = 10 })).Single(p => p.ParentProcessId == parent);
-        Assert.Equal(["1234"], called.Secrets!);
+        Assert.Equal(["1234"], called.Secrets!.Carried);
         // ПИН «1234» не нашёлся внутри номера заказа «A-12345»: номер показывается как есть.
         Assert.Contains("заказ A-12345", string.Join("\n", (await h.Store.GetJournalAsync(called.Id)).Select(j => j.Message)));
     }
@@ -151,7 +151,7 @@ public sealed class SecretTests
         var got = await h.WaitForStatusAsync(receiver, ProcessStatus.Completed);
 
         Assert.Equal("S3cr3t-Pa55", got.Variables["got"]!["payload"]!["password"]!.GetValue<string>());
-        Assert.Contains("S3cr3t-Pa55", got.Secrets!);
+        Assert.Contains("S3cr3t-Pa55", got.Secrets!.Carried);
         Assert.Contains("получено ••••", string.Join("\n", (await h.Store.GetJournalAsync(receiver)).Select(j => j.Message)));
         Assert.DoesNotContain("S3cr3t-Pa55", new SecretMasker(got, receiverScenario).Variables(got.Variables).ToJsonString());
         var steps = (await h.StepsAsync(receiver)).Select(new SecretMasker(got, receiverScenario).Step);
@@ -186,6 +186,94 @@ public sealed class SecretTests
         Assert.DoesNotContain(JsonEncodedTextOf("Кириллица-77"), shown);
         // Копия в обычной переменной — настоящая.
         Assert.Equal("S3cr3t-Pa55", done.Variables["oldPassword"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Short_secret_inside_a_sentence_travels_with_the_event()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var receiver = await h.RunAsync(new ScenarioBuilder("Получатель")
+            .Variable("got", VariableType.Any)
+            .Node("start", "start")
+            .Node("wait", "event.wait", new { source = "process", eventType = "sms", saveTo = "got" })
+            .Node("log", "log", new { message = "получено {{ vars.got.payload.text }}" })
+            .Node("end", "end")
+            .Chain("start", "wait").Edge("wait", "log", Ports.Event).Chain("log", "end").Build());
+        await h.WaitForAsync(receiver, p => p.Status == ProcessStatus.Waiting);
+        await h.RunAsync(new ScenarioBuilder("Отправитель")
+            .Variable("pin", VariableType.Text, isInput: true, secret: true)
+            .Node("start", "start")
+            .Node("send", "event.send", new { source = "process", eventType = "sms", payload = "({ text: 'Ваш ПИН: ' + vars.pin })" })
+            .Node("end", "end")
+            .Chain("start", "send", "end").Build(), new JsonObject { ["pin"] = "4821" });
+        var got = await h.WaitForStatusAsync(receiver, ProcessStatus.Completed);
+
+        Assert.Contains("4821", got.Secrets!.Carried);
+        Assert.Contains("получено Ваш ПИН: ••••", string.Join("\n", (await h.Store.GetJournalAsync(receiver)).Select(j => j.Message)));
+    }
+
+    [Fact]
+    public async Task Large_secret_list_does_not_push_out_a_secret_from_the_caller()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var child = await h.CreateScenarioAsync(new ScenarioBuilder("Коды")
+            .Variable("password", VariableType.Text, isInput: true)
+            .Variable("codes", VariableType.List, secret: true)
+            .Node("start", "start")
+            .Node("codes", "variable.set", new { variable = "codes", value = "Array.from({ length: 600 }, (_, i) => 'code-' + (100000 + i))" })
+            .Node("rotate", "variable.set", new { variable = "codes", value = "['new-code-1']" })
+            .Node("log", "log", new { message = "вход {{ vars.password }}" })
+            .Node("end", "end")
+            .Chain("start", "codes", "rotate", "log", "end").Build());
+        var parent = await h.RunAsync(new ScenarioBuilder("Родитель")
+            .Variable("password", VariableType.Text, isInput: true, secret: true)
+            .Node("start", "start")
+            .Node("call", "scenario.call", new { scenario = child, inputs = "({ password: vars.password })" })
+            .Node("end", "end")
+            .Edge("start", "call").Edge("call", "end", Ports.Done).Build(), new JsonObject { ["password"] = "S3cr3t-Pa55" });
+        await h.WaitForStatusAsync(parent, ProcessStatus.Completed);
+
+        var called = (await h.Store.ListProcessesAsync(new ProcessQuery { Limit = 10 })).Single(p => p.ParentProcessId == parent);
+        Assert.Contains("S3cr3t-Pa55", called.Secrets!.Carried);
+        Assert.Equal(500, called.Secrets.Previous.Count);
+        Assert.Contains("вход ••••", string.Join("\n", (await h.Store.GetJournalAsync(called.Id)).Select(j => j.Message)));
+    }
+
+    [Theory]
+    [InlineData("…\"password\":\"S3cr3…", "…\"password\":\"••••")]
+    [InlineData("HTTP 200: получено 15 строк", "HTTP 200: получено 15 строк")]
+    [InlineData("код 123456, телефон +71234567890", "код ••••, телефон +71234567890")]
+    public void Short_previews_and_numbers_are_masked_only_where_they_are_the_secret(string text, string expected) =>
+        Assert.Equal(expected, ProcessEngine.Redact(text, ProcessEngine.Expand(["S3cr3t", "123456"])));
+
+    [Fact]
+    public async Task Numbers_inside_a_secret_object_are_not_secrets()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var id = await h.RunAsync(new ScenarioBuilder("Ответ")
+            .Variable("auth", VariableType.Object, secret: true)
+            .Node("start", "start")
+            .Node("set", "variable.set", new { variable = "auth", value = "({ status: 200, token: 'tok-7f3a9c2e' })" })
+            .Node("log", "log", new { message = "HTTP 200, токен {{ vars.auth.token }}" })
+            .Node("end", "end")
+            .Chain("start", "set", "log", "end").Build());
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Contains("HTTP 200, токен ••••", string.Join("\n", (await h.Store.GetJournalAsync(id)).Select(j => j.Message)));
+    }
+
+    [Fact]
+    public void Masking_many_short_secrets_is_fast()
+    {
+        var secrets = ProcessEngine.Expand(Enumerable.Range(0, 500).Select(i => $"p{i:D3}"));
+        var text = string.Concat(Enumerable.Repeat("строка журнала без секретов, но с многоточием… ", 50));
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        for (var i = 0; i < 100; i++)
+        {
+            ProcessEngine.Redact(text, secrets);
+        }
+
+        // Раньше на каждый короткий секрет строилось регулярное выражение: секунды на такой странице.
+        Assert.True(System.Diagnostics.Stopwatch.GetElapsedTime(started) < TimeSpan.FromSeconds(2));
     }
 
     private static string JsonEncodedTextOf(string value) => System.Text.Json.JsonEncodedText.Encode(value).Value;
