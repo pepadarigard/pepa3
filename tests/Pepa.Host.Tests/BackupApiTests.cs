@@ -1,3 +1,4 @@
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Pepa.Host.Backups;
 using Pepa.Storage.Sqlite;
@@ -114,5 +115,32 @@ public sealed class BackupApiTests
         await f.RestartAsync();
         Assert.Equal(0, (await f.GetAsync("/api/info"))["recovery"]!["restored"]!.GetValue<int>());
         Assert.Equal("needsAttention", HostFixture.Status((await f.GetAsync($"/api/processes/{id}"))["process"]!));
+    }
+
+    [Fact]
+    public async Task Old_finished_processes_leave_the_history_after_the_set_number_of_days()
+    {
+        await using var f = await HostFixture.StartAsync();
+        Assert.Equal(90, (await f.GetAsync("/api/settings"))["historyDays"]!.GetValue<int>());
+        var (bad, _) = await f.SendAsync(HttpMethod.Put, "/api/settings", new
+        {
+            workspaceRoot = f.Workspace, maxParallelProcesses = 4, stepBudget = 10_000, actionTimeoutSeconds = 120, historyDays = -1,
+        });
+        Assert.Equal(400, bad);
+
+        var scenario = await f.ScenarioIdAsync("Пример 1.");
+        var (_, run) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{scenario}/run", new { inputs = new { name = "История" } });
+        var id = run!["processId"]!.GetValue<string>();
+        await f.WaitForProcessAsync(id, p => HostFixture.Status(p) == "completed");
+
+        var store = (SqliteStore)f.Host.Services.GetRequiredService<Pepa.Engine.Persistence.IPepaStore>();
+        var days = 90;
+        await using var retention = new HistoryRetention(store, () => days, new ManualTime(DateTimeOffset.UtcNow.AddDays(91)), NullLogger.Instance);
+        Assert.Equal(1, await retention.RunOnceAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(404, (await f.SendAsync(HttpMethod.Get, $"/api/processes/{id}")).Status);
+
+        // 0 — хранить всегда.
+        days = 0;
+        Assert.Equal(0, await retention.RunOnceAsync(TestContext.Current.CancellationToken));
     }
 }

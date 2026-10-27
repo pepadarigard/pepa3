@@ -164,6 +164,8 @@ public sealed class PepaHost : IAsyncDisposable
         builder.Services.AddSingleton(desktopRecorder);
         builder.Services.AddSingleton(sp => new Notifications.AttentionNotifier((id, ct) => store.GetProcessAsync(id, ct), telegram,
             () => settings.Current.NotifyTelegram, options.DesktopAlerts, sp.GetRequiredService<ILogger<Notifications.AttentionNotifier>>()));
+        builder.Services.AddSingleton(sp => new Backups.HistoryRetention(store, () => settings.Current.HistoryDays, TimeProvider.System,
+            sp.GetRequiredService<ILogger<Backups.HistoryRetention>>()));
         builder.Services.AddSingleton(sp => new Backups.DatabaseBackups(store, TimeProvider.System, sp.GetRequiredService<ILogger<Backups.DatabaseBackups>>()));
         builder.Services.AddSingleton(sp => new ProcessEngine(
             sp.GetRequiredService<IPepaStore>(),
@@ -262,6 +264,7 @@ public sealed class PepaHost : IAsyncDisposable
         await app.StartAsync(cancellationToken);
         // Ежедневная резервная копия базы — в фоне, запуск окна она не задерживает.
         app.Services.GetRequiredService<Backups.DatabaseBackups>().Start();
+        app.Services.GetRequiredService<Backups.HistoryRetention>().Start();
         var address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.First();
         var baseUrl = new Uri(address.Replace("[::1]", "127.0.0.1"));
         hostContext.Port = baseUrl.Port;
@@ -373,6 +376,7 @@ public sealed class PepaHost : IAsyncDisposable
             await telegram.DisposeAsync();
             await Services.GetRequiredService<BrowserRecorder>().DisposeAsync();
             await Services.GetRequiredService<Backups.DatabaseBackups>().DisposeAsync();
+            await Services.GetRequiredService<Backups.HistoryRetention>().DisposeAsync();
             await Services.GetRequiredService<Notifications.AttentionNotifier>().DisposeAsync();
             if (Services.GetRequiredService<DesktopRecorder>().State.Recording)
             {

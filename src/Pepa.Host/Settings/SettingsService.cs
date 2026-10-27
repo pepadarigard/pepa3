@@ -22,6 +22,9 @@ public sealed record PlatformSettings
     /// <summary>Сообщать в Telegram («Избранное» своего аккаунта), когда процесс ждёт решения.</summary>
     public bool NotifyTelegram { get; init; }
 
+    /// <summary>Сколько дней хранить завершённые процессы в истории; 0 — всегда.</summary>
+    public int HistoryDays { get; init; } = 90;
+
     public const string DefaultAdsPowerUrl = "http://127.0.0.1:50325";
 
     public EngineOptions ToEngineOptions() => new()
@@ -172,6 +175,7 @@ public sealed class SettingsService
         Check(settings.MaxParallelProcesses, 1, 32, "Одновременных процессов");
         Check(settings.StepBudget, 100, 10_000_000, "Лимит шагов");
         Check(settings.ActionTimeoutSeconds, 1, 86_400, "Тайм-аут действия");
+        Check(settings.HistoryDays, 0, 3650, "Хранить историю, дней");
         return settings with { WorkspaceRoot = root };
     }
 

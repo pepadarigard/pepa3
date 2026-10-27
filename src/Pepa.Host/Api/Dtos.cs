@@ -221,7 +221,9 @@ public sealed record SettingsDto(
     string? AdsPowerApiKey = null,
     bool AdsPowerHasKey = false,
     /// <summary>При сохранении: null — не менять.</summary>
-    bool? NotifyTelegram = null);
+    bool? NotifyTelegram = null,
+    /// <summary>При сохранении: null — не менять.</summary>
+    int? HistoryDays = null);
 
 public sealed record CheckResultDto(bool Ok, string Message);
 

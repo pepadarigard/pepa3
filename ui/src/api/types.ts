@@ -391,6 +391,8 @@ export interface Settings {
   adsPowerHasKey: boolean;
   /** Сообщать в Telegram («Избранное»), когда процесс ждёт решения. */
   notifyTelegram: boolean;
+  /** Сколько дней хранить завершённые процессы; 0 — всегда. */
+  historyDays: number;
 }
 
 export type TelegramState =

@@ -79,7 +79,7 @@ export function SettingsPage() {
     }
   };
 
-  const number = (key: "maxParallelProcesses" | "stepBudget" | "actionTimeoutSeconds") => (e: React.ChangeEvent<HTMLInputElement>) =>
+  const number = (key: "maxParallelProcesses" | "stepBudget" | "actionTimeoutSeconds" | "historyDays") => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm({ ...form, [key]: Math.round(Number(e.target.value) || 0) });
 
   return (
@@ -133,6 +133,11 @@ export function SettingsPage() {
               <span className="field-label">Лимит шагов процесса</span>
               <input className="input" type="number" min={100} max={10000000} value={form.stepBudget} onChange={number("stepBudget")} />
               <span className="field-help">Защита от бесконечных циклов: по достижении Pepa спросит, продолжать ли.</span>
+            </label>
+            <label className="field">
+              <span className="field-label">Хранить историю завершённых процессов, дней</span>
+              <input className="input" type="number" min={0} max={3650} value={form.historyDays} onChange={number("historyDays")} />
+              <span className="field-help">0 — хранить всегда. Незавершённые процессы и связанные с ними не удаляются никогда.</span>
             </label>
           </div>
         </div>

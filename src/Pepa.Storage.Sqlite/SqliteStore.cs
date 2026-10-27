@@ -52,6 +52,50 @@ public sealed partial class SqliteStore : IPepaStore
         }
     }
 
+    /// <summary>
+    /// Удалить из истории завершённые до <paramref name="finishedBefore"/> процессы (с их шагами, журналом и ветвями).
+    /// Не трогаются процессы, у которых есть незавершённый «родитель» или «ребёнок» (вызванный сценарий) или занятый ресурс.
+    /// События остаются: по ним Pepa узнаёт повторно пришедшее событие. Удаляется пачками, чтобы не держать запись долго.
+    /// </summary>
+    /// <returns>Сколько процессов удалено.</returns>
+    public async Task<int> DeleteFinishedProcessesAsync(DateTimeOffset finishedBefore, int batch = 500, CancellationToken cancellationToken = default)
+    {
+        const string finished = "('Completed', 'Failed', 'Cancelled')";
+        var total = 0;
+        while (true)
+        {
+            int deleted;
+            await _writeLock.WaitAsync(cancellationToken);
+            try
+            {
+                await using var connection = await OpenAsync(cancellationToken);
+                await using var command = connection.CreateCommand();
+                command.CommandText = $"""
+                    DELETE FROM processes WHERE id IN (
+                        SELECT p.id FROM processes p
+                        WHERE p.status IN {finished} AND p.finished_at IS NOT NULL AND p.finished_at < $before
+                          AND NOT EXISTS (SELECT 1 FROM processes c WHERE c.parent_process_id = p.id AND c.status NOT IN {finished})
+                          AND NOT EXISTS (SELECT 1 FROM processes q WHERE q.id = p.parent_process_id AND q.status NOT IN {finished})
+                          AND NOT EXISTS (SELECT 1 FROM resources r WHERE r.holder_process_id = p.id)
+                        LIMIT $batch);
+                    """;
+                command.Parameters.AddWithValue("$before", Date(finishedBefore));
+                command.Parameters.AddWithValue("$batch", batch);
+                deleted = await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+            finally
+            {
+                _writeLock.Release();
+            }
+
+            total += deleted;
+            if (deleted < batch)
+            {
+                return total;
+            }
+        }
+    }
+
     /// <summary>Папка резервных копий базы — рядом с базой.</summary>
     public string BackupDirectory => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(DatabasePath))!, "backups");
 

@@ -43,6 +43,7 @@ internal static class ApiEndpoints
                 AdsPowerUrl = request.AdsPowerUrl ?? current.AdsPowerUrl,
                 AdsPowerApiKey = request.AdsPowerApiKey ?? current.AdsPowerApiKey,
                 NotifyTelegram = request.NotifyTelegram ?? current.NotifyTelegram,
+                HistoryDays = request.HistoryDays ?? current.HistoryDays,
             });
             return ToDto(settings);
         });
@@ -753,7 +754,7 @@ internal static class ApiEndpoints
         var current = settings.Current;
         return new SettingsDto(current.WorkspaceRoot, current.MaxParallelProcesses, current.StepBudget,
             current.ActionTimeoutSeconds, settings.RestartRequired, current.AdsPowerUrl, null, current.AdsPowerApiKey is not null,
-            current.NotifyTelegram);
+            current.NotifyTelegram, current.HistoryDays);
     }
 
     private static ScenarioDto ToDto(StoredScenario stored, ScenarioService scenarios)
