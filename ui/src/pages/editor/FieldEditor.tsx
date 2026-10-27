@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import type { FieldDescriptor, Json, VariableDefinition } from "../../api/types";
 import { useScenarios } from "../../api/hooks";
 import { api } from "../../api/client";
@@ -129,6 +130,7 @@ export function FieldEditor({ field, value, onChange, variables, onCreateVariabl
       {control}
       {field.lookup === "adspower-profiles" && <AdsPowerPicker onPick={(id) => onChange(id)} />}
       {field.lookup === "desktop-windows" && <WindowPicker onPick={(title) => onChange(title)} />}
+      {field.lookup === "watched-folders" && <WatchedFolderPicker onPick={(folder) => onChange(folder)} />}
       {error ? <span className="field-error">{error}</span> : field.help && <span className="field-help">{field.help}</span>}
     </div>
   );
@@ -308,6 +310,22 @@ export function AdsPowerPicker({ onPick }: { onPick: (id: string) => void }) {
           {p.number ? `№${p.number} · ` : ""}{p.name || "без имени"} · {p.id}{p.group ? ` · ${p.group}` : ""}
         </option>
       ))}
+    </select>
+  );
+}
+
+/** Папки, за которыми следит Pepa («Настройки» → «Слежение за папками»). */
+function WatchedFolderPicker({ onPick }: { onPick: (folder: string) => void }) {
+  const watches = useQuery({ queryKey: ["watches"], queryFn: api.watches });
+  if (watches.error) return <span className="field-error">{watches.error instanceof Error ? watches.error.message : String(watches.error)}</span>;
+  const folders = watches.data?.watches.filter((w) => w.enabled) ?? [];
+  if (watches.data && folders.length === 0) {
+    return <span className="field-help">Pepa пока ни за одной папкой не следит — добавьте папку в «Настройки» → «Слежение за папками».</span>;
+  }
+  return (
+    <select className="select" value="" onChange={(e) => e.target.value && onPick(e.target.value)} disabled={!watches.data}>
+      <option value="">{watches.data ? `— выберите папку (${folders.length}) —` : "Загрузка…"}</option>
+      {folders.map((w) => <option key={w.id} value={w.folder}>{w.folder} · {w.pattern}</option>)}
     </select>
   );
 }

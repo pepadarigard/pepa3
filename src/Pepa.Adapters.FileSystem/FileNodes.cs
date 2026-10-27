@@ -7,7 +7,9 @@ namespace Pepa.Adapters.FileSystem;
 
 public static class FileNodes
 {
-    public static NodeRegistry RegisterFileNodes(this NodeRegistry registry, IWorkspace workspace) => registry
+    /// <param name="watches">Отслеживаемые папки (для «Дождаться файла»); null — слежения нет.</param>
+    public static NodeRegistry RegisterFileNodes(this NodeRegistry registry, IWorkspace workspace,
+        Func<IReadOnlyList<FolderWatchSettings>>? watches = null) => registry
         .RegisterCategory(NodeCategories.Files)
         .Register(new WriteFileNode(workspace))
         .Register(new ReadFileNode(workspace))
@@ -16,7 +18,8 @@ public static class FileNodes
         .Register(new DeleteFileNode(workspace))
         .Register(new CreateFolderNode(workspace))
         .Register(new PathExistsNode(workspace))
-        .Register(new ListFilesNode(workspace));
+        .Register(new ListFilesNode(workspace))
+        .Register(new WaitFileNode(workspace, watches ?? (() => [])));
 
     internal static readonly PortDescriptor Next = new(Ports.Out, "Далее");
     internal static readonly PortDescriptor Error = new(Ports.Error, "Ошибка", PortKind.Error);

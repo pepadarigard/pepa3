@@ -40,6 +40,8 @@ export function startEventStream(queryClient: QueryClient, onState: (state: Conn
     } else if (event.type === "recorder") {
       queryClient.invalidateQueries({ queryKey: ["recorder"] });
       queryClient.invalidateQueries({ queryKey: ["recorder-desktop"] });
+    } else if (event.type === "watches") {
+      queryClient.invalidateQueries({ queryKey: ["watches"] });
     } else if (event.type === "integrations") {
       queryClient.invalidateQueries({ queryKey: ["telegram"] });
     } else if (event.type === "scenarios") {

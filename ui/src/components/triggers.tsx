@@ -13,6 +13,14 @@ import { Badge, Button, Callout, Empty, Loading } from "./ui";
 
 const DAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"];
 
+/** Источники событий Pepa (можно вписать и свой). */
+const EVENT_SOURCES = [
+  ["http", "Запрос к API Pepa"],
+  ["manual", "Отправлено вручную"],
+  ["telegram", "Сообщение в Telegram"],
+  ["files", "Файл в отслеживаемой папке"],
+] as const;
+
 /** Диалог «Запуск по расписанию и событиям» для сценария. */
 export function useTriggersDialog() {
   const [target, setTarget] = useState<{ id: string; name: string } | null>(null);
@@ -188,6 +196,7 @@ function TriggerEditor({ scenarioId, scenarioName, inputs, trigger, kind, onDone
   const [at, setAt] = useState(String(config.at ?? ""));
   const [source, setSource] = useState(String(config.source ?? "http"));
   const [eventType, setEventType] = useState(String(config.eventType ?? ""));
+  const [correlationKey, setCorrelationKey] = useState(String(config.correlationKey ?? ""));
   const [filter, setFilter] = useState(String(config.filter ?? ""));
   const [values, setValues] = useState<Record<string, string>>(() =>
     Object.fromEntries(inputs.map((v) => {
@@ -208,7 +217,7 @@ function TriggerEditor({ scenarioId, scenarioName, inputs, trigger, kind, onDone
         : mode === "once" ? { mode, at }
         : { mode, time, days: [...days].sort((a, b) => a - b) };
     } else {
-      builtConfig = { source: source.trim(), eventType: eventType.trim(), filter: filter.trim() };
+      builtConfig = { source: source.trim(), eventType: eventType.trim(), correlationKey: correlationKey.trim(), filter: filter.trim() };
     }
 
     const builtInputs: Record<string, Json> = {};
@@ -314,13 +323,28 @@ function TriggerEditor({ scenarioId, scenarioName, inputs, trigger, kind, onDone
           <div className="grid-2">
             <label className="field">
               <span className="field-label">Источник<span className="req">*</span></span>
-              <input className="input" value={source} onChange={(e) => setSource(e.target.value)} />
+              <input className="input" value={source} list="event-sources" onChange={(e) => setSource(e.target.value)} />
+              <datalist id="event-sources">
+                {EVENT_SOURCES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </datalist>
             </label>
             <label className="field">
               <span className="field-label">Вид события</span>
               <input className="input" value={eventType} placeholder="любой" onChange={(e) => setEventType(e.target.value)} />
             </label>
           </div>
+          <label className="field">
+            <span className="field-label">Ключ</span>
+            <input className="input" value={correlationKey} placeholder="любой" onChange={(e) => setCorrelationKey(e.target.value)} />
+            <span className="field-help">Необязательно. Запуск — только для событий с этим ключом (точное совпадение).</span>
+          </label>
+          {source.trim().toLowerCase() === "files" && (
+            <Callout tone="info">
+              Файлы из «Настройки» → «Слежение за папками». Вид: <code>created</code> — новый файл, <code>changed</code> —
+              изменённый. Ключ — папка слежения, например <code>входящие</code>. Во входные значения можно передать{" "}
+              <code>event.payload.path</code> (путь в рабочей папке) и <code>event.payload.name</code> (имя файла).
+            </Callout>
+          )}
           <label className="field">
             <span className="field-label">Условие</span>
             <textarea className="textarea mono" style={{ minHeight: 50 }} value={filter} spellCheck={false}

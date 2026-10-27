@@ -7,6 +7,7 @@ import type { Settings } from "../api/types";
 import { AssistantCard } from "../components/AssistantCard";
 import { BackupsCard } from "../components/BackupsCard";
 import { PluginsCard } from "../components/PluginsCard";
+import { WatchesCard } from "../components/WatchesCard";
 import { useFeedback } from "../components/feedback";
 import { Badge, Button, Callout, Card, ErrorState, Loading } from "../components/ui";
 import { native } from "../lib/native";
@@ -115,6 +116,8 @@ export function SettingsPage() {
           )}
         </div>
       </Card>
+
+      <WatchesCard />
 
       <Card title="Движок">
         <div className="card-body stack">

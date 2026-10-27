@@ -55,6 +55,8 @@ public sealed class HostFixture : IAsyncDisposable
         // Проверки никогда не обращаются к настоящему Telegram: порт 1 на этой машине закрыт.
         TelegramServerAddress = "127.0.0.1:1",
         TelegramConnectTimeout = TimeSpan.FromSeconds(10),
+        // Слежение за папками — чаще, чтобы проверки не ждали секундами.
+        FolderWatch = new Adapters.FileSystem.FolderWatcherOptions { Interval = TimeSpan.FromMilliseconds(100), Settle = TimeSpan.FromMilliseconds(300) },
     };
 
     /// <param name="whileStopped">Что сделать, пока Pepa закрыта (например, заменить базу копией).</param>

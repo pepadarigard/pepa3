@@ -31,7 +31,7 @@ internal static class ApiEndpoints
 
         api.MapGet("/settings", (SettingsService settings) => ToDto(settings));
 
-        api.MapPut("/settings", async (SettingsDto request, SettingsService settings) =>
+        api.MapPut("/settings", async (SettingsDto request, SettingsService settings, Adapters.FileSystem.FolderWatcher watcher) =>
         {
             var current = settings.Current;
             await settings.SaveAsync(new PlatformSettings
@@ -44,8 +44,21 @@ internal static class ApiEndpoints
                 AdsPowerApiKey = request.AdsPowerApiKey ?? current.AdsPowerApiKey,
                 NotifyTelegram = request.NotifyTelegram ?? current.NotifyTelegram,
                 HistoryDays = request.HistoryDays ?? current.HistoryDays,
+                FolderWatches = current.FolderWatches,
             });
+            // Рабочая папка могла смениться — слежение за папками начинается в новой заново.
+            watcher.Configure(settings.Current.FolderWatches);
             return ToDto(settings);
+        });
+
+        // Слежение за папками: новые файлы — события «files».
+        api.MapGet("/watches", (SettingsService settings, Adapters.FileSystem.FolderWatcher watcher) => WatchesDto(settings, watcher));
+
+        api.MapPut("/watches", async (WatchesRequest request, SettingsService settings, Adapters.FileSystem.FolderWatcher watcher) =>
+        {
+            await settings.SaveAsync(settings.Current with { FolderWatches = request.Watches ?? [] });
+            watcher.Configure(settings.Current.FolderWatches);
+            return WatchesDto(settings, watcher);
         });
 
         // ───────────── Интеграции ─────────────
@@ -743,6 +756,13 @@ internal static class ApiEndpoints
 
     /// <summary>Держатель мыши и клавиатуры на время записи действий в окнах.</summary>
     private const string RecordingHolder = ProcessEngine.RecordingHolder;
+
+    private static WatchesDto WatchesDto(SettingsService settings, Adapters.FileSystem.FolderWatcher watcher)
+    {
+        var status = watcher.Status.ToDictionary(s => s.Id, StringComparer.Ordinal);
+        return new WatchesDto(settings.Current.FolderWatches.Select(w => new WatchDto(w.Id, w.Folder, w.Pattern, w.Subfolders, w.Changes, w.Enabled,
+            status.GetValueOrDefault(w.Id))).ToList(), Adapters.FileSystem.FileEvents.Source);
+    }
 
     private static DesktopRecorderDto DesktopRecorderDto(Adapters.Desktop.DesktopRecorder recorder)
     {

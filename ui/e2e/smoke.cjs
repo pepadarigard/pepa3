@@ -457,6 +457,20 @@ async function main() {
     await page.waitForTimeout(200);
     await backupsCard.screenshot({ path: path.join(shots, "25-backups.png") });
 
+    step("Слежение за папками: новый файл — событие");
+    const watchesCard = page.getByTestId("watches-card");
+    await watchesCard.getByRole("button", { name: "Добавить папку" }).click();
+    await watchesCard.getByPlaceholder("входящие").fill("входящие");
+    await watchesCard.getByPlaceholder("*.pdf; *.xlsx").fill("*.txt");
+    await watchesCard.getByRole("button", { name: "Сохранить слежение" }).click();
+    await watchesCard.getByText("следит").waitFor({ timeout: 10000 });
+    if (!fs.existsSync(path.join(workspace, "входящие"))) throw new Error("Папка слежения не создана");
+    await watchesCard.screenshot({ path: path.join(shots, "26-watches.png") });
+    fs.writeFileSync(path.join(workspace, "входящие", "счёт.txt"), "оплатить");
+    await page.goto(`${base}/#/runs`);
+    await page.locator("td", { hasText: "входящие/счёт.txt" }).first().waitFor({ timeout: 15000 });
+    await page.goto(`${base}/#/settings`);
+
     step("Уведомления: включить и пробное сообщение без Telegram");
     const notifications = page.getByTestId("notifications-card");
     await notifications.getByRole("checkbox").check();

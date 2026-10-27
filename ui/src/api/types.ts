@@ -468,6 +468,32 @@ export interface Backups {
   items: BackupInfo[];
 }
 
+/** Папка, за которой следит Pepa: новые (и, по желанию, изменённые) файлы — события «files». */
+export interface FolderWatch {
+  /** Пусто у новой строки — номер выдаст Pepa. */
+  id: string;
+  folder: string;
+  pattern: string;
+  subfolders: boolean;
+  changes: boolean;
+  enabled: boolean;
+}
+
+export interface FolderWatchStatus {
+  files: number;
+  /** Файлы, которые ещё дописываются. */
+  pending: number;
+  lastScanAt: string | null;
+  error: string | null;
+  note: string | null;
+}
+
+export interface Watches {
+  watches: (FolderWatch & { status: FolderWatchStatus | null })[];
+  /** Источник событий о файлах («files»). */
+  source: string;
+}
+
 /** Записанный шаг в окнах Windows — готовый блок. */
 export interface RecordedDesktopStep {
   type: string;

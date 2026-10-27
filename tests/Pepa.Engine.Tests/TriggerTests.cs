@@ -199,6 +199,34 @@ public sealed class TriggerTests
     }
 
     [Fact]
+    public async Task Event_trigger_with_a_key_starts_only_for_events_with_that_key()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var scenario = await h.CreateScenarioAsync(Simple("file-{{ vars.orderId }}"));
+        await h.Engine.SaveTriggerAsync(new TriggerRecord
+        {
+            Id = "", ScenarioId = scenario, Kind = TriggerKind.Event,
+            Config = new JsonObject { ["source"] = "files", ["eventType"] = "created", ["correlationKey"] = "входящие" },
+            Inputs = new JsonObject { ["orderId"] = "event.payload.name" },
+            CreatedAt = default, UpdatedAt = default,
+        });
+
+        var other = await h.Engine.PublishEventAsync(new EventInput
+        {
+            Source = "files", Type = "created", CorrelationKey = "архив", Payload = new JsonObject { ["name"] = "a" },
+        });
+        await h.Engine.PublishEventAsync(new EventInput
+        {
+            Source = "files", Type = "created", CorrelationKey = "входящие", Payload = new JsonObject { ["name"] = "b" },
+        });
+
+        await WaitUntilAsync(async () => h.World.Executions("file-b") == 1, h);
+        await h.IdleAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal(0, h.World.Executions("file-a"));
+        Assert.Equal(EventState.Unmatched, (await h.Store.GetEventAsync(other.EventId))!.State);
+    }
+
+    [Fact]
     public void Schedule_calculator_handles_days_and_one_time_runs()
     {
         var utc = TimeZoneInfo.Utc;

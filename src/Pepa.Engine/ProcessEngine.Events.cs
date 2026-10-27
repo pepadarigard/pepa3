@@ -28,6 +28,9 @@ public sealed partial class ProcessEngine
     /// <summary>Когда запущен движок: события, произошедшие у источника раньше, триггеры сами не запускают.</summary>
     private DateTimeOffset _startedAt;
 
+    /// <summary>Когда запущен движок (см. <see cref="EventInput.OccurredAt"/>).</summary>
+    public DateTimeOffset StartedAt => _startedAt;
+
     private enum RouteMode
     {
         /// <summary>Новое событие: подписки, затем триггеры (если событие пришло во время этой работы Pepa).</summary>

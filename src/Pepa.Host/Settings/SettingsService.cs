@@ -1,3 +1,7 @@
+using System.Security.Cryptography;
+using System.Text.RegularExpressions;
+using Pepa.Adapters.FileSystem;
+using Pepa.Core.Nodes;
 using Pepa.Core.Serialization;
 using Pepa.Engine;
 using Pepa.Engine.Persistence;
@@ -25,6 +29,11 @@ public sealed record PlatformSettings
     /// <summary>Сколько дней хранить завершённые процессы в истории; 0 — всегда.</summary>
     public int HistoryDays { get; init; } = 90;
 
+    /// <summary>Папки рабочей папки, за которыми следит Pepa (новые файлы — события «files»).</summary>
+    public IReadOnlyList<FolderWatchSettings> FolderWatches { get; init; } = [];
+
+    public const int MaxFolderWatches = 20;
+
     public const string DefaultAdsPowerUrl = "http://127.0.0.1:50325";
 
     public EngineOptions ToEngineOptions() => new()
@@ -38,7 +47,7 @@ public sealed record PlatformSettings
 public sealed class SettingsValidationException(string message) : Exception(message);
 
 /// <summary>Настройки платформы в хранилище. Рабочая папка применяется сразу, параметры движка — после перезапуска.</summary>
-public sealed class SettingsService
+public sealed partial class SettingsService
 {
     private const string Key = "platform";
     private readonly IPepaStore _store;
@@ -176,8 +185,73 @@ public sealed class SettingsService
         Check(settings.StepBudget, 100, 10_000_000, "Лимит шагов");
         Check(settings.ActionTimeoutSeconds, 1, 86_400, "Тайм-аут действия");
         Check(settings.HistoryDays, 0, 3650, "Хранить историю, дней");
-        return settings with { WorkspaceRoot = root };
+        return settings with { WorkspaceRoot = root, FolderWatches = ValidateWatches(root, settings.FolderWatches ?? []) };
     }
+
+    private static IReadOnlyList<FolderWatchSettings> ValidateWatches(string root, IReadOnlyList<FolderWatchSettings> watches)
+    {
+        if (watches.Count > PlatformSettings.MaxFolderWatches)
+        {
+            throw new SettingsValidationException($"Слежение за папками: не больше {PlatformSettings.MaxFolderWatches} папок.");
+        }
+
+        var workspace = new Workspace(root);
+        var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        var folders = new HashSet<string>(comparer);
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        var result = new List<FolderWatchSettings>(watches.Count);
+        foreach (var watch in watches)
+        {
+            var id = string.IsNullOrWhiteSpace(watch.Id) ? Convert.ToHexString(RandomNumberGenerator.GetBytes(4)).ToLowerInvariant() : watch.Id.Trim();
+            // По номеру называется файл со списком известных файлов — только буквы и цифры.
+            if (!WatchId().IsMatch(id) || !ids.Add(id))
+            {
+                throw new SettingsValidationException($"Слежение за папками: неверный или повторяющийся номер «{id}».");
+            }
+
+            string full;
+            try
+            {
+                full = workspace.Resolve(watch.Folder);
+            }
+            catch (NodeInputException ex)
+            {
+                throw new SettingsValidationException($"Слежение за папкой «{watch.Folder}»: {ex.Message}");
+            }
+
+            if (File.Exists(full))
+            {
+                throw new SettingsValidationException($"Слежение за папкой «{watch.Folder}»: это файл, а не папка.");
+            }
+
+            var folder = workspace.ToRelative(full);
+            if (!folders.Add(folder))
+            {
+                throw new SettingsValidationException($"За папкой «{folder}» уже следит другая строка — о каждом файле было бы два события.");
+            }
+
+            if (FileNamePattern.Validate(watch.Pattern) is { } error)
+            {
+                throw new SettingsValidationException($"Слежение за папкой «{folder}»: {error}");
+            }
+
+            try
+            {
+                Directory.CreateDirectory(full);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                throw new SettingsValidationException($"Не удалось создать папку «{folder}»: {ex.Message}");
+            }
+
+            result.Add(watch with { Id = id, Folder = folder, Pattern = string.Join("; ", FileNamePattern.Split(watch.Pattern)) });
+        }
+
+        return result;
+    }
+
+    [GeneratedRegex("^[a-z0-9]{1,32}$")]
+    private static partial Regex WatchId();
 
     private static IEnumerable<string> SystemFolders()
     {

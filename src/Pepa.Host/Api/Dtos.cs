@@ -307,3 +307,11 @@ public sealed record DesktopElementsDto(string Window, string Process, bool Trun
 /// <param name="UniqueName">Подпись в окне встречается один раз — по ней элемент найдётся однозначно.</param>
 /// <param name="UniqueId">Код (AutomationId) встречается один раз.</param>
 public sealed record DesktopElementDto(int Depth, string Name, string ControlType, string AutomationId, bool Enabled, bool UniqueName, bool UniqueId);
+
+public sealed record WatchesRequest(IReadOnlyList<Adapters.FileSystem.FolderWatchSettings>? Watches);
+
+/// <param name="Status">null — папку ещё не проверяли.</param>
+public sealed record WatchDto(string Id, string Folder, string Pattern, bool Subfolders, bool Changes, bool Enabled,
+    Adapters.FileSystem.FolderWatchStatus? Status);
+
+public sealed record WatchesDto(IReadOnlyList<WatchDto> Watches, string Source);

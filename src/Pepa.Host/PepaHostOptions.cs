@@ -55,6 +55,9 @@ public sealed record PepaHostOptions
 
     /// <summary>Перехват мыши и клавиатуры для записи действий в окнах Windows. null — запись честно сообщает, что недоступна.</summary>
     public Adapters.Desktop.IDesktopInputMonitor? DesktopInput { get; init; }
+
+    /// <summary>Как часто проверять отслеживаемые папки и сколько ждать, пока файл допишется. null — обычные значения.</summary>
+    public Adapters.FileSystem.FolderWatcherOptions? FolderWatch { get; init; }
 }
 
 public static class HostPaths

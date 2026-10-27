@@ -2070,3 +2070,10 @@ pre.json {
     grid-template-columns: auto auto;
   }
 }
+
+/* Слежение за папками: строка настройки одной папки. */
+.watch-row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 8px);
+  padding: 10px 12px;
+}
