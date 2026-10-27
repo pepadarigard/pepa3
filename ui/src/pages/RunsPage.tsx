@@ -3,6 +3,7 @@ import { Activity, AlertTriangle, Send } from "lucide-react";
 import { useEvents, useProcesses, useResources } from "../api/hooks";
 import { EventConflicts, EventsTable, ResourcesCard, useSendEvent } from "../components/platform";
 import { ProcessActions, ProcessTable } from "../components/process";
+import { QuestionsCard } from "../components/questions";
 import { Button, Card, Empty, ErrorState, Loading } from "../components/ui";
 import { formatMoment } from "../lib/format";
 import { attentionAdvice, explainProcess } from "../lib/status";
@@ -36,6 +37,8 @@ export function RunsPage() {
           <Button icon={Send} onClick={sender.open}>Отправить событие</Button>
         </div>
       </header>
+
+      <QuestionsCard />
 
       {(attention.length > 0 || conflicts.length > 0) && (
         <Card title={<h2 className="row"><AlertTriangle size={17} style={{ color: "var(--attention)" }} /> Требуют решения · {attention.length + conflicts.length}</h2>}>

@@ -51,10 +51,11 @@ export function durationBetween(start: string, end: string | null | undefined): 
   return formatDuration((end ? new Date(end).getTime() : Date.now()) - new Date(start).getTime());
 }
 
-/** «через 3 мин» / «2 мин назад». */
+/** «через 3 мин» / «2 мин назад»; в пределах нескольких секунд — «только что» / «сейчас». */
 export function relative(value: string | null | undefined): string {
   if (!value) return "";
   const diff = new Date(value).getTime() - Date.now();
+  if (Math.abs(diff) < 5000) return diff >= 0 ? "сейчас" : "только что";
   const text = formatDuration(Math.abs(diff));
   return diff >= 0 ? `через ${text}` : `${text} назад`;
 }
