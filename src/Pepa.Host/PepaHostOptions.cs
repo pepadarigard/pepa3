@@ -38,6 +38,12 @@ public sealed record PepaHostOptions
     /// <summary>Папка расширений; null — plugins в папке данных.</summary>
     public string? PluginsDirectory { get; init; }
 
+    /// <summary>
+    /// Pepa запущена от имени администратора (тогда расширения не загружаются). null — определить самой; проверки задают
+    /// false: раннер CI на Windows работает от администратора.
+    /// </summary>
+    public bool? Elevated { get; init; }
+
     /// <summary>Адрес Claude API вместо настоящего (проверки: имитация сервера).</summary>
     public string? AssistantBaseUrl { get; init; }
 

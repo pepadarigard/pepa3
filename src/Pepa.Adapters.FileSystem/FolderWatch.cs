@@ -661,7 +661,10 @@ public sealed class FolderWatcher : IAsyncDisposable
                         throw new TooManyFilesException(allEntries: true);
                     }
 
-                    var hidden = (entry.Attributes & (FileAttributes.Hidden | FileAttributes.System)) != 0;
+                    // Имя с точки в начале — скрытое и на Windows: это служебные папки и файлы программ (.git, .vs, .~lock),
+                    // а не документы; так слежение одинаково на всех системах.
+                    var hidden = entry.Name.StartsWith('.') ||
+                                 (entry.Attributes & (FileAttributes.Hidden | FileAttributes.System)) != 0;
                     if (entry is DirectoryInfo subfolder)
                     {
                         if (settings.Subfolders)

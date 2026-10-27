@@ -57,6 +57,8 @@ public sealed class HostFixture : IAsyncDisposable
         TelegramConnectTimeout = TimeSpan.FromSeconds(10),
         // Слежение за папками — чаще, чтобы проверки не ждали секундами.
         FolderWatch = new Adapters.FileSystem.FolderWatcherOptions { Interval = TimeSpan.FromMilliseconds(100), Settle = TimeSpan.FromMilliseconds(300) },
+        // Раннер CI на Windows — администратор, а от администратора расширения не загружаются (это проверяется отдельно).
+        Elevated = false,
     };
 
     /// <param name="whileStopped">Что сделать, пока Pepa закрыта (например, заменить базу копией).</param>

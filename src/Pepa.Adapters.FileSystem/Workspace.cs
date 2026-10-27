@@ -60,6 +60,16 @@ public sealed class Workspace(Func<string> rootProvider) : IWorkspace
         }
 
         var normalized = trimmed.Replace('\\', Path.DirectorySeparatorChar).Replace('/', Path.DirectorySeparatorChar);
+        // До нормализации: GetFullPath на Windows молча отрезает точки и пробелы в конце имени («точка.» → «точка»), и
+        // действие задело бы другой файл.
+        foreach (var segment in normalized.Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (segment is not ("." or "..") && (segment.EndsWith('.') || segment.EndsWith(' ')))
+            {
+                throw new NodeInputException($"Имя «{segment}» не может заканчиваться точкой или пробелом.");
+            }
+        }
+
         var full = Path.TrimEndingDirectorySeparator(
             Path.GetFullPath(isAbsolute ? normalized : Path.Combine(root, normalized)));
 
@@ -89,11 +99,6 @@ public sealed class Workspace(Func<string> rootProvider) : IWorkspace
             if (ReservedNames.Contains(stem))
             {
                 throw new NodeInputException($"Имя «{segment}» зарезервировано Windows и не может использоваться.");
-            }
-
-            if (segment.EndsWith('.') || segment.EndsWith(' '))
-            {
-                throw new NodeInputException($"Имя «{segment}» не может заканчиваться точкой или пробелом.");
             }
 
             current = Path.Combine(current, segment);

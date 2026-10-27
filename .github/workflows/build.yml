@@ -94,6 +94,7 @@ jobs:
       - name: Сквозная проверка интерфейса (Playwright)
         working-directory: ui
         run: |
+          dotnet build ../src/Pepa.Server/Pepa.Server.csproj
           npm install --no-save playwright@1.63.0
           npx playwright install --with-deps chromium
           npm run e2e
