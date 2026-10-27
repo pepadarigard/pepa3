@@ -115,7 +115,9 @@ public sealed class EngineHarness : IAsyncDisposable
     public async Task<ProcessRecord> WaitForAsync(string processId, Func<ProcessRecord, bool> condition,
         TimeSpan? advance = null, TimeSpan? timeout = null)
     {
-        var deadline = DateTime.UtcNow + (timeout ?? TimeSpan.FromSeconds(15));
+        // С запасом: проверки с настоящим браузером идут параллельно с остальными, и под нагрузкой (CI, полный прогон)
+        // запуск браузера бывает долгим. Срок влияет только на то, как быстро упадёт уже неудачная проверка.
+        var deadline = DateTime.UtcNow + (timeout ?? TimeSpan.FromSeconds(30));
         while (true)
         {
             var process = await Store.GetProcessAsync(processId);
