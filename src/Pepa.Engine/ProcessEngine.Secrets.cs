@@ -85,12 +85,70 @@ public sealed partial class ProcessEngine
                 continue;
             }
 
-            result.Add(value);
-            result.Add(JsonEncodedText.Encode(value).Value);
-            result.Add(JsonEncodedText.Encode(value, RelaxedEncoder).Value);
+            result.UnionWith(Forms(value));
         }
 
         return new SecretList(result);
+    }
+
+    /// <summary>
+    /// Записи значения в JSON: как есть, с экранированием .NET (обычным и без экранирования не-ASCII) и как его записывает
+    /// JSON.stringify в выражениях — экранируются только кавычка, обратная косая черта и управляющие символы.
+    /// </summary>
+    private static IEnumerable<string> Forms(string secret) =>
+        new[] { secret, JsonEncodedText.Encode(secret).Value, JsonEncodedText.Encode(secret, RelaxedEncoder).Value, JsonStringify(secret) }
+            .Distinct(StringComparer.Ordinal);
+
+    /// <summary>Строка так, как её записывает JSON.stringify (без внешних кавычек).</summary>
+    internal static string JsonStringify(string value)
+    {
+        var result = new System.Text.StringBuilder(value.Length + 8);
+        for (var i = 0; i < value.Length; i++)
+        {
+            var c = value[i];
+            var paired = char.IsHighSurrogate(c) ? i + 1 < value.Length && char.IsLowSurrogate(value[i + 1])
+                : char.IsLowSurrogate(c) && i > 0 && char.IsHighSurrogate(value[i - 1]);
+            switch (c)
+            {
+                case '"':
+                    result.Append("\\\"");
+                    break;
+                case '\\':
+                    result.Append("\\\\");
+                    break;
+                case '\b':
+                    result.Append("\\b");
+                    break;
+                case '\f':
+                    result.Append("\\f");
+                    break;
+                case '\n':
+                    result.Append("\\n");
+                    break;
+                case '\r':
+                    result.Append("\\r");
+                    break;
+                case '\t':
+                    result.Append("\\t");
+                    break;
+                case < ' ':
+                    result.Append("\\u").Append(((int)c).ToString("x4", System.Globalization.CultureInfo.InvariantCulture));
+                    break;
+                default:
+                    if (char.IsSurrogate(c) && !paired)
+                    {
+                        result.Append("\\u").Append(((int)c).ToString("x4", System.Globalization.CultureInfo.InvariantCulture));
+                    }
+                    else
+                    {
+                        result.Append(c);
+                    }
+
+                    break;
+            }
+        }
+
+        return result.ToString();
     }
 
     /// <summary>
@@ -163,32 +221,48 @@ public sealed partial class ProcessEngine
         return result;
     }
 
+    /// <summary>Числа короче не передаются другим процессам секретом: «100» и «200» есть в любых данных.</summary>
+    private const int MinCarriedNumberLength = 4;
+
     /// <summary>
-    /// Какие из секретных значений есть внутри данных — по тому же правилу, что и при скрытии: длинное — где угодно в строке,
-    /// короткое и число — отдельным словом.
+    /// Какие из секретных значений есть внутри данных (в значениях и именах полей, в том числе в записи JSON) — по тому же
+    /// правилу, что и при скрытии: длинное — где угодно в строке, короткое и число — отдельным словом. Числа короче четырёх
+    /// цифр (CVV внутри секретного объекта) секретом другому процессу не передаются: в нём это было бы любое «100».
     /// </summary>
     internal static List<string> SecretsIn(IReadOnlyList<string> secrets, params JsonNode?[] data)
     {
+        var carried = secrets.Where(s => s.Length >= MinSecretLength && !(s.Length < MinCarriedNumberLength && s.All(char.IsAsciiDigit)))
+            .Distinct(StringComparer.Ordinal).ToList();
+        if (carried.Count == 0)
+        {
+            return [];
+        }
+
         var strings = new List<string>();
         foreach (var node in data)
         {
             Strings(node, strings);
         }
 
-        // И в записи JSON: секрет внутри JSON.stringify(...) записан с экранированием.
-        return secrets.Where(secret => Forms(secret).Any(form => strings.Any(s => SecretList.Occurs(s, form)))).ToList();
-    }
+        // Все записи всех значений — за один проход по каждой строке.
+        var forms = new SecretList(carried.SelectMany(Forms));
+        var found = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var text in strings)
+        {
+            forms.Find(text, found);
+        }
 
-    private static IEnumerable<string> Forms(string secret) =>
-        new[] { secret, JsonEncodedText.Encode(secret).Value, JsonEncodedText.Encode(secret, RelaxedEncoder).Value }.Distinct(StringComparer.Ordinal);
+        return carried.Where(secret => Forms(secret).Any(found.Contains)).ToList();
+    }
 
     private static void Strings(JsonNode? node, List<string> into)
     {
         switch (node)
         {
             case JsonObject obj:
-                foreach (var (_, value) in obj)
+                foreach (var (key, value) in obj)
                 {
+                    into.Add(key);
                     Strings(value, into);
                 }
 
@@ -227,12 +301,23 @@ public sealed partial class ProcessEngine
         switch (node)
         {
             case JsonObject obj:
+            {
+                // Секрет бывает и именем поля ({ [vars.password]: 1 }) — оно тоже скрывается (совпавшие имена — с номером).
+                var result = new JsonObject();
                 foreach (var (key, value) in obj.ToList())
                 {
-                    obj[key] = RedactNode(value?.DeepClone(), secrets);
+                    var name = Redact(key, secrets)!;
+                    for (var n = 2; result.ContainsKey(name); n++)
+                    {
+                        name = $"{Redact(key, secrets)} ({n})";
+                    }
+
+                    obj.Remove(key);
+                    result[name] = RedactNode(value, secrets);
                 }
 
-                return obj;
+                return result;
+            }
             case JsonArray array:
                 for (var i = 0; i < array.Count; i++)
                 {
@@ -301,12 +386,16 @@ public sealed partial class ProcessEngine
 
 /// <summary>
 /// Готовый к поиску набор секретных значений (длинные — первыми). Короткие и числа ищутся только отдельным словом (числом),
-/// начала длинных — и перед «…» (блоки сокращают значения в сообщениях). Все совпадения ищутся в исходном тексте за один
-/// проход по каждому значению, пересекающиеся объединяются — и текст собирается один раз.
+/// начала длинных — и перед «…» (блоки сокращают значения в сообщениях). Текст проходится один раз для всех значений сразу
+/// (значения разложены по первым двум знакам), пересекающиеся совпадения объединяются — и текст собирается один раз:
+/// время растёт с длиной текста, а не с числом секретов, запомненных процессом.
 /// </summary>
 public sealed class SecretList : IReadOnlyList<string>
 {
     private readonly List<string> _items;
+    private Dictionary<int, Entry[]>? _index;
+
+    private sealed record Entry(string Value, bool Bounded, bool Digits, int MinPreview);
 
     public SecretList(IEnumerable<string> items) =>
         _items = items.Distinct(StringComparer.Ordinal).OrderByDescending(s => s.Length).ToList();
@@ -319,6 +408,13 @@ public sealed class SecretList : IReadOnlyList<string>
 
     System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
 
+    private Dictionary<int, Entry[]> Index => _index ??= _items.Where(s => s.Length >= 2)
+        .Select(s => new Entry(s, Bounded(s), IsNumber(s), Math.Min(ProcessEngine.ShortSecretLength, Math.Max(3, (s.Length + 1) / 2))))
+        .GroupBy(e => Key(e.Value, 0))
+        .ToDictionary(g => g.Key, g => g.ToArray());
+
+    private static int Key(string text, int at) => (text[at] << 16) | text[at + 1];
+
     /// <summary>Короткое значение и число — только отдельным словом (числом), длинное — где угодно.</summary>
     private static bool Bounded(string secret) => secret.Length < ProcessEngine.ShortSecretLength || IsNumber(secret);
 
@@ -327,14 +423,24 @@ public sealed class SecretList : IReadOnlyList<string>
     private static bool IsWordChar(char c, bool digitsOnly) => digitsOnly ? char.IsAsciiDigit(c) : char.IsLetterOrDigit(c);
 
     /// <summary>
-    /// Перед позицией — граница слова: начало текста, не буква (не цифра) или конец экранирования JSON — «\n», «\t»,
-    /// «\uXXXX» (так в тексте выглядят значения, записанные как JSON).
+    /// Перед позицией — граница слова: начало текста или не буква (не цифра). В тексте с JSON (есть кавычки) — и конец
+    /// экранирования «\n», «\t», «\uXXXX»: так выглядят значения, записанные как JSON. Цифры самого «\u1234» — не число.
     /// </summary>
-    private static bool BoundaryBefore(string text, int at, bool digitsOnly)
+    private static bool BoundaryBefore(string text, int at, bool digitsOnly, bool json)
     {
+        if (digitsOnly && InsideUnicodeEscape(text, at))
+        {
+            return false;
+        }
+
         if (at == 0 || !IsWordChar(text[at - 1], digitsOnly))
         {
             return true;
+        }
+
+        if (!json)
+        {
+            return false;
         }
 
         if (at >= 2 && text[at - 2] == '\\' && text[at - 1] is 'n' or 't' or 'r' or 'b' or 'f')
@@ -342,47 +448,103 @@ public sealed class SecretList : IReadOnlyList<string>
             return true;
         }
 
-        return at >= 6 && text[at - 6] == '\\' && text[at - 5] == 'u' && text.AsSpan(at - 4, 4).ToString().All(char.IsAsciiHexDigit);
+        return at >= 6 && text[at - 6] == '\\' && text[at - 5] == 'u' && IsHex(text, at - 4, 4);
+    }
+
+    private static bool InsideUnicodeEscape(string text, int at)
+    {
+        for (var digits = 0; digits < 4; digits++)
+        {
+            var u = at - 1 - digits;
+            if (u >= 1 && text[u] == 'u' && text[u - 1] == '\\' && IsHex(text, u + 1, digits))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsHex(string text, int from, int count)
+    {
+        for (var i = from; i < from + count; i++)
+        {
+            if (i < 0 || i >= text.Length || !char.IsAsciiHexDigit(text[i]))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool BoundaryAfter(string text, int end, bool digitsOnly) => end == text.Length || !IsWordChar(text[end], digitsOnly);
 
-    /// <summary>Есть ли значение в тексте по правилу скрытия.</summary>
-    public static bool Occurs(string text, string secret) => Matches(text, secret).Any();
+    /// <summary>Какие значения есть в тексте (по правилу скрытия) — добавляются в <paramref name="found"/>.</summary>
+    public void Find(string text, ISet<string> found) => Scan(text, previews: false, null, found);
 
-    private static IEnumerable<int> Matches(string text, string secret)
+    /// <summary>Есть ли значение в тексте по правилу скрытия.</summary>
+    public static bool Occurs(string text, string secret)
     {
-        var bounded = Bounded(secret);
-        var digits = IsNumber(secret);
-        for (var at = text.IndexOf(secret, StringComparison.Ordinal); at >= 0;
-             at = at + 1 < text.Length ? text.IndexOf(secret, at + 1, StringComparison.Ordinal) : -1)
+        var found = new HashSet<string>(StringComparer.Ordinal);
+        new SecretList([secret]).Find(text, found);
+        return found.Count > 0;
+    }
+
+    /// <summary>
+    /// Один проход по тексту: в каждой позиции — значения с теми же первыми двумя знаками. Полное совпадение (короткое и
+    /// число — отдельным словом) или, если <paramref name="previews"/>, начало значения (не короче трёх знаков и половины
+    /// значения), за которым сразу «…» или «...», — так его показал блок, сократив длинное значение.
+    /// </summary>
+    private void Scan(string text, bool previews, List<(int Start, int End)>? ranges, ISet<string>? found)
+    {
+        var index = Index;
+        if (index.Count == 0)
         {
-            if (!bounded || (BoundaryBefore(text, at, digits) && BoundaryAfter(text, at + secret.Length, digits)))
+            return;
+        }
+
+        var json = text.Contains('"');
+        for (var at = 0; at + 1 < text.Length; at++)
+        {
+            if (!index.TryGetValue(Key(text, at), out var candidates))
             {
-                yield return at;
+                continue;
+            }
+
+            foreach (var entry in candidates)
+            {
+                var secret = entry.Value;
+                var length = 2;
+                while (length < secret.Length && at + length < text.Length && text[at + length] == secret[length])
+                {
+                    length++;
+                }
+
+                if (length == secret.Length)
+                {
+                    if (!entry.Bounded || (BoundaryBefore(text, at, entry.Digits, json) && BoundaryAfter(text, at + length, entry.Digits)))
+                    {
+                        ranges?.Add((at, at + length));
+                        found?.Add(secret);
+                    }
+                }
+                else if (previews && length >= entry.MinPreview && Ellipsis(text, at + length) is > 0 and var ellipsis &&
+                         (!entry.Bounded || BoundaryBefore(text, at, entry.Digits, json)))
+                {
+                    ranges!.Add((at, at + length + ellipsis));
+                }
             }
         }
     }
 
+    private static int Ellipsis(string text, int at) =>
+        at < text.Length && text[at] == '…' ? 1 : at + 3 <= text.Length && string.CompareOrdinal(text, at, "...", 0, 3) == 0 ? 3 : 0;
+
     public string Redact(string text)
     {
         var ranges = new List<(int Start, int End)>();
-        foreach (var secret in _items)
-        {
-            if (secret.Length <= text.Length)
-            {
-                foreach (var at in Matches(text, secret))
-                {
-                    ranges.Add((at, at + secret.Length));
-                }
-            }
-        }
-
-        if (text.Contains('…') || text.Contains("...", StringComparison.Ordinal))
-        {
-            AddPreviews(text, ranges);
-        }
-
+        Scan(text, text.Contains('…') || text.Contains("...", StringComparison.Ordinal), ranges, null);
         if (ranges.Count == 0)
         {
             return text;
@@ -407,47 +569,6 @@ public sealed class SecretList : IReadOnlyList<string>
         }
 
         return result.Append(text, position, text.Length - position).ToString();
-    }
-
-    /// <summary>
-    /// Начало значения, за которым сразу «…» или «...», — тоже секрет (не короче трёх знаков и половины значения): так его
-    /// показал блок, сократив длинное значение. Короткое значение и число — тоже только с начала слова.
-    /// </summary>
-    private void AddPreviews(string text, List<(int Start, int End)> ranges)
-    {
-        foreach (var secret in _items)
-        {
-            var min = Math.Min(ProcessEngine.ShortSecretLength, Math.Max(3, (secret.Length + 1) / 2));
-            if (secret.Length <= min)
-            {
-                continue;
-            }
-
-            var bounded = Bounded(secret);
-            var digits = IsNumber(secret);
-            var prefix = secret[..min];
-            for (var at = text.IndexOf(prefix, StringComparison.Ordinal); at >= 0;
-                 at = at + 1 < text.Length ? text.IndexOf(prefix, at + 1, StringComparison.Ordinal) : -1)
-            {
-                if (bounded && !BoundaryBefore(text, at, digits))
-                {
-                    continue;
-                }
-
-                var length = min;
-                while (length < secret.Length && at + length < text.Length && text[at + length] == secret[length])
-                {
-                    length++;
-                }
-
-                var rest = text.AsSpan(at + length);
-                var ellipsis = rest.StartsWith("…") ? 1 : rest.StartsWith("...") ? 3 : 0;
-                if (length < secret.Length && ellipsis > 0)
-                {
-                    ranges.Add((at, at + length + ellipsis));
-                }
-            }
-        }
     }
 }
 

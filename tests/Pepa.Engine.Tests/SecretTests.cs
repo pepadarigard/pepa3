@@ -381,4 +381,128 @@ public sealed class SecretTests
         Assert.DoesNotContain("987654", shown);
         await h.Engine.CancelAsync(id);
     }
+
+    [Theory]
+    [InlineData("pa\"ss🔑word")]
+    [InlineData("pa\\ss\u00A0word")]
+    [InlineData("Пароль\"+1\u2028x")]
+    public async Task Secret_inside_json_stringify_is_hidden_whatever_it_contains(string password)
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var id = await h.RunAsync(new ScenarioBuilder("JSON")
+            .Variable("password", VariableType.Text, isInput: true, secret: true)
+            .Node("start", "start")
+            .Node("log", "log", new { message = "данные {{ JSON.stringify({ p: vars.password }) }}" })
+            .Node("end", "end")
+            .Chain("start", "log", "end").Build(), new JsonObject { ["password"] = password });
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+
+        Assert.Contains("данные {\"p\":\"••••\"}", string.Join("\n", (await h.Store.GetJournalAsync(id)).Select(j => j.Message)));
+    }
+
+    [Fact]
+    public async Task Secret_used_as_a_field_name_is_hidden_and_travels_with_the_event()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var receiver = await h.RunAsync(new ScenarioBuilder("Получатель")
+            .Variable("got", VariableType.Any)
+            .Node("start", "start")
+            .Node("wait", "event.wait", new { source = "process", eventType = "keys", saveTo = "got" })
+            .Node("end", "end")
+            .Chain("start", "wait").Edge("wait", "end", Ports.Event).Build());
+        await h.WaitForAsync(receiver, p => p.Status == ProcessStatus.Waiting);
+        var scenario = new ScenarioBuilder("Ключи")
+            .Variable("password", VariableType.Text, isInput: true, secret: true)
+            .Variable("map", VariableType.Any)
+            .Node("start", "start")
+            .Node("set", "variable.set", new { variable = "map", value = "({ [vars.password]: 1, other: 2 })" })
+            .Node("send", "event.send", new { source = "process", eventType = "keys", payload = "vars.map" })
+            .Node("end", "end")
+            .Chain("start", "set", "send", "end").Build();
+        var sender = await h.RunAsync(scenario, new JsonObject { ["password"] = "S3cr3t-Pa55" });
+        var done = await h.WaitForStatusAsync(sender, ProcessStatus.Completed);
+        var got = await h.WaitForStatusAsync(receiver, ProcessStatus.Completed);
+
+        var masker = new SecretMasker(done, scenario);
+        var shown = masker.Variables(done.Variables).ToJsonString() + string.Join("\n",
+            (await h.StepsAsync(sender)).Select(masker.Step).Select(s => s.Output?.ToJsonString()));
+        Assert.DoesNotContain("S3cr3t-Pa55", shown);
+        Assert.Contains("\"other\":2", shown);
+        Assert.Contains("S3cr3t-Pa55", got.Secrets!.Carried);
+        Assert.Equal(1, got.Variables["got"]!["payload"]!["S3cr3t-Pa55"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public void Field_names_that_become_the_same_after_masking_keep_both_values()
+    {
+        var masked = ProcessEngine.Redact(new JsonObject { ["S3cr3t-Pa55"] = 1, ["Pa55-S3cr3t"] = 2 }, ProcessEngine.Expand(["S3cr3t-Pa55", "Pa55-S3cr3t"]))!;
+        Assert.Equal("{\"••••\":1,\"•••• (2)\":2}", masked.ToJsonString(new System.Text.Json.JsonSerializerOptions
+        {
+            Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        }));
+    }
+
+    [Fact]
+    public void Short_numbers_are_not_passed_to_other_processes_as_secrets()
+    {
+        var carried = ProcessEngine.SecretsIn(["100", "4821", "S3cr3t-Pa55"], JsonNode.Parse("""{"limit":100,"pin":4821,"note":"S3cr3t-Pa55"}"""));
+        Assert.Equal(["4821", "S3cr3t-Pa55"], carried);
+    }
+
+    [Fact]
+    public void Masking_stays_fast_with_thousands_of_remembered_secrets()
+    {
+        var secrets = ProcessEngine.Expand(Enumerable.Range(0, 2000).Select(i => $"tok-{i:D5}-{Guid.NewGuid():N}"));
+        var text = string.Concat(Enumerable.Repeat("Обычная строка журнала с данными, кодом 12345 и многоточием... ", 16_000)) + secrets[100];
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var masked = ProcessEngine.Redact(text, secrets)!;
+
+        // Раньше текст проходился заново для каждого секрета: секунды на странице в мегабайт.
+        Assert.True(System.Diagnostics.Stopwatch.GetElapsedTime(started) < TimeSpan.FromSeconds(1.5));
+        Assert.EndsWith("многоточием... ••••", masked);
+    }
+
+    [Theory]
+    [InlineData("C:\\nQw9z\\file", "C:\\nQw9z\\file")]
+    [InlineData("символ \\u1234 в тексте", "символ \\u1234 в тексте")]
+    [InlineData("{\"text\":\"Ваш код:\\nQw9z\"}", "{\"text\":\"Ваш код:\\n••••\"}")]
+    [InlineData("ПИН 1234", "ПИН ••••")]
+    public void Escape_rules_apply_only_to_json_text(string text, string expected) =>
+        Assert.Equal(expected, ProcessEngine.Redact(text, ProcessEngine.Expand(["Qw9z", "1234"])));
+
+    [Fact]
+    public async Task Result_built_under_the_write_lock_is_hidden_too()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var id = await h.RunAsync(new ScenarioBuilder("Ресурс")
+            .Variable("password", VariableType.Text, isInput: true, secret: true)
+            .Node("start", "start")
+            .Node("lock", "resource.acquire", new { key = "вход:{{ vars.password }}" })
+            .Node("unlock", "resource.release", new { key = "вход:{{ vars.password }}" })
+            .Node("end", "end")
+            .Chain("start", "lock", "unlock", "end").Build(), new JsonObject { ["password"] = "S3cr3t-Pa55" });
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+
+        var steps = await h.StepsAsync(id);
+        Assert.All(steps.Where(s => s.NodeId is "lock" or "unlock"), s => Assert.DoesNotContain("S3cr3t-Pa55", s.Output?.ToJsonString() ?? ""));
+        Assert.DoesNotContain("S3cr3t-Pa55", string.Join("\n", (await h.Store.GetJournalAsync(id)).Select(j => j.Message)));
+    }
+
+    [Fact]
+    public async Task Showing_an_outdated_copy_of_a_finished_process_does_not_keep_its_scenario_in_memory()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var id = await h.RunAsync(new ScenarioBuilder("Коротко").Node("start", "start").Node("end", "end").Chain("start", "end").Build());
+        var done = await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Equal(0, h.Engine.ExecutionGraphCount);
+
+        h.Engine.Graph(done with { Status = ProcessStatus.Running });
+        Assert.Equal(0, h.Engine.ExecutionGraphCount);
+        for (var i = 0; i < 70; i++)
+        {
+            h.Engine.Graph(done with { DefinitionJson = done.DefinitionJson.Replace("Коротко", $"Коротко {i}") });
+        }
+
+        Assert.True(h.Engine.DisplayGraphCount <= 64);
+    }
 }

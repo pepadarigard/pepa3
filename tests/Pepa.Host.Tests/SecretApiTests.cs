@@ -161,4 +161,35 @@ public sealed class SecretApiTests
         Assert.Contains("••••", details["process"]!["waitingFor"]!.GetValue<string>());
         await f.SendAsync(HttpMethod.Post, $"/api/processes/{id}/cancel");
     }
+
+    [Fact]
+    public async Task Event_saved_into_a_secret_variable_is_hidden_on_the_events_page()
+    {
+        await using var f = await HostFixture.StartAsync(seedSamples: false);
+        var (_, scenario) = await f.SendAsync(HttpMethod.Post, "/api/scenarios", new
+        {
+            name = "Код из сообщения",
+            variables = new object[] { new { name = "otp", type = "any", secret = true } },
+            nodes = new object[]
+            {
+                new { id = "start", type = "start" },
+                new { id = "wait", type = "event.wait", config = new { source = "manual", eventType = "sms", saveTo = "otp" } },
+                new { id = "end", type = "end" },
+            },
+            edges = new object[]
+            {
+                new { id = "a", source = "start", sourcePort = "out", target = "wait" },
+                new { id = "b", source = "wait", sourcePort = "event", target = "end" },
+            },
+        });
+        var (_, run) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{scenario!["id"]!.GetValue<string>()}/run", new { });
+        var id = run!["processId"]!.GetValue<string>();
+        await f.WaitForProcessAsync(id, p => HostFixture.Status(p) == "waiting");
+        await f.SendAsync(HttpMethod.Post, "/api/events", new { source = "manual", type = "sms", payload = new { text = "Ваш код Zx81Qp-Long" } });
+        await f.WaitForProcessAsync(id, p => HostFixture.Status(p) == "completed");
+
+        var events = await f.Client.GetStringAsync("/api/events");
+        Assert.DoesNotContain("Zx81Qp-Long", events);
+        Assert.Contains("••••", events);
+    }
 }

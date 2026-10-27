@@ -174,13 +174,13 @@ public sealed partial class ProcessEngine
         };
         var verification = await SafeVerifyAsync(executor, context);
         // Пояснение проверки может содержать значения (адрес страницы, текст расширения) — без секретов.
-        var secrets = SecretValues(process, Graph(process).Definition, NodeResult.Ok(verification.Port, verification.VariableUpdates ?? EmptyUpdates));
+        var secrets = SecretValues(process, ExecutionGraph(process).Definition, NodeResult.Ok(verification.Port, verification.VariableUpdates ?? EmptyUpdates));
         verification = verification with { Message = Redact(verification.Message, secrets)! };
         var label = Label(node, executor.Descriptor);
         switch (verification.Outcome)
         {
             case VerificationOutcome.Done:
-                await ApplyResultAsync(process, Graph(process), token, node, executor.Descriptor, step,
+                await ApplyResultAsync(process, ExecutionGraph(process), token, node, executor.Descriptor, step,
                     NodeResult.Ok(verification.Port, verification.VariableUpdates ?? EmptyUpdates, verification.Output),
                     $"проверено — действие выполнено. {verification.Message}");
                 return new ControlResult($"Проверка подтвердила, что действие выполнено. Процесс продолжен. {verification.Message}");
@@ -241,7 +241,7 @@ public sealed partial class ProcessEngine
                     ?? throw new EngineOperationException(tokens.Count(t => t.State != TokenState.Completed) > 1
                         ? "Непонятно, шаг какой ветви повторить. Остановите процесс и запустите заново."
                         : "У процесса нет точки, с которой можно продолжить.");
-        var node = Graph(process).FindNode(token.NodeId);
+        var node = ExecutionGraph(process).FindNode(token.NodeId);
         var label = node is null ? $"«{token.NodeId}»" : Label(node, _registry.FindDescriptor(node.Type));
         var now = _time.GetUtcNow();
         var updated = Cleared(process) with { Status = ProcessStatus.Running, UpdatedAt = now };
@@ -282,7 +282,7 @@ public sealed partial class ProcessEngine
         var message = finalState == StepState.Skipped
             ? $"Шаг {label} пропущен по решению пользователя."
             : $"Пользователь подтвердил, что шаг {label} выполнен. Значения, которые шаг должен был сохранить, не записаны.";
-        await ApplyResultAsync(process, Graph(process), token, node, descriptor, step,
+        await ApplyResultAsync(process, ExecutionGraph(process), token, node, descriptor, step,
             new NodeResult.Success(port, EmptyUpdates, null, message, MessageLevel.Warning),
             finalState == StepState.Skipped ? "Пропущен пользователем." : "Отмечен выполненным пользователем.",
             finalState, extraWrites: (write, _, _, effects) => ReleaseTokenWaitAsync(write, process.Id, token, effects));
@@ -300,7 +300,7 @@ public sealed partial class ProcessEngine
 
         var token = AttentionToken(process, tokens, step.TokenId)
                     ?? throw new EngineOperationException("У процесса нет точки, с которой можно продолжить.");
-        var node = Graph(process).FindNode(step.NodeId)
+        var node = ExecutionGraph(process).FindNode(step.NodeId)
                    ?? throw new EngineOperationException($"Блок «{step.NodeId}» не найден в сценарии.");
         if (!_registry.TryGet(node.Type, out var executor))
         {

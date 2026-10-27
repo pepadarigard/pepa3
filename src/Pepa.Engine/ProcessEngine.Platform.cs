@@ -93,8 +93,18 @@ public sealed partial class ProcessEngine
     // ───────────────────────────── Действия шага ─────────────────────────────
 
     /// <summary>Превращает действия, исход которых известен сразу (ресурс свободен, событие записано), в обычный итог.</summary>
+    /// <summary>Какие секреты отправителя есть в событии (данные, ключ, ключ от повторов).</summary>
+    internal static IReadOnlyList<string> EventSecrets(ProcessRecord process, ScenarioDefinition definition, EventInput input)
+    {
+        var senderSecrets = RawSecretValues(process, definition);
+        return senderSecrets.Count == 0
+            ? []
+            : SecretsIn(senderSecrets, input.Payload, JsonValue.Create(input.CorrelationKey), JsonValue.Create(input.ExternalId));
+    }
+
+    /// <param name="eventSecrets">Секреты отправителя в публикуемом событии — посчитаны заранее, до права записи.</param>
     private async Task<NodeResult> ResolveIntentAsync(IStoreWrite write, ProcessRecord process, TokenRecord token, string label,
-        NodeResult result, CommitEffects effects, DateTimeOffset now)
+        NodeResult result, CommitEffects effects, DateTimeOffset now, IReadOnlyList<string>? eventSecrets = null)
     {
         switch (result)
         {
@@ -185,11 +195,7 @@ public sealed partial class ProcessEngine
                 }
 
                 // Секреты отправителя в событии (данные, ключ) событие помнит: при показе они скрыты, получателю — секретны.
-                var senderSecrets = RawSecretValues(process, Graph(process).Definition);
-                var carried = senderSecrets.Count == 0
-                    ? null
-                    : SecretsIn(senderSecrets, input.Payload, JsonValue.Create(input.CorrelationKey), JsonValue.Create(input.ExternalId)) is
-                        { Count: > 0 } found ? found : null;
+                var carried = (eventSecrets ?? EventSecrets(process, ExecutionGraph(process).Definition, input)) is { Count: > 0 } found ? found : null;
                 var id = await write.TryInsertEventAsync(NewEventRecord(input, now) with { Secrets = carried });
                 long eventId;
                 var duplicate = false;

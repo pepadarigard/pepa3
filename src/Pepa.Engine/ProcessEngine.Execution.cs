@@ -85,7 +85,7 @@ public sealed partial class ProcessEngine
                 var resolved = false;
                 foreach (var waiting in tokens.Where(t => t is { State: TokenState.Waiting, WaitKind: WaitKind.Event or WaitKind.Resource }))
                 {
-                    if (await TryResolveWaitAsync(process, Graph(process), waiting, now))
+                    if (await TryResolveWaitAsync(process, ExecutionGraph(process), waiting, now))
                     {
                         resolved = true;
                         break;
@@ -126,7 +126,7 @@ public sealed partial class ProcessEngine
                 return false;
             }
 
-            await ExecuteTokenAsync(process, Graph(process), token, slot);
+            await ExecuteTokenAsync(process, ExecutionGraph(process), token, slot);
             lastToken = token.Id;
             checkWaits = tokens.Count > 1;
         }
@@ -449,6 +449,9 @@ public sealed partial class ProcessEngine
             result = produced with { Output = cleanOutput };
         }
 
+        var published = result as NodeResult.PublishEvent;
+        var eventSecrets = published is null ? null : EventSecrets(process, graph.Definition, published.Event);
+
         await using var write = await _store.BeginWriteAsync();
 
         // Время — после получения права записи: подписка и событие, записанные позже, не должны получить более раннее время.
@@ -473,7 +476,8 @@ public sealed partial class ProcessEngine
 
         var replacedSecrets = ReplacedSecretValues(process, graph.Definition, result);
         result = CheckVariableTypes(result, graph.Definition, descriptor);
-        result = await ResolveIntentAsync(write, process, token, label, result, effects, now);
+        result = await ResolveIntentAsync(write, process, token, label, result, effects, now,
+            ReferenceEquals(result, published) ? eventSecrets : null);
 
         // Необязательный выход (например, «Тайм-аут») не подключён — процессу некуда идти: это невыполненный шаг.
         if (result is NodeResult.Success { Port: var port } routed && descriptor.FindOutput(port) is { Kind: PortKind.Optional } optional &&

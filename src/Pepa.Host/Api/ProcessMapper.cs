@@ -157,6 +157,7 @@ internal sealed class ProcessMapper(ProcessEngine engine, IPepaStore store)
             return process;
         }
 
+        var receiverSecrets = new Dictionary<string, SecretList>(StringComparer.Ordinal);
         var result = new List<EventDto>(records.Count);
         foreach (var record in records)
         {
@@ -180,13 +181,24 @@ internal sealed class ProcessMapper(ProcessEngine engine, IPepaStore store)
                     subscription?.State == SubscriptionState.Active && !process.IsTerminal));
             }
 
-            // Секреты процесса-отправителя (пароль в данных события, итог вызванного сценария) не показываются.
-            var secrets = ProcessEngine.Expand(record.Secrets);
+            // Секреты процесса-отправителя (пароль в данных события, итог вызванного сценария) не показываются — и секреты
+            // получателей: событие, сохранённое в секретную переменную (код из сообщения), — их секрет.
+            var started = record.StartedProcesses?.Select(n => n?.GetValue<string>()).OfType<string>().ToList() ?? [];
+            var values = new List<string>(ProcessEngine.Expand(record.Secrets));
+            foreach (var receiverId in started.Prepend(record.ProcessId).OfType<string>().Distinct(StringComparer.Ordinal))
+            {
+                if (await Load(receiverId) is { } receiver)
+                {
+                    values.AddRange(receiverSecrets.TryGetValue(receiverId, out var known)
+                        ? known
+                        : receiverSecrets[receiverId] = ProcessEngine.SecretValues(receiver, engine.Graph(receiver).Definition));
+                }
+            }
+
+            var secrets = new SecretList(values);
             result.Add(new EventDto(record.Id, record.Source, record.Type, ProcessEngine.Redact(record.ExternalId, secrets),
                 ProcessEngine.Redact(record.CorrelationKey, secrets), ProcessEngine.Redact(record.Payload, secrets), record.ReceivedAt,
-                record.State, owner is null ? null : Ref(owner), candidates,
-                record.StartedProcesses?.Select(n => n?.GetValue<string>()).OfType<string>().ToList() ?? [],
-                record.Note, record.HandledAt));
+                record.State, owner is null ? null : Ref(owner), candidates, started, record.Note, record.HandledAt));
         }
 
         return result;
