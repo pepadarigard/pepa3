@@ -140,7 +140,10 @@ export function SettingsPage() {
             <label className="field">
               <span className="field-label">Хранить историю завершённых процессов, дней</span>
               <input className="input" type="number" min={0} max={3650} value={form.historyDays} onChange={number("historyDays")} />
-              <span className="field-help">0 — хранить всегда. Незавершённые процессы и связанные с ними не удаляются никогда.</span>
+              <span className="field-help">
+                0 — хранить всегда. Незавершённые процессы и связанные с ними не удаляются никогда. У старых событий
+                удаляется содержимое; сами события (по ним узнаются повторы) — через год.
+              </span>
             </label>
           </div>
         </div>

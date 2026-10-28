@@ -219,5 +219,9 @@ public sealed partial class SqliteStore
         ALTER TABLE processes ADD COLUMN secrets TEXT NULL;
         ALTER TABLE events ADD COLUMN secrets TEXT NULL;
         """,
+        // 7: срок хранения событий — быстрая проверка, что событие получила подписка.
+        """
+        CREATE INDEX ix_subscriptions_event ON subscriptions (event_id) WHERE event_id IS NOT NULL;
+        """,
     ];
 }

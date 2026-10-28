@@ -348,4 +348,41 @@ public sealed class EventTests
         Assert.Equal(second, record.ProcessId);
         Assert.Equal(1, h.World.Executions("got-C"));
     }
+
+    [Fact]
+    public async Task Old_handled_events_lose_their_data_keep_stopping_repeats_and_conflicts_are_never_touched()
+    {
+        var (h, scenario) = await SetupAsync(WaitReply(correlationKey: null));
+        await using var _ = h;
+        // Другой тип — чтобы ждущие ниже процессы не забрали это событие по окну «смотреть назад».
+        var unmatched = await h.Engine.PublishEventAsync(Reply("никому", externalId: "m-1", payload: new JsonObject { ["text"] = "большое письмо" }) with { Type = "notice" });
+        await WaitEventStateAsync(h, unmatched.EventId, EventState.Unmatched);
+        var waiting = await StartWaitingAsync(h, scenario, "A");
+        var delivered = await h.Engine.PublishEventAsync(Reply(null, externalId: "m-2", payload: new JsonObject { ["text"] = "ответ" }));
+        await h.WaitForStatusAsync(waiting, ProcessStatus.Completed);
+        await StartWaitingAsync(h, scenario, "B");
+        await StartWaitingAsync(h, scenario, "C");
+        var conflict = await h.Engine.PublishEventAsync(Reply(null, externalId: "m-3", payload: new JsonObject { ["text"] = "кому?" }));
+        await WaitEventStateAsync(h, conflict.EventId, EventState.Conflict);
+
+        var now = h.Time.GetUtcNow();
+        var later = now.AddDays(1);
+        var (cleared, deleted) = await h.Store.PruneEventsAsync(later, now.AddDays(-1), cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal((2, 0), (cleared, deleted));
+        var old = (await h.Store.GetEventAsync(unmatched.EventId))!;
+        Assert.Null(old.Payload);
+        Assert.Contains("по сроку хранения", old.Note);
+        Assert.Null((await h.Store.GetEventAsync(delivered.EventId))!.Payload);
+        Assert.Equal("кому?", (await h.Store.GetEventAsync(conflict.EventId))!.Payload!["text"]!.GetValue<string>());
+        // Строка осталась — повторно пришедшее событие узнаётся.
+        Assert.True((await h.Engine.PublishEventAsync(Reply("никому", externalId: "m-1") with { Type = "notice" })).Duplicate);
+
+        // Через год строки удаляются — кроме событий, которые получил процесс, и ждущих решения.
+        (cleared, deleted) = await h.Store.PruneEventsAsync(later, later, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal((0, 1), (cleared, deleted));
+        Assert.Null(await h.Store.GetEventAsync(unmatched.EventId));
+        Assert.NotNull(await h.Store.GetEventAsync(delivered.EventId));
+        Assert.NotNull(await h.Store.GetEventAsync(conflict.EventId));
+    }
 }

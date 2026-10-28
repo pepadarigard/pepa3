@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Pepa.Host.Backups;
@@ -133,14 +134,36 @@ public sealed class BackupApiTests
         var id = run!["processId"]!.GetValue<string>();
         await f.WaitForProcessAsync(id, p => HostFixture.Status(p) == "completed");
 
+        var (_, published) = await f.SendAsync(HttpMethod.Post, "/api/events", new
+        {
+            source = "manual", type = "никому", externalId = "old-1", payload = "большое письмо",
+        });
+        var eventId = published!["eventId"]!.GetValue<long>();
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
+        while (Event(await f.GetAsync("/api/events"), eventId)["state"]!.GetValue<string>() != "unmatched")
+        {
+            Assert.True(DateTime.UtcNow < deadline, "Событие не обработано.");
+            await Task.Delay(50);
+        }
+
         var store = (SqliteStore)f.Host.Services.GetRequiredService<Pepa.Engine.Persistence.IPepaStore>();
         var days = 90;
         await using var retention = new HistoryRetention(store, () => days, new ManualTime(DateTimeOffset.UtcNow.AddDays(91)), NullLogger.Instance);
         Assert.Equal(1, await retention.RunOnceAsync(TestContext.Current.CancellationToken));
         Assert.Equal(404, (await f.SendAsync(HttpMethod.Get, $"/api/processes/{id}")).Status);
 
+        // У события удалены данные, строка осталась — повтор узнаётся; через год удаляется и она.
+        Assert.Null(Event(await f.GetAsync("/api/events"), eventId)["payload"]);
+        var (_, repeat) = await f.SendAsync(HttpMethod.Post, "/api/events", new { source = "manual", type = "никому", externalId = "old-1" });
+        Assert.True(repeat!["duplicate"]!.GetValue<bool>());
+        await using var yearLater = new HistoryRetention(store, () => days, new ManualTime(DateTimeOffset.UtcNow.AddDays(366)), NullLogger.Instance);
+        await yearLater.RunOnceAsync(TestContext.Current.CancellationToken);
+        Assert.DoesNotContain((await f.GetAsync("/api/events")).AsArray(), e => e!["id"]!.GetValue<long>() == eventId);
+
         // 0 — хранить всегда.
         days = 0;
         Assert.Equal(0, await retention.RunOnceAsync(TestContext.Current.CancellationToken));
     }
+
+    private static JsonNode Event(JsonNode events, long id) => events.AsArray().Single(e => e!["id"]!.GetValue<long>() == id)!;
 }

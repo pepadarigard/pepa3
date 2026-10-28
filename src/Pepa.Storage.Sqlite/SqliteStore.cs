@@ -96,6 +96,64 @@ public sealed partial class SqliteStore : IPepaStore
         }
     }
 
+    /// <summary>
+    /// События не копятся бесконечно (каждое письмо и сообщение Telegram — событие): у обработанных событий (доставлено,
+    /// не подошло, пропущено), пришедших до <paramref name="clearBefore"/>, удаляются данные — строка остаётся, чтобы
+    /// повторно пришедшее событие узнавалось; пришедшие до <paramref name="deleteBefore"/> удаляются совсем, если их не
+    /// получала ни одна подписка. Ждущие решения (конфликт) и ещё не применённые не трогаются никогда.
+    /// </summary>
+    /// <returns>Сколько событий очищено и сколько удалено.</returns>
+    public async Task<(int Cleared, int Deleted)> PruneEventsAsync(DateTimeOffset clearBefore, DateTimeOffset deleteBefore, int batch = 500,
+        CancellationToken cancellationToken = default)
+    {
+        const string handled = "('Delivered', 'Unmatched', 'Ignored')";
+        var cleared = await RepeatAsync($"""
+            UPDATE events SET payload = NULL, secrets = NULL, candidates = NULL,
+                note = CASE WHEN note IS NULL OR note = '' THEN $note ELSE note || ' ' || $note END
+            WHERE id IN (SELECT id FROM events WHERE state IN {handled} AND received_at < $before
+                AND (payload IS NOT NULL OR secrets IS NOT NULL OR candidates IS NOT NULL) LIMIT $batch);
+            """, clearBefore, batch, cancellationToken);
+        var deleted = await RepeatAsync($"""
+            DELETE FROM events WHERE id IN (
+                SELECT e.id FROM events e
+                WHERE e.state IN {handled} AND e.received_at < $before
+                  AND NOT EXISTS (SELECT 1 FROM subscriptions s WHERE s.event_id = e.id)
+                LIMIT $batch);
+            """, deleteBefore, batch, cancellationToken);
+        return (cleared, deleted);
+    }
+
+    /// <summary>Одна команда пачками (под правом записи на каждую пачку), пока она что-то меняет.</summary>
+    private async Task<int> RepeatAsync(string sql, DateTimeOffset before, int batch, CancellationToken cancellationToken)
+    {
+        var total = 0;
+        while (true)
+        {
+            int changed;
+            await _writeLock.WaitAsync(cancellationToken);
+            try
+            {
+                await using var connection = await OpenAsync(cancellationToken);
+                await using var command = connection.CreateCommand();
+                command.CommandText = sql;
+                command.Parameters.AddWithValue("$before", Date(before));
+                command.Parameters.AddWithValue("$batch", batch);
+                command.Parameters.AddWithValue("$note", "Данные события удалены по сроку хранения.");
+                changed = await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+            finally
+            {
+                _writeLock.Release();
+            }
+
+            total += changed;
+            if (changed < batch)
+            {
+                return total;
+            }
+        }
+    }
+
     /// <summary>Папка резервных копий базы — рядом с базой.</summary>
     public string BackupDirectory => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(DatabasePath))!, "backups");
 
