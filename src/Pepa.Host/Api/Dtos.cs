@@ -250,6 +250,14 @@ public sealed record CheckResultDto(bool Ok, string Message);
 
 /// <param name="ApiId">Сохранённый api_id (api_hash наружу не отдаётся).</param>
 /// <param name="Phone">Сохранённый номер — для повторного входа.</param>
+/// <summary>Почта: состояние и ящик (пароль наружу не отдаётся).</summary>
+public sealed record EmailStatusDto(string State, EmailAccountDto? Account, DateTimeOffset? LastCheckAt, string? Error, int? Messages, string? Note);
+
+public sealed record EmailAccountDto(string Server, int Port, string Security, string Login, string Folder, bool Enabled);
+
+/// <summary>Ящик из формы. Пароль пусто — прежний (если сервер и логин те же).</summary>
+public sealed record EmailAccountRequest(string? Server, int? Port, string? Security, string? Login, string? Password, string? Folder, bool? Enabled);
+
 public sealed record TelegramStatusDto(string State, string? Account, string? Message, int? ApiId, string? Phone, TelegramProxyDto Proxy);
 
 /// <param name="Kind">none, socks5 или mtproxy.</param>

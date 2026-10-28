@@ -45,6 +45,7 @@ export function startEventStream(queryClient: QueryClient, onState: (state: Conn
       queryClient.invalidateQueries({ queryKey: ["watches"] });
     } else if (event.type === "integrations") {
       queryClient.invalidateQueries({ queryKey: ["telegram"] });
+      queryClient.invalidateQueries({ queryKey: ["email"] });
     } else if (event.type === "scenarios") {
       queryClient.invalidateQueries({ queryKey: ["scenarios"] });
     } else if (event.type === "scenario" && event.id) {

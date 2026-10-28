@@ -10,6 +10,7 @@
     <ProjectReference Include="..\Pepa.Adapters.FileSystem\Pepa.Adapters.FileSystem.csproj" />
     <ProjectReference Include="..\Pepa.Adapters.Http\Pepa.Adapters.Http.csproj" />
     <ProjectReference Include="..\Pepa.Adapters.Tables\Pepa.Adapters.Tables.csproj" />
+    <ProjectReference Include="..\Pepa.Adapters.Email\Pepa.Adapters.Email.csproj" />
     <ProjectReference Include="..\Pepa.Adapters.Browser\Pepa.Adapters.Browser.csproj" />
     <ProjectReference Include="..\Pepa.Adapters.Telegram\Pepa.Adapters.Telegram.csproj" />
     <ProjectReference Include="..\Pepa.Adapters.Desktop\Pepa.Adapters.Desktop.csproj" />

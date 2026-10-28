@@ -455,6 +455,21 @@ async function main() {
     await proxy.getByRole("button", { name: "Без прокси" }).click();
     await proxy.getByTestId("telegram-proxy-summary").filter({ hasText: "без прокси" }).waitFor();
 
+    step("Интеграции: почта — готовые настройки и проверка связи");
+    const mail = page.getByTestId("email-card");
+    await mail.getByText("Не подключена").waitFor();
+    await mail.getByRole("button", { name: "Яндекс" }).click();
+    if ((await mail.getByRole("textbox", { name: "Сервер IMAP" }).inputValue()) !== "imap.yandex.ru") throw new Error("Не подставился сервер Яндекса");
+    await mail.getByRole("textbox", { name: "Сервер IMAP" }).fill("127.0.0.1");
+    await mail.getByRole("textbox", { name: "Порт" }).fill("1");
+    await mail.getByRole("combobox", { name: "Защита соединения" }).selectOption("none");
+    await mail.getByRole("textbox", { name: "Адрес почты (логин)" }).fill("anna@example.com");
+    await mail.getByLabel("Пароль приложения").fill("secret-app-pass");
+    await mail.getByRole("button", { name: "Проверить связь" }).click();
+    await mail.getByText("не отвечает", { exact: false }).waitFor();
+    if ((await mail.locator(".callout").allInnerTexts()).some((t) => t.includes("secret-app-pass"))) throw new Error("Пароль почты попал в сообщение");
+    await page.screenshot({ path: path.join(shots, "13c-email.png") });
+
     step("Параллельные ветви: пример 11");
     await page.goto(`${base}/#/scenarios`);
     const parallelCard = page.locator(".scenario-card", { hasText: "Пример 11. Параллельно" });

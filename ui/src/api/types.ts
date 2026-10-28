@@ -423,6 +423,33 @@ export type TelegramState =
   | "connected"
   | "disconnected";
 
+export type EmailState = "notConfigured" | "off" | "connecting" | "connected" | "error";
+export type EmailSecurity = "auto" | "ssl" | "startTls" | "none";
+
+export interface EmailAccount {
+  server: string;
+  port: number;
+  security: EmailSecurity;
+  login: string;
+  folder: string;
+  enabled: boolean;
+}
+
+/** Почта (IMAP): состояние и ящик. Пароль наружу не отдаётся. */
+export interface EmailStatus {
+  state: EmailState;
+  account: EmailAccount | null;
+  lastCheckAt: string | null;
+  error: string | null;
+  messages: number | null;
+  note: string | null;
+}
+
+/** Ящик из формы; пароль пусто — прежний (если сервер и логин те же). */
+export interface EmailAccountRequest extends EmailAccount {
+  password: string | null;
+}
+
 export interface TelegramStatus {
   state: TelegramState;
   /** Имя подключённого аккаунта. */

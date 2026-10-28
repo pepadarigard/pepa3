@@ -27,6 +27,7 @@ import {
   TextSearch,
   Lock,
   LockOpen,
+  Mail,
   Repeat,
   Rocket,
   Send,
@@ -99,6 +100,7 @@ const nodeIcons: Record<string, LucideIcon> = {
   "cloud-download": CloudDownload,
   "cloud-upload": CloudUpload,
   sheet: Sheet,
+  mail: Mail,
   "grid-2x2-plus": Grid2x2Plus,
   "grid-2x2-check": Grid2x2Check,
 };
@@ -122,6 +124,8 @@ export function categoryColor(category: string): string {
       return "var(--cat-web)";
     case "tables":
       return "var(--cat-tables)";
+    case "email":
+      return "var(--cat-email)";
     case "telegram":
       return "var(--cat-telegram)";
     case "desktop":

@@ -57,6 +57,8 @@ public sealed class HostFixture : IAsyncDisposable
         TelegramConnectTimeout = TimeSpan.FromSeconds(10),
         // Слежение за папками — чаще, чтобы проверки не ждали секундами.
         FolderWatch = new Adapters.FileSystem.FolderWatcherOptions { Interval = TimeSpan.FromMilliseconds(100), Settle = TimeSpan.FromMilliseconds(300) },
+        // Почта — проверяется часто, чтобы проверки не ждали по полминуты.
+        Email = new Adapters.Email.EmailServiceOptions { Interval = TimeSpan.FromMilliseconds(200), OperationTimeout = TimeSpan.FromSeconds(10) },
         // Раннер CI на Windows — администратор, а от администратора расширения не загружаются (это проверяется отдельно).
         Elevated = false,
     };

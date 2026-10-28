@@ -8,6 +8,7 @@
     <Compile Include="..\Pepa.Assistant.Tests\FakeAnthropic.cs" Link="FakeAnthropic.cs" />
     <Compile Include="..\Pepa.Adapters.Desktop.Tests\FakeDesktop.cs" Link="FakeDesktop.cs" />
     <Compile Include="..\Pepa.Adapters.Desktop.Tests\FakeInputMonitor.cs" Link="FakeInputMonitor.cs" />
+    <Compile Include="..\Pepa.Adapters.Email.Tests\FakeImapServer.cs" Link="FakeImapServer.cs" />
   </ItemGroup>
   <Target Name="CopySamplePlugin" AfterTargets="Build">
     <MSBuild Projects="..\..\samples\Pepa.Plugins.Sample\Pepa.Plugins.Sample.csproj" Targets="GetTargetPath" Properties="Configuration=$(Configuration)">

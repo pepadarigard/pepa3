@@ -13,6 +13,8 @@ import type {
   Backups,
   FolderWatch,
   Watches,
+  EmailAccountRequest,
+  EmailStatus,
   TelegramProxyRequest,
   TelegramStatus,
   Info,
@@ -205,6 +207,10 @@ export const api = {
   desktopRecorderStart: () => request<DesktopRecorderState>("POST", "/recorder/desktop/start"),
   desktopRecorderStop: () => request<DesktopRecorderState>("POST", "/recorder/desktop/stop"),
 
+  email: () => request<EmailStatus>("GET", "/integrations/email"),
+  emailSave: (account: EmailAccountRequest) => request<EmailStatus>("PUT", "/integrations/email", account),
+  emailCheck: (account: EmailAccountRequest) => request<{ ok: boolean; message: string }>("POST", "/integrations/email/check", account),
+  emailClear: () => request<EmailStatus>("DELETE", "/integrations/email"),
   telegram: () => request<TelegramStatus>("GET", "/integrations/telegram"),
   telegramLogin: (login: { apiId: number; apiHash: string | null; phone: string }) =>
     request<TelegramStatus>("POST", "/integrations/telegram/login", login),

@@ -43,6 +43,7 @@
   --cat-browser: #059669;
   --cat-web: #4d7c0f;
   --cat-tables: #15803d;
+  --cat-email: #b45309;
   --cat-telegram: #0284c7;
   --cat-desktop: #db2777;
   --cat-other: #a855f7;
@@ -93,6 +94,7 @@
     --cat-browser: #34d399;
     --cat-web: #a3e635;
     --cat-tables: #4ade80;
+    --cat-email: #fb923c;
     --cat-telegram: #38bdf8;
     --cat-desktop: #f472b6;
     --cat-other: #c084fc;
@@ -138,6 +140,7 @@
   --cat-browser: #34d399;
   --cat-web: #a3e635;
   --cat-tables: #4ade80;
+  --cat-email: #fb923c;
   --cat-telegram: #38bdf8;
   --cat-desktop: #f472b6;
   --cat-other: #c084fc;
@@ -890,6 +893,13 @@ table.table {
 .chip:hover {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+/* Выбор из нескольких вариантов (не имя переменной) — обычным шрифтом. */
+.chip.option {
+  font-family: inherit;
+  font-size: 12.5px;
+  padding: 3px 10px;
 }
 
 .chip.active {

@@ -10,6 +10,7 @@ using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging;
 using Pepa.Adapters.Browser;
 using Pepa.Adapters.FileSystem;
+using Pepa.Adapters.Email;
 using Pepa.Adapters.Http;
 using Pepa.Adapters.Tables;
 using Pepa.Adapters.Desktop;
@@ -103,10 +104,12 @@ public sealed class PepaHost : IAsyncDisposable
             ServerAddress = options.TelegramServerAddress,
             ConnectTimeout = options.TelegramConnectTimeout,
         };
+        // Новые письма в отслеживаемой папке — тоже события движка.
+        var email = new EmailService(dataDirectory, input => engineRef!.PublishEventAsync(input), options.Email);
         var desktop = options.Desktop ?? new UnavailableDesktop(
             "Окна Windows, мышь и клавиатура доступны только в приложении Pepa для Windows (Pepa.exe), а сейчас Pepa запущена без окна.");
         var registry = new NodeRegistry().RegisterLogicNodes().RegisterFlowNodes().RegisterFileNodes(workspace, () => settings.Current.FolderWatches)
-            .RegisterTableNodes(workspace).RegisterHttpNodes().RegisterBrowserNodes(browsers, workspace).RegisterTelegramNodes(telegram, workspace).RegisterDesktopNodes(desktop);
+            .RegisterTableNodes(workspace).RegisterHttpNodes().RegisterBrowserNodes(browsers, workspace).RegisterTelegramNodes(telegram, workspace).RegisterEmailNodes(() => email.IsReady).RegisterDesktopNodes(desktop);
         // Расширения — до движка и помощника: их блоки должны быть в реестре с самого начала (и в каталоге помощника).
         var plugins = PluginLoader.Load(options.PluginsDirectory ?? Path.Combine(dataDirectory, "plugins"), dataDirectory, registry,
             () => settings.Current.WorkspaceRoot, path => workspace.Resolve(path), elevated: options.Elevated ?? (OperatingSystem.IsWindows() && Environment.IsPrivilegedProcess));
@@ -160,6 +163,7 @@ public sealed class PepaHost : IAsyncDisposable
         var recorder = new BrowserRecorder(browsers);
         builder.Services.AddSingleton(recorder);
         builder.Services.AddSingleton(telegram);
+        builder.Services.AddSingleton(email);
         builder.Services.AddSingleton(desktop);
         var desktopRecorder = new DesktopRecorder(options.DesktopInput ?? new UnavailableInputMonitor(
             "Запись действий в окнах Windows доступна только в приложении Pepa для Windows (Pepa.exe), а сейчас Pepa запущена без окна."));
@@ -210,6 +214,8 @@ public sealed class PepaHost : IAsyncDisposable
         var events = app.Services.GetRequiredService<EventHub>();
         telegram.Logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger<TelegramService>();
         telegram.StatusChanged += () => events.Publish("integrations");
+        email.Logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger<EmailService>();
+        email.StatusChanged += () => events.Publish("integrations");
         recorder.Changed += () => events.Publish("recorder");
         desktopRecorder.Changed += () => events.Publish("recorder");
         engine.Changed += change => events.Publish("process", change.ProcessId);
@@ -228,6 +234,13 @@ public sealed class PepaHost : IAsyncDisposable
         }
 
         // То же для файлов, появившихся в отслеживаемых папках, пока Pepa была закрыта.
+        // Пока почта после запуска забирает письма, пришедшие без Pepa, тайм-ауты ожиданий писем не наступают.
+        if (email.WillCatchUp)
+        {
+            engine.SourceCatchingUp(EmailEvents.Source);
+            email.CaughtUp += () => engine.SourceCaughtUp(EmailEvents.Source);
+        }
+
         var watcher = app.Services.GetRequiredService<FolderWatcher>();
         watcher.Configure(settings.Current.FolderWatches);
         watcher.Changed += () => events.Publish("watches");
@@ -287,6 +300,7 @@ public sealed class PepaHost : IAsyncDisposable
         app.Services.GetRequiredService<Backups.DatabaseBackups>().Start();
         app.Services.GetRequiredService<Backups.HistoryRetention>().Start();
         watcher.Start(engine.StartedAt);
+        email.Start();
         var address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.First();
         var baseUrl = new Uri(address.Replace("[::1]", "127.0.0.1"));
         hostContext.Port = baseUrl.Port;
@@ -393,8 +407,9 @@ public sealed class PepaHost : IAsyncDisposable
         }
         finally
         {
-            // Слежение за папками — до движка: события после остановки движка не принимаются.
+            // Слежение за папками и почтой — до движка: события после остановки движка не принимаются.
             await Services.GetRequiredService<FolderWatcher>().DisposeAsync();
+            await Services.GetRequiredService<EmailService>().DisposeAsync();
             // Сначала движок: он дожидается выполняющихся шагов (отправка в Telegram должна успеть завершиться), потом Telegram.
             await engine.StopAsync();
             await telegram.DisposeAsync();

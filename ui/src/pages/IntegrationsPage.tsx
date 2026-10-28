@@ -2,6 +2,7 @@ import { AppWindow, BellRing, Bot, Copy, FolderOpen, Globe, Keyboard, type Lucid
 import { getToken } from "../api/client";
 import { useInfo } from "../api/hooks";
 import { useFeedback } from "../components/feedback";
+import { EmailCard } from "../components/EmailCard";
 import { TelegramCard } from "../components/TelegramCard";
 import { Badge, Button } from "../components/ui";
 import { native } from "../lib/native";
@@ -134,6 +135,8 @@ export function IntegrationsPage() {
       </div>
 
       <TelegramCard />
+
+      <EmailCard />
 
       <div className="grid-2">
         {integrations.map((item) => (

@@ -54,6 +54,8 @@ export const useResources = () => useQuery({ queryKey: ["resources"], queryFn: a
 
 export const useTelegram = () => useQuery({ queryKey: ["telegram"], queryFn: api.telegram, refetchInterval: 60_000 });
 
+export const useEmail = () => useQuery({ queryKey: ["email"], queryFn: api.email, refetchInterval: 60_000 });
+
 export const useTriggers = (scenarioId?: string) =>
   useQuery({ queryKey: ["triggers", scenarioId ?? ""], queryFn: () => api.triggers(scenarioId), refetchInterval: 30_000 });
 

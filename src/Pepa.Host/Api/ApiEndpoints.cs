@@ -107,6 +107,37 @@ internal static class ApiEndpoints
             }
         });
 
+        // ───────────── Почта (IMAP) ─────────────
+        api.MapGet("/integrations/email", (Adapters.Email.EmailService email) => EmailDto(email.Status));
+
+        api.MapPut("/integrations/email", async (EmailAccountRequest request, Adapters.Email.EmailService email, CancellationToken ct) =>
+        {
+            try
+            {
+                return Results.Ok(EmailDto(await email.ConfigureAsync(ToAccount(request), request.Password, ct)));
+            }
+            catch (Adapters.Email.EmailUnavailableException ex)
+            {
+                return Results.Json(new ErrorDto(ex.Message), Core.Serialization.PepaJson.Options, statusCode: StatusCodes.Status400BadRequest);
+            }
+        });
+
+        api.MapPost("/integrations/email/check", async (EmailAccountRequest request, Adapters.Email.EmailService email, CancellationToken ct) =>
+        {
+            try
+            {
+                var count = await email.TestAsync(ToAccount(request), request.Password, ct);
+                return new CheckResultDto(true, $"Ящик на связи: в папке «{(string.IsNullOrWhiteSpace(request.Folder) ? "INBOX" : request.Folder.Trim())}» писем: {count}.");
+            }
+            catch (Adapters.Email.EmailUnavailableException ex)
+            {
+                return new CheckResultDto(false, ex.Message);
+            }
+        });
+
+        api.MapDelete("/integrations/email", async (Adapters.Email.EmailService email, CancellationToken ct) =>
+            EmailDto(await email.ClearAsync(ct)));
+
         api.MapGet("/integrations/telegram", (Adapters.Telegram.TelegramService telegram) => TelegramDto(telegram));
 
         api.MapPost("/integrations/telegram/login", async (TelegramLoginRequest request, Adapters.Telegram.TelegramService telegram) =>
@@ -946,6 +977,26 @@ internal static class ApiEndpoints
 
     private static RecorderStateDto RecorderDto(Adapters.Browser.RecorderState state) =>
         new(state.Recording, state.Browser?.ToString().ToLowerInvariant(), state.ProfileId, state.StartUrl, state.Actions);
+
+    private static EmailStatusDto EmailDto(Adapters.Email.EmailStatus status) => new(
+        JsonNamingPolicy.CamelCase.ConvertName(status.State.ToString()),
+        status.Account is { } account
+            ? new EmailAccountDto(account.Server, account.Port, JsonNamingPolicy.CamelCase.ConvertName(account.Security.ToString()), account.Login,
+                account.Folder, account.Enabled)
+            : null,
+        status.LastCheckAt, status.Error, status.Messages, status.Note);
+
+    private static Adapters.Email.EmailAccount ToAccount(EmailAccountRequest request) => new()
+    {
+        Server = request.Server ?? "",
+        Port = request.Port ?? 993,
+        Security = Enum.TryParse<Adapters.Email.EmailSecurity>(request.Security, ignoreCase: true, out var security)
+            ? security
+            : Adapters.Email.EmailSecurity.Auto,
+        Login = request.Login ?? "",
+        Folder = request.Folder ?? "INBOX",
+        Enabled = request.Enabled ?? true,
+    };
 
     private static TelegramStatusDto TelegramDto(Adapters.Telegram.TelegramService telegram)
     {

@@ -3,6 +3,7 @@
     <Project Path="src/Pepa.Adapters.Browser/Pepa.Adapters.Browser.csproj" />
     <Project Path="src/Pepa.Adapters.Desktop/Pepa.Adapters.Desktop.csproj" />
     <Project Path="src/Pepa.Adapters.Desktop.Windows/Pepa.Adapters.Desktop.Windows.csproj" />
+    <Project Path="src/Pepa.Adapters.Email/Pepa.Adapters.Email.csproj" />
     <Project Path="src/Pepa.Adapters.FileSystem/Pepa.Adapters.FileSystem.csproj" />
     <Project Path="src/Pepa.Adapters.Http/Pepa.Adapters.Http.csproj" />
     <Project Path="src/Pepa.Adapters.Tables/Pepa.Adapters.Tables.csproj" />
@@ -21,6 +22,7 @@
   <Folder Name="/tests/">
     <Project Path="tests/Pepa.Adapters.Browser.Tests/Pepa.Adapters.Browser.Tests.csproj" />
     <Project Path="tests/Pepa.Adapters.Desktop.Tests/Pepa.Adapters.Desktop.Tests.csproj" />
+    <Project Path="tests/Pepa.Adapters.Email.Tests/Pepa.Adapters.Email.Tests.csproj" />
     <Project Path="tests/Pepa.Adapters.FileSystem.Tests/Pepa.Adapters.FileSystem.Tests.csproj" />
     <Project Path="tests/Pepa.Adapters.Http.Tests/Pepa.Adapters.Http.Tests.csproj" />
     <Project Path="tests/Pepa.Adapters.Tables.Tests/Pepa.Adapters.Tables.Tests.csproj" />

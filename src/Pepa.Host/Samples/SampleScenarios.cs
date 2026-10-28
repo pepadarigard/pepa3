@@ -9,7 +9,7 @@ public static class SampleScenarios
     public static IReadOnlyList<ScenarioDefinition> All() => [.. Versioned().Select(s => s.Scenario)];
 
     /// <summary>Текущая версия набора примеров: при обновлении Pepa добавляются только новые.</summary>
-    public const int CurrentVersion = 8;
+    public const int CurrentVersion = 9;
 
     /// <summary>Примеры с номером версии набора, в которой они появились.</summary>
     public static IReadOnlyList<(int Version, ScenarioDefinition Scenario)> Versioned() =>
@@ -22,6 +22,7 @@ public static class SampleScenarios
         (6, Notepad()),
         (7, ExchangeRate()), (7, AskAndWrite()),
         (8, RunLog()),
+        (9, MailCode()),
     ];
 
     private static NodeDefinition N(string id, string type, double x, double y, JsonObject? config = null,
@@ -561,5 +562,43 @@ public static class SampleScenarios
                 "Не записано"),
         ],
         Edges = [E("start", "append"), E("append", "read"), E("append", "failed", Ports.Error), E("read", "done")],
+    };
+
+    public static ScenarioDefinition MailCode() => new()
+    {
+        Name = "Пример 16. Почта: код из письма",
+        Description = "Ждёт новое письмо с указанными словами в теме (до 10 минут) и достаёт из него код из цифр — как после " +
+                      "регистрации на сайте. Нужна подключённая почта: «Интеграции» → «Почта». Запустите пример и отправьте себе письмо " +
+                      "с темой «Код» и цифрами в тексте.",
+        Variables =
+        [
+            new VariableDefinition
+            {
+                Name = "subject", Type = VariableType.Text, Default = "код", IsInput = true, Description = "Тема письма содержит",
+            },
+            new VariableDefinition { Name = "mail", Type = VariableType.Any, Description = "Полученное письмо" },
+            new VariableDefinition { Name = "code", Type = VariableType.Text, Description = "Код из письма" },
+        ],
+        Nodes =
+        [
+            N("start", "start", 0, 100),
+            N("wait", "email.wait", 260, 100, new JsonObject
+            {
+                ["subject"] = "{{ vars.subject }}", ["timeoutSeconds"] = 600, ["lookbackSeconds"] = 0, ["saveTo"] = "mail",
+            }, "Ждать письмо"),
+            N("find", "text.find", 540, 100, new JsonObject
+            {
+                ["text"] = "{{ vars.mail.payload.subject }}\n{{ vars.mail.payload.text }}", ["what"] = "code", ["saveTo"] = "code",
+            }, "Найти код"),
+            N("done", "end", 820, 40, new JsonObject { ["outcome"] = "success", ["message"] = "Код из письма «{{ vars.mail.payload.subject }}»: {{ vars.code }}" }),
+            N("noCode", "end", 820, 200, new JsonObject { ["outcome"] = "failure", ["message"] = "В письме «{{ vars.mail.payload.subject }}» нет кода из цифр." },
+                "Кода нет"),
+            N("late", "end", 540, 300, new JsonObject { ["outcome"] = "failure", ["message"] = "За 10 минут письма не было." }, "Нет письма"),
+        ],
+        Edges =
+        [
+            E("start", "wait"), E("wait", "find", Ports.Event), E("wait", "late", Ports.Timeout),
+            E("find", "done", Ports.True), E("find", "noCode", Ports.False),
+        ],
     };
 }

@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Почта (IMAP, MailKit): новые письма в папке — события Pepa; блок «Ждать письмо». Только чтение: письма не меняются. -->
+  <ItemGroup>
+    <ProjectReference Include="..\Pepa.Core\Pepa.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="MailKit" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Pepa.Adapters.Email.Tests" />
+  </ItemGroup>
+</Project>
