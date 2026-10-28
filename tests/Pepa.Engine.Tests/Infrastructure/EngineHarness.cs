@@ -110,14 +110,19 @@ public sealed class EngineHarness : IAsyncDisposable
     public async Task<IReadOnlyList<StepRecord>> StepsAsync(string id) => await Store.GetStepsAsync(id);
 
     /// <summary>
+    /// Сколько ждать условия по умолчанию. С запасом: срок влияет только на то, как быстро упадёт уже неудачная проверка.
+    /// Проверкам с настоящим браузером нужно больше: они идут параллельно с остальными, и под нагрузкой (CI на Windows,
+    /// полный прогон) запуск браузера и каждое действие бывают долгими.
+    /// </summary>
+    public TimeSpan WaitTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
     /// Ждёт условия, продвигая виртуальное время на <paramref name="advance"/> за такт (если задано).
     /// </summary>
     public async Task<ProcessRecord> WaitForAsync(string processId, Func<ProcessRecord, bool> condition,
         TimeSpan? advance = null, TimeSpan? timeout = null)
     {
-        // С запасом: проверки с настоящим браузером идут параллельно с остальными, и под нагрузкой (CI, полный прогон)
-        // запуск браузера бывает долгим. Срок влияет только на то, как быстро упадёт уже неудачная проверка.
-        var deadline = DateTime.UtcNow + (timeout ?? TimeSpan.FromSeconds(30));
+        var deadline = DateTime.UtcNow + (timeout ?? WaitTimeout);
         while (true)
         {
             var process = await Store.GetProcessAsync(processId);

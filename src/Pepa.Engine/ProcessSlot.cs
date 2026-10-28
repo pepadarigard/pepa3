@@ -12,10 +12,11 @@ internal enum PendingRequest
 /// либо управляющая операция (пауза, остановка, возобновление). Если процесс сейчас выполняется,
 /// пауза и остановка откладываются до ближайшей границы между шагами.
 /// </summary>
-internal sealed class ProcessSlot
+internal sealed class ProcessSlot(Action? onWake = null)
 {
     private readonly SemaphoreSlim _gate = new(1, 1);
     private int _pending;
+    private int _wake;
     private CancellationTokenSource? _stepCancellation;
 
     /// <summary>Хранилище отказало при работе с процессом — до перезапуска процесс не трогаем.</summary>
@@ -53,9 +54,34 @@ internal sealed class ProcessSlot
 
     public bool TryEnter() => _gate.Wait(0);
 
+    /// <summary>
+    /// Взять право, чтобы выполнить процесс. Занято (процесс ещё выполняет прошлый проход или его меняет управляющая
+    /// операция) — просьба запоминается, и при освобождении права процесс снова встаёт в очередь: иначе пробуждение
+    /// (например, ресурс передан процессу, пока его исполнитель заканчивал проход) терялось бы.
+    /// </summary>
+    public bool TryEnterToRun()
+    {
+        // Сначала просьба, потом попытка: владелец, освобождающий право после неудачной попытки, её уже увидит.
+        Volatile.Write(ref _wake, 1);
+        if (!_gate.Wait(0))
+        {
+            return false;
+        }
+
+        Volatile.Write(ref _wake, 0);
+        return true;
+    }
+
     public Task<bool> EnterAsync(TimeSpan timeout) => _gate.WaitAsync(timeout);
 
-    public void Exit() => _gate.Release();
+    public void Exit()
+    {
+        _gate.Release();
+        if (Interlocked.Exchange(ref _wake, 0) == 1)
+        {
+            onWake?.Invoke();
+        }
+    }
 
     public CancellationTokenSource BeginStep()
     {

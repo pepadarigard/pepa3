@@ -75,6 +75,37 @@ public sealed class ResourceTests
     }
 
     [Fact]
+    public async Task Resource_handed_over_while_the_waiter_is_still_busy_is_not_lost()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var scenario = await h.CreateScenarioAsync(UseResource());
+        h.World.Block("use-first");
+        var first = await StartAsync(h, scenario, "first");
+        await h.World.EnteredAsync("use-first");
+        var second = await StartAsync(h, scenario, "second");
+        await h.WaitForStatusAsync(second, ProcessStatus.Waiting);
+
+        // Как будто исполнитель второго процесса ещё заканчивает свой проход, когда ресурс передают ему.
+        var slot = h.Engine.Slot(second);
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (!slot.TryEnter())
+        {
+            Assert.True(DateTime.UtcNow < deadline, "Исполнитель второго процесса не освободил его.");
+            await Task.Delay(10, TestContext.Current.CancellationToken);
+        }
+
+        h.World.Release("use-first");
+        await h.WaitForStatusAsync(first, ProcessStatus.Completed);
+        Assert.Equal(second, (await ResourceAsync(h))!.HolderProcessId);
+        Assert.Equal(ProcessStatus.Waiting, (await h.ProcessAsync(second)).Status);
+
+        // Право освободилось — пробуждение не потерялось: процесс продолжает сразу, не дожидаясь таймера.
+        slot.Exit();
+        await h.WaitForStatusAsync(second, ProcessStatus.Completed);
+        Assert.Equal(1, h.World.Executions("use-second"));
+    }
+
+    [Fact]
     public async Task Queue_is_served_in_order_of_requests()
     {
         await using var h = await EngineHarness.CreateAsync();

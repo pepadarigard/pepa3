@@ -32,6 +32,7 @@ internal sealed class BrowserFixture : IAsyncDisposable
 
         fixture.H = await EngineHarness.CreateAsync(extraNodes: registry =>
             registry.RegisterBrowserNodes(fixture.NewSessions(apiKey), new Workspace(() => fixture.Workspace)));
+        fixture.H.WaitTimeout = TimeSpan.FromSeconds(90);
         fixture.Subscribe();
         return fixture;
     }

@@ -14,7 +14,7 @@ public sealed partial class ProcessEngine
     private async Task RunProcessAsync(string processId, CancellationToken stop)
     {
         var slot = Slot(processId);
-        if (slot.Faulted || !slot.TryEnter())
+        if (slot.Faulted || !slot.TryEnterToRun())
         {
             return;
         }

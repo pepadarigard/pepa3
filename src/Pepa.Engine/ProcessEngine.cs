@@ -557,7 +557,8 @@ public sealed partial class ProcessEngine : IAsyncDisposable
 
     // ───────────────────────────── Вспомогательное ─────────────────────────────
 
-    private ProcessSlot Slot(string processId) => _slots.GetOrAdd(processId, static _ => new ProcessSlot());
+    internal ProcessSlot Slot(string processId) =>
+        _slots.GetOrAdd(processId, static (id, engine) => new ProcessSlot(() => engine.Enqueue(id)), this);
 
     private async Task<ProcessRecord> GetOrThrowAsync(string processId, CancellationToken cancellationToken) =>
         await _store.GetProcessAsync(processId, cancellationToken)
