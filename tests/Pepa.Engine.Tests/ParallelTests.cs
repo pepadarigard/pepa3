@@ -246,10 +246,12 @@ public sealed class ParallelTests
     {
         await using var h = await EngineHarness.CreateAsync();
         // Ветвь 1 — долгий цикл без ожиданий; ветвь 2 — один шаг. Ветвь 2 выполняется сразу, а не после всего цикла.
+        // Каждый шаг записывается на диск с полной синхронизацией: на загруженном раннере Windows 100 шагов не успевали
+        // за 30 секунд, а для проверки порядка хватает и 20 повторов.
         var id = await h.RunAsync(new ScenarioBuilder("Занятая ветвь")
             .Variable("i", VariableType.Number, JsonValue.Create(0)).Variable("seen", VariableType.Any)
             .Node("start", "start").Node("split", "parallel")
-            .Node("more", "condition", new { expression = "vars.i < 50" })
+            .Node("more", "condition", new { expression = "vars.i < 20" })
             .Node("inc", "variable.set", new { variable = "i", value = "vars.i + 1" })
             .Node("note", "variable.set", new { variable = "seen", value = "vars.i" })
             .Node("join", "join").Node("end", "end")
@@ -257,8 +259,8 @@ public sealed class ParallelTests
             .Edge("more", "inc", Ports.True).Edge("inc", "more").Edge("more", "join", Ports.False)
             .Edge("note", "join").Edge("join", "end")
             .Build());
-        var done = await h.WaitForStatusAsync(id, ProcessStatus.Completed);
-        Assert.Equal(50, done.Variables["i"]!.GetValue<double>());
+        var done = await h.WaitForAsync(id, p => p.Status == ProcessStatus.Completed, timeout: TimeSpan.FromSeconds(90));
+        Assert.Equal(20, done.Variables["i"]!.GetValue<double>());
         Assert.True(done.Variables["seen"]!.GetValue<double>() <= 2, $"ветвь 2 выполнилась, когда i = {done.Variables["seen"]}");
     }
 
