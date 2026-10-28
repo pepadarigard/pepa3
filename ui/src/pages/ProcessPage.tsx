@@ -229,8 +229,12 @@ function stepToneOf(step: Step): Tone {
 
 interface Snapshot {
   image: string | null;
+  /** Страница браузера: адрес и заголовок. */
   url: string | null;
   title: string | null;
+  /** Окно Windows: заголовок и программа. */
+  window: string | null;
+  program: string | null;
   note: string | null;
 }
 
@@ -239,7 +243,10 @@ function snapshotOf(step: Step): Snapshot | null {
   const value = step.output?.snapshot;
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const text = (v: Json | undefined) => (typeof v === "string" && v.length > 0 ? v : null);
-  return { image: text(value.image), url: text(value.url), title: text(value.title), note: text(value.note) };
+  return {
+    image: text(value.image), url: text(value.url), title: text(value.title),
+    window: text(value.window), program: text(value.program), note: text(value.note),
+  };
 }
 
 function StepSnapshot({ processId, step }: { processId: string; step: Step }) {
@@ -279,10 +286,11 @@ function StepSnapshot({ processId, step }: { processId: string; step: Step }) {
   return (
     <div className="snapshot small">
       <div className="muted">Что было на экране, когда шаг «{step.nodeLabel}» не удался:</div>
-      {(snapshot.title || snapshot.url) && (
+      {(snapshot.title || snapshot.url || snapshot.window) && (
         <div className="snapshot-place">
           {snapshot.title && <span>{snapshot.title}</span>}
           {snapshot.url && <span className="mono faint">{snapshot.url}</span>}
+          {snapshot.window && <span>Окно «{snapshot.window}»{snapshot.program && <span className="faint"> · {snapshot.program}</span>}</span>}
         </div>
       )}
       {url && (

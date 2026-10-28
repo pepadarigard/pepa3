@@ -438,6 +438,21 @@ public sealed class UiaDesktop : IDesktop, IDisposable
             return true;
         }, cancellationToken);
 
+    public Task<byte[]?> CaptureAsync(DesktopWindow window, CancellationToken cancellationToken) =>
+        RunAsync<byte[]?>(() =>
+        {
+            var handle = Handle(window);
+            if (window is not UiaWindow uia || !NativeMethods.IsWindow(handle) || NativeMethods.IsIconic(handle))
+            {
+                return null;
+            }
+
+            using var image = FlaUI.Core.Capturing.Capture.Element(uia.Element);
+            using var stream = new MemoryStream();
+            image.Bitmap.Save(stream, System.Drawing.Imaging.ImageFormat.Jpeg);
+            return stream.ToArray();
+        }, cancellationToken);
+
     public void Dispose()
     {
         try

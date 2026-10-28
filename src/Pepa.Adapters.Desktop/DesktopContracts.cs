@@ -149,6 +149,12 @@ public interface IDesktop
 
     /// <summary>Попросить окно закрыться (как крестик).</summary>
     Task CloseWindowAsync(DesktopWindow window, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Снимок области окна на экране (JPEG) — то, что видно на его месте, — для разбора ошибки шага. null — снять нельзя
+    /// (окно закрыто или свёрнуто). Только чтение.
+    /// </summary>
+    Task<byte[]?> CaptureAsync(DesktopWindow window, CancellationToken cancellationToken) => Task.FromResult<byte[]?>(null);
 }
 
 /// <summary>

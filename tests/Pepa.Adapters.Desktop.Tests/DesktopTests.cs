@@ -52,6 +52,36 @@ public sealed class DesktopTests
     }
 
     [Fact]
+    public async Task Failed_action_keeps_a_snapshot_of_its_window_and_a_missing_window_has_none()
+    {
+        var desktop = new FakeDesktop();
+        var snapshots = new MemorySnapshots();
+        await using var h = await EngineHarness.CreateAsync(extraNodes: r => r.RegisterDesktopNodes(desktop, snapshots));
+        desktop.AddWindow("Отчёт", "excel").Add("Отправить", enabled: false);
+        async Task<System.Text.Json.Nodes.JsonNode?> SnapshotAsync(string id) =>
+            (await h.StepsAsync(id)).Last(s => s.NodeId == "act").Output?["snapshot"];
+
+        var disabled = await h.RunAsync(One("desktop.click", new { window = "Отчёт", name = "Отправить" }));
+        Assert.Contains("недоступен", (await FailedAsync(h, disabled)).StatusMessage);
+        var snapshot = (await SnapshotAsync(disabled))!;
+        Assert.Equal("Отчёт", snapshot["window"]!.GetValue<string>());
+        Assert.Equal("excel", snapshot["program"]!.GetValue<string>());
+        Assert.Equal("001.jpg", snapshot["image"]!.GetValue<string>());
+        Assert.Equal(disabled, Assert.Single(snapshots.Saved).ProcessId);
+
+        // Снимок не получился — итог шага тот же, с пометкой.
+        desktop.CaptureFails = true;
+        var again = await h.RunAsync(One("desktop.click", new { window = "Отчёт", name = "Отправить" }));
+        Assert.Equal(AttentionKind.StepFailed, (await FailedAsync(h, again)).Attention);
+        Assert.Equal("Снимок окна не получился.", (await SnapshotAsync(again))!["note"]!.GetValue<string>());
+
+        // Окна нет — снимать нечего.
+        var missing = await h.RunAsync(One("desktop.click", new { window = "нет такого", name = "OK", waitSeconds = 1 }));
+        await FailedAsync(h, missing);
+        Assert.Null(await SnapshotAsync(missing));
+    }
+
+    [Fact]
     public async Task Missing_window_ambiguous_or_disabled_element_is_not_clicked()
     {
         var (h, d) = await SetupAsync();

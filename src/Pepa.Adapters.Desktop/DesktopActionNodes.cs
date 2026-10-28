@@ -248,7 +248,7 @@ public sealed class FindWindowNode(IDesktop desktop) : INodeExecutor
 
 // ───────────── Нажать в окне ─────────────
 
-public sealed class ClickElementNode(IDesktop desktop) : INodeExecutor
+public sealed class ClickElementNode(IDesktop desktop, ISnapshotStore? snapshots = null) : INodeExecutor
 {
     public const string TypeName = "desktop.click";
 
@@ -289,7 +289,7 @@ public sealed class ClickElementNode(IDesktop desktop) : INodeExecutor
     public TimeSpan? ExpectedDuration(JsonObject input) => DesktopNodes.WaitSpan(input) * 2;
 
     public ValueTask<NodeResult> ExecuteAsync(NodeExecutionContext context, CancellationToken cancellationToken) =>
-        DesktopNodes.RunAsync(desktop, context, needElement: true, "нажать", async (window, element) =>
+        DesktopNodes.RunAsync(desktop, snapshots, context, needElement: true, "нажать", async (window, element) =>
         {
             var how = context.GetString("how") ?? "auto";
             var label = Label(element!);
@@ -338,7 +338,7 @@ public sealed class ClickElementNode(IDesktop desktop) : INodeExecutor
 
 // ───────────── Ввести в окне ─────────────
 
-public sealed class FillElementNode(IDesktop desktop) : INodeExecutor
+public sealed class FillElementNode(IDesktop desktop, ISnapshotStore? snapshots = null) : INodeExecutor
 {
     public const string TypeName = "desktop.fill";
 
@@ -381,7 +381,7 @@ public sealed class FillElementNode(IDesktop desktop) : INodeExecutor
         DesktopNodes.WaitSpan(input) * 2 + TimeSpan.FromMilliseconds(60 * (input.GetString("text")?.Length ?? 0));
 
     public ValueTask<NodeResult> ExecuteAsync(NodeExecutionContext context, CancellationToken cancellationToken) =>
-        DesktopNodes.RunAsync(desktop, context, needElement: true, "ввести текст", async (window, element) =>
+        DesktopNodes.RunAsync(desktop, snapshots, context, needElement: true, "ввести текст", async (window, element) =>
         {
             var text = context.GetString("text") ?? "";
             var label = ClickElementNode.Label(element!);
@@ -458,7 +458,7 @@ public sealed class FillElementNode(IDesktop desktop) : INodeExecutor
 
 // ───────────── Прочитать из окна ─────────────
 
-public sealed class ReadElementNode(IDesktop desktop) : INodeExecutor
+public sealed class ReadElementNode(IDesktop desktop, ISnapshotStore? snapshots = null) : INodeExecutor
 {
     public const string TypeName = "desktop.read";
 
@@ -516,7 +516,7 @@ public sealed class ReadElementNode(IDesktop desktop) : INodeExecutor
             }
         }
 
-        return await DesktopNodes.RunAsync(desktop, context, needElement: true, "прочитать", async (_, element) =>
+        return await DesktopNodes.RunAsync(desktop, snapshots, context, needElement: true, "прочитать", async (_, element) =>
         {
             var value = await desktop.ReadAsync(element!, what, cancellationToken) ?? "";
             return NodeResult.Ok(Ports.Out, new Dictionary<string, JsonNode?> { [saveTo] = value }, null,
@@ -617,7 +617,7 @@ public sealed class WaitElementNode(IDesktop desktop) : INodeExecutor
 
 // ───────────── Клавиатура ─────────────
 
-public sealed class KeyboardNode(IDesktop desktop) : INodeExecutor
+public sealed class KeyboardNode(IDesktop desktop, ISnapshotStore? snapshots = null) : INodeExecutor
 {
     public const string TypeName = "desktop.keys";
 
@@ -689,7 +689,7 @@ public sealed class KeyboardNode(IDesktop desktop) : INodeExecutor
     {
         var type = context.GetString("mode") == "type";
         var keys = type ? null : KeyCombo.Parse(context.RequireString("keys"));
-        return DesktopNodes.RunAsync(desktop, context, needElement: false, type ? "напечатать текст" : "нажать клавиши", async (window, _) =>
+        return DesktopNodes.RunAsync(desktop, snapshots, context, needElement: false, type ? "напечатать текст" : "нажать клавиши", async (window, _) =>
         {
             await desktop.ActivateAsync(window, cancellationToken);
             if (type)
@@ -707,7 +707,7 @@ public sealed class KeyboardNode(IDesktop desktop) : INodeExecutor
 
 // ───────────── Мышь ─────────────
 
-public sealed class MouseNode(IDesktop desktop) : INodeExecutor
+public sealed class MouseNode(IDesktop desktop, ISnapshotStore? snapshots = null) : INodeExecutor
 {
     public const string TypeName = "desktop.mouse";
 
@@ -746,7 +746,7 @@ public sealed class MouseNode(IDesktop desktop) : INodeExecutor
     {
         var x = (int)(context.GetNumber("x") ?? throw new NodeInputException("Не задана координата X."));
         var y = (int)(context.GetNumber("y") ?? throw new NodeInputException("Не задана координата Y."));
-        return DesktopNodes.RunAsync(desktop, context, needElement: false, "нажать мышью", async (window, _) =>
+        return DesktopNodes.RunAsync(desktop, snapshots, context, needElement: false, "нажать мышью", async (window, _) =>
         {
             // Размер и положение — после вывода на передний план: свёрнутое окно до этого «стоит» далеко за краем экрана.
             var bounds = (await desktop.ActivateAsync(window, cancellationToken)).Bounds;

@@ -31,6 +31,9 @@ internal sealed class FakeDesktop : IDesktop
     /// <summary>Сколько раз перебор окон ещё упадёт (окно закрылось посреди перебора).</summary>
     public int ListFailures { get; set; }
 
+    /// <summary>Снимок окна не получается (Windows вернул ошибку).</summary>
+    public bool CaptureFails { get; set; }
+
     public FakeWindow AddWindow(string title, string process = "app", int x = 100, int y = 200, int width = 800, int height = 600, int? processId = null)
     {
         var window = new FakeWindow(new WindowInfo(_windows.Count + 1, title, process, processId ?? 1000 + _windows.Count, new DesktopRect(x, y, width, height)));
@@ -252,6 +255,15 @@ internal sealed class FakeDesktop : IDesktop
         return Task.FromResult(4242);
     }
 
+    public Task<byte[]?> CaptureAsync(DesktopWindow window, CancellationToken cancellationToken)
+    {
+        var fake = (FakeWindow)window;
+        Actions.Enqueue($"capture {fake.Info.Title}");
+        return CaptureFails
+            ? Task.FromException<byte[]?>(new DesktopException("Не удалось снять экран."))
+            : Task.FromResult<byte[]?>(fake.Open ? [0xFF, 0xD8, (byte)fake.Info.Handle] : null);
+    }
+
     public Task CloseWindowAsync(DesktopWindow window, CancellationToken cancellationToken)
     {
         var fake = (FakeWindow)window;
@@ -315,4 +327,16 @@ internal sealed class FakeElement(ElementInfo info) : DesktopElement
 
     /// <summary>Элемент перекрыт другим окном или за краем экрана.</summary>
     public bool Covered { get; set; }
+}
+
+/// <summary>Снимки при ошибках — в памяти теста.</summary>
+internal sealed class MemorySnapshots : Pepa.Core.Nodes.ISnapshotStore
+{
+    public ConcurrentQueue<(string ProcessId, byte[] Image)> Saved { get; } = new();
+
+    public ValueTask<string?> SaveAsync(string processId, byte[] image, string extension, CancellationToken cancellationToken)
+    {
+        Saved.Enqueue((processId, image));
+        return ValueTask.FromResult<string?>($"{Saved.Count:000}{extension}");
+    }
 }

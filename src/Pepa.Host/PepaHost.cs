@@ -111,7 +111,7 @@ public sealed class PepaHost : IAsyncDisposable
         var desktop = options.Desktop ?? new UnavailableDesktop(
             "Окна Windows, мышь и клавиатура доступны только в приложении Pepa для Windows (Pepa.exe), а сейчас Pepa запущена без окна.");
         var registry = new NodeRegistry().RegisterLogicNodes().RegisterFlowNodes().RegisterFileNodes(workspace, () => settings.Current.FolderWatches)
-            .RegisterTableNodes(workspace).RegisterHttpNodes().RegisterBrowserNodes(browsers, workspace).RegisterTelegramNodes(telegram, workspace).RegisterEmailNodes(() => email.Problem).RegisterDesktopNodes(desktop);
+            .RegisterTableNodes(workspace).RegisterHttpNodes().RegisterBrowserNodes(browsers, workspace).RegisterTelegramNodes(telegram, workspace).RegisterEmailNodes(() => email.Problem).RegisterDesktopNodes(desktop, snapshots);
         // Расширения — до движка и помощника: их блоки должны быть в реестре с самого начала (и в каталоге помощника).
         var plugins = PluginLoader.Load(options.PluginsDirectory ?? Path.Combine(dataDirectory, "plugins"), dataDirectory, registry,
             () => settings.Current.WorkspaceRoot, path => workspace.Resolve(path), elevated: options.Elevated ?? (OperatingSystem.IsWindows() && Environment.IsPrivilegedProcess));

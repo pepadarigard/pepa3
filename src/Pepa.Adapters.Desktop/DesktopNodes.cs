@@ -17,16 +17,17 @@ public static class DesktopNodes
         "(или освободит ресурс «desktop:input» блоком «Освободить ресурс»). Если процесс остановился с ошибкой, мышь и клавиатура " +
         "остаются за ним, пока вы не решите, что делать. Пока процесс работает, не трогайте мышь.";
 
-    public static NodeRegistry RegisterDesktopNodes(this NodeRegistry registry, IDesktop desktop) => registry
+    /// <param name="snapshots">Куда сохранять снимок окна, когда действие в нём не удалось; null — не снимать.</param>
+    public static NodeRegistry RegisterDesktopNodes(this NodeRegistry registry, IDesktop desktop, ISnapshotStore? snapshots = null) => registry
         .RegisterCategory(Category)
         .Register(new StartProgramNode(desktop))
         .Register(new FindWindowNode(desktop))
-        .Register(new ClickElementNode(desktop))
-        .Register(new FillElementNode(desktop))
-        .Register(new ReadElementNode(desktop))
+        .Register(new ClickElementNode(desktop, snapshots))
+        .Register(new FillElementNode(desktop, snapshots))
+        .Register(new ReadElementNode(desktop, snapshots))
         .Register(new WaitElementNode(desktop))
-        .Register(new KeyboardNode(desktop))
-        .Register(new MouseNode(desktop))
+        .Register(new KeyboardNode(desktop, snapshots))
+        .Register(new MouseNode(desktop, snapshots))
         .Register(new CloseWindowNode(desktop));
 
     // ───────────── Общие поля ─────────────
@@ -218,25 +219,68 @@ public static class DesktopNodes
     /// Найти окно и элемент (действие ещё не начиналось: любая неудача здесь — подтверждённое «не выполнено»),
     /// затем выполнить действие (ошибка Windows во время действия — итог неизвестен).
     /// </summary>
-    internal static async ValueTask<NodeResult> RunAsync(IDesktop desktop, NodeExecutionContext context, bool needElement, string what,
-        Func<DesktopWindow, DesktopElement?, Task<NodeResult>> action, CancellationToken cancellationToken)
+    /// <remarks>Не удалось, а окно найдено — к итогу добавляется снимок окна (<paramref name="snapshots"/>).</remarks>
+    internal static async ValueTask<NodeResult> RunAsync(IDesktop desktop, ISnapshotStore? snapshots, NodeExecutionContext context,
+        bool needElement, string what, Func<DesktopWindow, DesktopElement?, Task<NodeResult>> action, CancellationToken cancellationToken)
     {
         if (desktop.UnavailableReason is { } reason)
         {
             return NodeResult.Fail(reason, retryable: false);
         }
 
+        var (result, window) = await RunInWindowAsync(desktop, context, needElement, what, action, cancellationToken);
+        return result is NodeResult.Failure or NodeResult.Unknown && window is not null && snapshots is not null
+            ? await WithSnapshotAsync(result, desktop, snapshots, context, window, cancellationToken)
+            : result;
+    }
+
+    private static readonly TimeSpan SnapshotTimeout = TimeSpan.FromSeconds(5);
+
+    /// <summary>Снимок окна к итогу шага — подсказка: не получился (окно закрылось, свёрнуто, диск) — итог тот же.</summary>
+    private static async Task<NodeResult> WithSnapshotAsync(NodeResult result, IDesktop desktop, ISnapshotStore snapshots,
+        NodeExecutionContext context, DesktopWindow window, CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return result;
+        }
+
+        var snapshot = new JsonObject { ["window"] = window.Info.Title, ["program"] = window.Info.ProcessName };
+        try
+        {
+            var image = await desktop.CaptureAsync(window, cancellationToken).WaitAsync(SnapshotTimeout, cancellationToken);
+            if (image is null)
+            {
+                snapshot["note"] = "Окно закрыто или свёрнуто — снимка нет.";
+            }
+            else
+            {
+                snapshot["image"] = await snapshots.SaveAsync(context.ProcessId, image, ".jpg", cancellationToken);
+            }
+        }
+        catch (Exception)
+        {
+            // Любая ошибка снимка — итог шага остаётся тем же.
+            snapshot["note"] = "Снимок окна не получился.";
+        }
+
+        return result with { Snapshot = snapshot };
+    }
+
+    private static async Task<(NodeResult Result, DesktopWindow? Window)> RunInWindowAsync(IDesktop desktop, NodeExecutionContext context,
+        bool needElement, string what, Func<DesktopWindow, DesktopElement?, Task<NodeResult>> action, CancellationToken cancellationToken)
+    {
         var windowQuery = Window(context);
         var elementQuery = needElement ? Element(context) : null;
         var wait = WaitSpan(context.Input);
-        DesktopWindow? window;
+        DesktopWindow? window = null;
         DesktopElement? element = null;
         try
         {
             window = await WaitWindowAsync(desktop, windowQuery, wait, cancellationToken);
             if (window is null)
             {
-                return NodeResult.Fail($"Окно ({windowQuery}) не найдено за {wait.TotalSeconds:0} с — действие «{what}» не выполнялось.");
+                return (NodeResult.Fail($"Окно ({windowQuery}) не найдено за {wait.TotalSeconds:0} с — действие «{what}» не выполнялось."), null);
             }
 
             if (elementQuery is not null)
@@ -244,40 +288,41 @@ public static class DesktopNodes
                 element = await WaitElementAsync(desktop, window, elementQuery, context.GetString("match") ?? "strict", wait, cancellationToken);
                 if (element is null)
                 {
-                    return NodeResult.Fail($"В окне «{window.Info.Title}» нет элемента ({elementQuery}) — действие «{what}» не выполнялось.");
+                    return (NodeResult.Fail($"В окне «{window.Info.Title}» нет элемента ({elementQuery}) — действие «{what}» не выполнялось."), window);
                 }
 
                 if (!element.Info.Enabled)
                 {
-                    return NodeResult.Fail($"Элемент ({elementQuery}) в окне «{window.Info.Title}» недоступен (серый) — действие «{what}» не выполнялось.");
+                    return (NodeResult.Fail($"Элемент ({elementQuery}) в окне «{window.Info.Title}» недоступен (серый) — действие «{what}» не выполнялось."),
+                        window);
                 }
             }
         }
         catch (DesktopAmbiguousException ex)
         {
-            return NodeResult.Fail(ex.Message, retryable: false);
+            return (NodeResult.Fail(ex.Message, retryable: false), window);
         }
         catch (DesktopException ex)
         {
-            return NodeResult.Fail($"Windows не дал найти окно или элемент: {ex.Message}");
+            return (NodeResult.Fail($"Windows не дал найти окно или элемент: {ex.Message}"), window);
         }
 
         try
         {
-            return await action(window, element);
+            return (await action(window, element), window);
         }
         catch (DesktopInputBlockedException ex) when (!ex.Partial)
         {
             // Проверка перед вводом не пропустила его: ничего не нажато и не напечатано.
-            return NodeResult.Fail($"{ex.Message} Действие «{what}» не выполнялось.");
+            return (NodeResult.Fail($"{ex.Message} Действие «{what}» не выполнялось."), window);
         }
         catch (DesktopInputBlockedException ex)
         {
-            return new NodeResult.Unknown($"Ввод прерван на середине: {ex.Message}");
+            return (new NodeResult.Unknown($"Ввод прерван на середине: {ex.Message}"), window);
         }
         catch (DesktopException ex)
         {
-            return new NodeResult.Unknown($"Ошибка Windows во время действия «{what}»: {ex.Message}");
+            return (new NodeResult.Unknown($"Ошибка Windows во время действия «{what}»: {ex.Message}"), window);
         }
     }
 }
