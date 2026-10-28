@@ -9,17 +9,17 @@ public static class EmailNodes
 {
     public static readonly NodeCategory Category = new("email", "Почта", 22);
 
-    /// <param name="ready">Почта настроена и включена (иначе ждать письма бессмысленно — они не придут).</param>
-    public static NodeRegistry RegisterEmailNodes(this NodeRegistry registry, Func<bool> ready) => registry
+    /// <param name="problem">Почему ждать письмо бессмысленно (почта не подключена, пароль не принят); null — можно ждать.</param>
+    public static NodeRegistry RegisterEmailNodes(this NodeRegistry registry, Func<string?> problem) => registry
         .RegisterCategory(Category)
-        .Register(new WaitEmailNode(ready));
+        .Register(new WaitEmailNode(problem));
 }
 
 /// <summary>
 /// «Ждать письмо»: письмо с кодом или ссылкой подтверждения после регистрации на сайте. Ожидание переживает закрытие
 /// Pepa: письма, пришедшие за это время, будут получены после запуска.
 /// </summary>
-public sealed class WaitEmailNode(Func<bool> ready) : INodeExecutor
+public sealed partial class WaitEmailNode(Func<string?> problem) : INodeExecutor
 {
     public const string TypeName = "email.wait";
 
@@ -44,7 +44,8 @@ public sealed class WaitEmailNode(Func<bool> ready) : INodeExecutor
             new FieldDescriptor
             {
                 Name = "from", Label = "От кого", Kind = FieldKind.Template, Placeholder = "noreply@site.ru",
-                Help = "Адрес или имя отправителя содержит (без учёта регистра). Пусто — от кого угодно.",
+                Help = "Адрес (noreply@site.ru — ровно он), сайт (site.ru — адрес на нём или его поддомене) или слова из имени " +
+                       "отправителя. Имя любой может написать какое угодно, адрес и сайт надёжнее. Пусто — от кого угодно.",
             },
             new FieldDescriptor
             {
@@ -69,7 +70,7 @@ public sealed class WaitEmailNode(Func<bool> ready) : INodeExecutor
             },
             new FieldDescriptor
             {
-                Name = "lookbackSeconds", Label = "Учитывать пришедшие раньше, секунд", Kind = FieldKind.Seconds, Default = 120,
+                Name = "lookbackSeconds", Label = "Учитывать пришедшие раньше, секунд", Kind = FieldKind.Seconds, Default = 30,
                 Min = 0, Max = 86_400,
                 Help = "Письмо могло прийти, пока процесс выполнял предыдущий шаг (например, сразу после нажатия «Зарегистрироваться»). " +
                        "Берутся только письма, которые ещё никто не забрал.",
@@ -84,16 +85,19 @@ public sealed class WaitEmailNode(Func<bool> ready) : INodeExecutor
 
     public ValueTask<NodeResult> ExecuteAsync(NodeExecutionContext context, CancellationToken cancellationToken)
     {
-        if (!ready())
+        if (problem() is { } reason)
         {
-            return ValueTask.FromResult<NodeResult>(NodeResult.Fail(
-                "Почта не подключена: «Интеграции» → «Почта» — укажите ящик и пароль приложения.", retryable: false));
+            return ValueTask.FromResult<NodeResult>(NodeResult.Fail(reason));
         }
 
         var conditions = new List<string>();
+        if (Value(context, "from") is { } from)
+        {
+            conditions.Add(FromCondition(from.ToLowerInvariant()));
+        }
+
         foreach (var (field, expression) in new[]
                  {
-                     ("from", "String(event.payload.from ?? '') + ' ' + String(event.payload.fromName ?? '')"),
                      ("subject", "String(event.payload.subject ?? '')"),
                      ("contains", "String(event.payload.text ?? '')"),
                  })
@@ -117,10 +121,38 @@ public sealed class WaitEmailNode(Func<bool> ready) : INodeExecutor
             Source = EmailEvents.Source,
             EventType = EmailEvents.MessageType,
             MatchExpression = conditions.Count > 0 ? string.Join(" && ", conditions) : null,
-            LookbackSeconds = (int)(context.GetNumber("lookbackSeconds") ?? 120),
+            LookbackSeconds = (int)(context.GetNumber("lookbackSeconds") ?? 30),
             SaveTo = context.GetString("saveTo") is { Length: > 0 } saveTo ? saveTo : null,
         }, timeout));
     }
+
+    /// <summary>
+    /// Условие «от кого». Адрес — ровно он; «@site.ru» или «site.ru» — адрес на этом сайте или его поддомене (не
+    /// «evil-site.ru» и не «site.ru.evil.com»); слова — в имени или адресе. Имя отправителя пишет сам отправитель, поэтому
+    /// адрес и сайт сравниваются только с адресом.
+    /// </summary>
+    private static string FromCondition(string from)
+    {
+        const string address = "String(event.payload.from ?? '').toLowerCase()";
+        if (EmailAddress().IsMatch(from))
+        {
+            return $"{address} === {JsonSerializer.Serialize(from)}";
+        }
+
+        var domain = from.TrimStart('@');
+        if (Domain().IsMatch(domain))
+        {
+            return $"({address}.endsWith({JsonSerializer.Serialize("@" + domain)}) || {address}.endsWith({JsonSerializer.Serialize("." + domain)}))";
+        }
+
+        return $"(String(event.payload.from ?? '') + ' ' + String(event.payload.fromName ?? '')).toLowerCase().includes({JsonSerializer.Serialize(from)})";
+    }
+
+    [System.Text.RegularExpressions.GeneratedRegex(@"^[^@\s]+@[^@\s]+\.[^@\s]+$")]
+    private static partial System.Text.RegularExpressions.Regex EmailAddress();
+
+    [System.Text.RegularExpressions.GeneratedRegex(@"^([a-z0-9а-яё-]+\.)+[a-z0-9а-яё-]{2,}$")]
+    private static partial System.Text.RegularExpressions.Regex Domain();
 
     /// <summary>
     /// Значение условия; null — условия нет. Заданное в схеме, но получившееся пустым (переменная не заполнена), — ошибка:

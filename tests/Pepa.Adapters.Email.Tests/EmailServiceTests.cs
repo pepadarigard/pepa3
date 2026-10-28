@@ -32,7 +32,7 @@ public sealed class EmailServiceTests : IAsyncDisposable
     {
         var service = Create(options);
         await service.ConfigureAsync(Account(), _server.Password, CancellationToken.None);
-        service.Start(runLoop: false);
+        service.Start(DateTimeOffset.UtcNow, runLoop: false);
         await service.CheckAsync(CancellationToken.None);
         return service;
     }
@@ -57,7 +57,7 @@ public sealed class EmailServiceTests : IAsyncDisposable
         Assert.Equal("Код подтверждения", payload["subject"]!.GetValue<string>());
         Assert.Contains("482913", payload["text"]!.GetValue<string>());
         Assert.Equal("anna@example.com", payload["to"]![0]!.GetValue<string>());
-        Assert.StartsWith("mid:", e.ExternalId);
+        Assert.EndsWith(":1:2", e.ExternalId);
         // Только чтение: папка открыта через EXAMINE, флаги писем не менялись.
         Assert.Contains(_server.Commands, c => c.StartsWith("EXAMINE", StringComparison.Ordinal));
         Assert.DoesNotContain(_server.Commands, c => c.StartsWith("SELECT", StringComparison.Ordinal) || c.Contains("STORE", StringComparison.Ordinal));
@@ -86,21 +86,40 @@ public sealed class EmailServiceTests : IAsyncDisposable
     public async Task Mail_that_arrived_while_pepa_was_closed_is_delivered_after_start()
     {
         var first = await ConnectedAsync();
+        var closedAt = DateTimeOffset.UtcNow;
         await first.DisposeAsync();
         _services.Remove(first);
 
-        _server.Deliver(FakeImapServer.Message("noreply@site.ru", "Пока закрыта", "код 1111"), DateTimeOffset.UtcNow.AddMinutes(-5));
+        _server.Deliver(FakeImapServer.Message("noreply@site.ru", "Пока закрыта", "код 1111"));
+        // Время прихода неизвестно (сервер его не сообщает) — письмо всё равно «пришло» до запуска, а не сейчас.
+        _server.Deliver(FakeImapServer.Message("noreply@site.ru", "Без даты", "код 2222"));
         var second = Create();
         Assert.True(second.WillCatchUp);
         var caughtUp = false;
         second.CaughtUp += () => caughtUp = true;
-        second.Start(runLoop: false);
+        var startedAt = DateTimeOffset.UtcNow.AddSeconds(1);
+        second.Start(startedAt, runLoop: false);
+        _server.WithoutInternalDate = true;
         await second.CheckAsync(CancellationToken.None);
 
-        var e = Assert.Single(_events);
-        Assert.Equal("Пока закрыта", e.Payload!["subject"]!.GetValue<string>());
-        Assert.True(e.OccurredAt < DateTimeOffset.UtcNow.AddMinutes(-4));
+        Assert.Equal(["Пока закрыта", "Без даты"], _events.Select(e => e.Payload!["subject"]!.GetValue<string>()));
+        Assert.All(_events, e => Assert.InRange(e.OccurredAt!.Value, closedAt.AddSeconds(-2), startedAt.AddMilliseconds(-1)));
         Assert.True(caughtUp);
+    }
+
+    [Fact]
+    public async Task Mail_moved_in_with_an_old_date_still_counts_as_new_for_waiting_processes()
+    {
+        var service = await ConnectedAsync();
+        var checkedAt = DateTimeOffset.UtcNow;
+        // Правило почты перенесло письмо из другой папки: у него дата прихода неделю назад.
+        _server.Deliver(FakeImapServer.Message("noreply@site.ru", "Перенесено", "код"), DateTimeOffset.UtcNow.AddDays(-7));
+        _server.Deliver(FakeImapServer.Message("noreply@site.ru", "Часы спешат", "код"), DateTimeOffset.UtcNow.AddHours(3));
+        await service.CheckAsync(CancellationToken.None);
+
+        var events = _events.ToList();
+        Assert.True(events[0].OccurredAt >= checkedAt.AddSeconds(-2));
+        Assert.True(events[1].OccurredAt <= DateTimeOffset.UtcNow);
     }
 
     [Fact]
@@ -115,7 +134,7 @@ public sealed class EmailServiceTests : IAsyncDisposable
         _services.Remove(service);
 
         var again = Create();
-        again.Start(runLoop: false);
+        again.Start(DateTimeOffset.UtcNow, runLoop: false);
         await again.CheckAsync(CancellationToken.None);
 
         Assert.Equal(["Один", "Два"], _events.Select(e => e.Payload!["subject"]!.GetValue<string>()));
@@ -162,7 +181,7 @@ public sealed class EmailServiceTests : IAsyncDisposable
         _services.Remove(service);
 
         var again = Create();
-        again.Start(runLoop: false);
+        again.Start(DateTimeOffset.UtcNow, runLoop: false);
         await again.CheckAsync(CancellationToken.None);
 
         Assert.Single(_events);
@@ -190,7 +209,7 @@ public sealed class EmailServiceTests : IAsyncDisposable
         _server.AddFolder("Спам");
         var service = Create();
         await service.ConfigureAsync(Account("Спам"), _server.Password, CancellationToken.None);
-        service.Start(runLoop: false);
+        service.Start(DateTimeOffset.UtcNow, runLoop: false);
         await service.CheckAsync(CancellationToken.None);
         _server.Deliver(FakeImapServer.Message("a@site.ru", "В спаме", "код 5"), folder: "Спам");
         await service.CheckAsync(CancellationToken.None);
@@ -211,21 +230,24 @@ public sealed class EmailServiceTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task Lost_connection_is_an_error_status_and_the_next_check_reconnects_without_losing_mail()
+    public async Task Dropped_connection_is_reopened_at_once_and_a_dead_server_is_an_error()
     {
         var service = await ConnectedAsync();
         var logins = _server.Logins;
         _server.Deliver(FakeImapServer.Message("a@site.ru", "Во время обрыва", "1"));
+        // Сервер закрыл долгое соединение — обычное дело: Pepa подключается снова в ту же проверку, без «нет связи».
         _server.DropConnections();
-
-        await Assert.ThrowsAsync<EmailUnavailableException>(() => service.CheckAsync(CancellationToken.None));
-        Assert.Equal(EmailState.Error, service.Status.State);
-        Assert.Empty(_events);
-
         await service.CheckAsync(CancellationToken.None);
         Assert.Equal(EmailState.Connected, service.Status.State);
         Assert.Equal("Во время обрыва", Assert.Single(_events).Payload!["subject"]!.GetValue<string>());
         Assert.Equal(logins + 1, _server.Logins);
+
+        // Сервер не принимает пароль (его отозвали) — ошибка, и ждать письма с ней бессмысленно.
+        _server.Password = "отозван";
+        _server.DropConnections();
+        await Assert.ThrowsAsync<EmailUnavailableException>(() => service.CheckAsync(CancellationToken.None));
+        Assert.Equal(EmailState.Error, service.Status.State);
+        Assert.Contains("пароль приложения", service.Problem);
 
         await service.ClearAsync(CancellationToken.None);
         Assert.Equal(EmailState.NotConfigured, service.Status.State);

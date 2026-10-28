@@ -109,7 +109,7 @@ public sealed class PepaHost : IAsyncDisposable
         var desktop = options.Desktop ?? new UnavailableDesktop(
             "Окна Windows, мышь и клавиатура доступны только в приложении Pepa для Windows (Pepa.exe), а сейчас Pepa запущена без окна.");
         var registry = new NodeRegistry().RegisterLogicNodes().RegisterFlowNodes().RegisterFileNodes(workspace, () => settings.Current.FolderWatches)
-            .RegisterTableNodes(workspace).RegisterHttpNodes().RegisterBrowserNodes(browsers, workspace).RegisterTelegramNodes(telegram, workspace).RegisterEmailNodes(() => email.IsReady).RegisterDesktopNodes(desktop);
+            .RegisterTableNodes(workspace).RegisterHttpNodes().RegisterBrowserNodes(browsers, workspace).RegisterTelegramNodes(telegram, workspace).RegisterEmailNodes(() => email.Problem).RegisterDesktopNodes(desktop);
         // Расширения — до движка и помощника: их блоки должны быть в реестре с самого начала (и в каталоге помощника).
         var plugins = PluginLoader.Load(options.PluginsDirectory ?? Path.Combine(dataDirectory, "plugins"), dataDirectory, registry,
             () => settings.Current.WorkspaceRoot, path => workspace.Resolve(path), elevated: options.Elevated ?? (OperatingSystem.IsWindows() && Environment.IsPrivilegedProcess));
@@ -300,7 +300,7 @@ public sealed class PepaHost : IAsyncDisposable
         app.Services.GetRequiredService<Backups.DatabaseBackups>().Start();
         app.Services.GetRequiredService<Backups.HistoryRetention>().Start();
         watcher.Start(engine.StartedAt);
-        email.Start();
+        email.Start(engine.StartedAt);
         var address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.First();
         var baseUrl = new Uri(address.Replace("[::1]", "127.0.0.1"));
         hostContext.Port = baseUrl.Port;

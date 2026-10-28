@@ -29,7 +29,15 @@ public sealed partial class FakeImapServer : IAsyncDisposable
     }
 
     public string Login { get; }
-    public string Password { get; }
+
+    /// <summary>Пароль ящика (можно сменить «на сервере» — как отозванный пароль приложения).</summary>
+    public string Password { get; set; }
+
+    /// <summary>Письма, которые сервер не отдаёт (ответ NO на чтение) — как повреждённое письмо на сервере.</summary>
+    public ConcurrentDictionary<uint, bool> Unreadable { get; } = new();
+
+    /// <summary>Не сообщать время прихода писем (INTERNALDATE) — так бывает у некоторых серверов.</summary>
+    public bool WithoutInternalDate { get; set; }
     public int Port => ((IPEndPoint)_listener.LocalEndpoint).Port;
 
     /// <summary>Все полученные команды (без меток и паролей).</summary>
@@ -285,7 +293,7 @@ public sealed partial class FakeImapServer : IAsyncDisposable
                 fields.Add($"RFC822.SIZE {message.Raw.Length}");
             }
 
-            if (items.Contains("INTERNALDATE", StringComparison.Ordinal))
+            if (items.Contains("INTERNALDATE", StringComparison.Ordinal) && !WithoutInternalDate)
             {
                 fields.Add($"INTERNALDATE \"{message.Received.ToUniversalTime().ToString("dd-MMM-yyyy HH:mm:ss", CultureInfo.InvariantCulture)} +0000\"");
             }
@@ -297,6 +305,12 @@ public sealed partial class FakeImapServer : IAsyncDisposable
 
             byte[]? literal = null;
             string? section = null;
+            if (Unreadable.ContainsKey(message.Uid) && items.Contains("BODY", StringComparison.Ordinal))
+            {
+                await Write(stream, $"{tag} NO Some messages could not be FETCHed (Failure)\r\n");
+                return;
+            }
+
             if (items.Contains("BODY.PEEK[HEADER]", StringComparison.Ordinal))
             {
                 var text = Encoding.UTF8.GetString(message.Raw);

@@ -16,7 +16,7 @@ public sealed class EmailScenarioTests : IAsyncDisposable
     private async Task<EngineHarness> CreateAsync(bool configure = true)
     {
         EngineHarness? harness = null;
-        harness = await EngineHarness.CreateAsync(extraNodes: registry => registry.RegisterEmailNodes(() => _email?.IsReady == true));
+        harness = await EngineHarness.CreateAsync(extraNodes: registry => registry.RegisterEmailNodes(() => _email is null ? "почта не создана" : _email.Problem));
         _email = new EmailService(harness.Directory, input => harness.Engine.PublishEventAsync(input),
             new EmailServiceOptions { OperationTimeout = TimeSpan.FromSeconds(10) });
         if (configure)
@@ -25,7 +25,7 @@ public sealed class EmailScenarioTests : IAsyncDisposable
             {
                 Server = "127.0.0.1", Port = _server.Port, Security = EmailSecurity.None, Login = _server.Login,
             }, _server.Password, CancellationToken.None);
-            _email.Start(runLoop: false);
+            _email.Start(DateTimeOffset.UtcNow, runLoop: false);
             await _email.CheckAsync(CancellationToken.None);
         }
 
@@ -100,6 +100,43 @@ public sealed class EmailScenarioTests : IAsyncDisposable
                 new VariableDefinition { Name = "nobody", Type = VariableType.Text }],
         });
         Assert.Contains("получилось пустым", (await h.WaitForStatusAsync(empty, ProcessStatus.NeedsAttention)).StatusMessage);
+    }
+
+    [Fact]
+    public async Task Sender_address_and_site_are_checked_by_the_address_not_by_the_name_anyone_can_write()
+    {
+        await using var h = await CreateAsync();
+        var byAddress = await h.RunAsync(Confirm(new { from = "noreply@bank.ru", saveTo = "mail" }));
+        var bySite = await h.RunAsync(Confirm(new { from = "site.ru", saveTo = "mail" }));
+        await h.WaitForStatusAsync(byAddress, ProcessStatus.Waiting);
+        await h.WaitForStatusAsync(bySite, ProcessStatus.Waiting);
+
+        _server.Deliver(FakeImapServer.Message("\"noreply@bank.ru\" <x@evil.example>", "Код", "код 6666"));
+        _server.Deliver(FakeImapServer.Message("noreply@evil-site.ru", "Код", "код 7777"));
+        _server.Deliver(FakeImapServer.Message("noreply@site.ru.evil.com", "Код", "код 8888"));
+        await _email!.CheckAsync(CancellationToken.None);
+        await h.IdleAsync(TimeSpan.FromSeconds(1));
+        Assert.Equal(ProcessStatus.Waiting, (await h.ProcessAsync(byAddress)).Status);
+        Assert.Equal(ProcessStatus.Waiting, (await h.ProcessAsync(bySite)).Status);
+
+        _server.Deliver(FakeImapServer.Message("Банк <NoReply@Bank.ru>", "Код", "код 1111"));
+        _server.Deliver(FakeImapServer.Message("robot@mail.site.ru", "Код", "код 2222"));
+        await _email.CheckAsync(CancellationToken.None);
+        Assert.Equal("код 1111", (await h.WaitForStatusAsync(byAddress, ProcessStatus.Completed)).StatusMessage);
+        Assert.Equal("код 2222", (await h.WaitForStatusAsync(bySite, ProcessStatus.Completed)).StatusMessage);
+    }
+
+    [Fact]
+    public async Task Waiting_for_mail_with_a_rejected_password_stops_with_the_reason()
+    {
+        await using var h = await CreateAsync();
+        _server.Password = "отозван";
+        _server.DropConnections();
+        await Assert.ThrowsAsync<EmailUnavailableException>(() => _email!.CheckAsync(CancellationToken.None));
+
+        var id = await h.RunAsync(Confirm(new { subject = "код", saveTo = "mail" }));
+        var stopped = await h.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
+        Assert.Contains("пароль приложения", stopped.StatusMessage);
     }
 
     public async ValueTask DisposeAsync()
