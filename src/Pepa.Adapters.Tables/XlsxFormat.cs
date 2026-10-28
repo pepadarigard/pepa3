@@ -71,7 +71,7 @@ internal static partial class XlsxFormat
         }
 
         var date1904 = workbook.Workbook?.WorkbookProperties?.Date1904?.Value == true;
-        var result = new TableSheet { Name = sheet.Name?.Value ?? "" };
+        var result = new TableSheet { Name = sheet.Name?.Value ?? "", Date1904 = date1904 };
         var rowIndex = 0;
         foreach (var row in part.Worksheet?.GetFirstChild<SheetData>()?.Elements<Row>() ?? [])
         {
@@ -123,6 +123,8 @@ internal static partial class XlsxFormat
 
             NumberRowsAndCells(data);
             var arrays = ArrayRanges(data);
+            var kinds = NumberKinds(workbook);
+            var date1904 = workbook.Workbook?.WorkbookProperties?.Date1904?.Value == true;
             foreach (var (row, cells) in changes.OrderBy(c => c.Key))
             {
                 if (row is < 1 or > TableValues.MaxRow)
@@ -145,7 +147,15 @@ internal static partial class XlsxFormat
                         cell.StyleIndex = style;
                     }
 
-                    SetValue(cell, Stored(value));
+                    // Дата текстом ISO в колонку с форматом даты — датой Excel: её можно сортировать и считать.
+                    var stored = Stored(value);
+                    if (stored is JsonValue text && text.TryGetValue<string>(out var iso) && kinds(cell.StyleIndex?.Value ?? 0) == NumberKind.Date &&
+                        Serial(iso, date1904) is { } serial)
+                    {
+                        stored = JsonValue.Create(serial);
+                    }
+
+                    SetValue(cell, stored);
                 }
             }
 
@@ -476,6 +486,40 @@ internal static partial class XlsxFormat
         var above = data.Elements<Row>().FirstOrDefault(r => r.RowIndex?.Value == row - 1);
         return above?.Elements<Cell>().FirstOrDefault(c => Column(c) == column)?.StyleIndex is { } style ? new UInt32Value(style.Value) : null;
     }
+
+    /// <summary>Вид числа по номеру оформления ячейки (дата, длительность, число) — по стилям этой книги.</summary>
+    private static Func<uint, NumberKind> NumberKinds(WorkbookPart workbook)
+    {
+        var stylesheet = workbook.WorkbookStylesPart?.Stylesheet;
+        var formats = stylesheet?.CellFormats?.Elements<CellFormat>().Select(f => f.NumberFormatId?.Value ?? 0).ToArray() ?? [];
+        var custom = new Dictionary<uint, string>();
+        foreach (var format in stylesheet?.NumberingFormats?.Elements<NumberingFormat>() ?? [])
+        {
+            if (format.NumberFormatId?.Value is { } id)
+            {
+                custom.TryAdd(id, format.FormatCode?.Value ?? "");
+            }
+        }
+
+        return style => style < formats.Length ? Kind(formats[style], custom) : NumberKind.Number;
+    }
+
+    /// <summary>Дата ISO («2026-10-27», «2026-10-27T10:30» или с секундами) — число Excel; null — не дата или раньше марта 1900.</summary>
+    internal static double? Serial(string text, bool date1904)
+    {
+        if (!IsoDate().IsMatch(text) ||
+            !DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var date) ||
+            date < new DateTime(1900, 3, 1))
+        {
+            return null;
+        }
+
+        var serial = date.ToOADate();
+        return date1904 ? serial - 1462 : serial;
+    }
+
+    [GeneratedRegex(@"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?$")]
+    private static partial Regex IsoDate();
 
     private static void SetValue(Cell cell, JsonNode? value)
     {

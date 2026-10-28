@@ -303,4 +303,30 @@ public sealed class TableReviewTests : TableTestKit
             return false;
         }
     }
+
+    [Fact]
+    public async Task Iso_date_goes_into_a_date_column_as_a_real_excel_date_and_stays_text_elsewhere()
+    {
+        CreateBook(Book);
+        var (result, context) = await Run(new AppendRowNode(Workspace), new JsonObject
+        {
+            ["path"] = Book, ["values"] = new JsonObject { ["Имя"] = "2026-10-27", ["Дата"] = "2026-10-27T10:30", ["Телефон"] = "1899-01-01" },
+        });
+
+        Ok(result);
+        var date = CellOf(P(Book), "Клиенты", "C4")!;
+        Assert.Null(date.DataType);
+        Assert.Equal(new DateTime(2026, 10, 27, 10, 30, 0).ToOADate().ToString(System.Globalization.CultureInfo.InvariantCulture), date.CellValue!.Text);
+        Assert.Equal(S.CellValues.InlineString, CellOf(P(Book), "Клиенты", "A4")!.DataType!.Value);
+        Assert.Equal(S.CellValues.InlineString, CellOf(P(Book), "Клиенты", "B4")!.DataType!.Value);
+        Assert.Equal("2026-10-27T10:30:00", (await ReadRows(Book))[2]!["Дата"]!.GetValue<string>());
+        Assert.Equal(VerificationOutcome.Done, (await new AppendRowNode(Workspace).VerifyAsync(context, CancellationToken.None)).Outcome);
+
+        // Та же дата ещё раз — «уже эти значения», файл не переписывается.
+        var (again, _) = await Run(new UpdateRowNode(Workspace), new JsonObject
+        {
+            ["path"] = Book, ["column"] = "Имя", ["value"] = "2026-10-27", ["values"] = new JsonObject { ["Дата"] = "2026-10-27T10:30:00" },
+        });
+        Assert.Contains("уже эти значения", Ok(again).Message);
+    }
 }

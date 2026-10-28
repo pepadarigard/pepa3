@@ -23,6 +23,9 @@ internal sealed class TableSheet
     /// <summary>Как записывать значения в этот файл (для CSV — разделитель, кодировка, дробная часть).</summary>
     public CsvDialect? Csv { get; init; }
 
+    /// <summary>Книга Excel считает даты от 1904 года (книги со старых Mac).</summary>
+    public bool Date1904 { get; init; }
+
     /// <summary>Номер последней строки, где есть хоть одно значение; 0 — лист пуст.</summary>
     public int LastRow => Rows.Count == 0 ? 0 : Rows.Keys.Last();
 
@@ -52,9 +55,21 @@ internal sealed class TableSheet
     /// <summary>Как значение прочитается из этого файла после записи (CSV хранит только текст).</summary>
     public JsonNode? Stored(JsonNode? value) => Csv is { } csv ? csv.Stored(value) : XlsxFormat.Stored(value);
 
-    /// <summary>В ячейке ровно то, что запишет Pepa (<see cref="Stored"/>): текст — как есть, число — по значению.</summary>
-    public bool Holds(int row, int column, JsonNode? value) =>
-        TableValues.Holds(Cell(row, column), Stored(value), Serials.TryGetValue((row, column), out var serial) ? serial : null);
+    /// <summary>
+    /// В ячейке ровно то, что запишет Pepa (<see cref="Stored"/>): текст — как есть, число — по значению; дата ISO в ячейке
+    /// с форматом даты — по самой дате («2026-10-27T10:30» и показанное Excel «…T10:30:00» — одно и то же).
+    /// </summary>
+    public bool Holds(int row, int column, JsonNode? value)
+    {
+        var stored = Stored(value);
+        var known = Serials.TryGetValue((row, column), out var serial);
+        if (known && Csv is null && stored is JsonValue text && text.TryGetValue<string>(out var iso) && XlsxFormat.Serial(iso, Date1904) is { } expected)
+        {
+            return Math.Abs(expected - serial) < 1e-8;
+        }
+
+        return TableValues.Holds(Cell(row, column), stored, known ? serial : null);
+    }
 }
 
 /// <summary>

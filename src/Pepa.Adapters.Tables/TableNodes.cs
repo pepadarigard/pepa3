@@ -54,7 +54,8 @@ public static class TableNodes
     {
         Name = "values", Label = "Значения", Kind = FieldKind.Expression, Required = true, Placeholder = placeholder,
         Help = "Объект «колонка: значение» — названия колонок как в таблице. Значение — текст, число или да/нет; " +
-               "пусто (null) — ячейка пустая. Формулы Pepa не пишет: текст, начинающийся с «=», останется текстом.",
+               "пусто (null) — ячейка пустая. Дата вида 2026-10-27 в колонке с форматом даты станет датой Excel. " +
+               "Формулы Pepa не пишет: текст, начинающийся с «=», останется текстом.",
     };
 
     internal static JsonObject Output(TableFile file, TableSheet sheet, params (string Key, JsonNode? Value)[] values)
