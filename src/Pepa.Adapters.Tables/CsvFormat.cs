@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using Pepa.Core.Nodes;
 
 namespace Pepa.Adapters.Tables;
@@ -9,7 +10,7 @@ namespace Pepa.Adapters.Tables;
 /// Как записан CSV-файл: кодировка (с BOM или без), разделитель, перевод строки и знак дробной части. Изменённый файл
 /// остаётся таким же: Excel и другие программы откроют его как раньше.
 /// </summary>
-internal sealed record CsvDialect(Encoding Encoding, byte[] Preamble, char Delimiter, string NewLine)
+internal sealed record CsvDialect(Encoding Encoding, byte[] Preamble, char Delimiter, string NewLine, bool AsciiOnly = false)
 {
     /// <summary>Новый файл — для Excel с русскими настройками: UTF-8 с BOM, «;», дробная часть через запятую.</summary>
     public static readonly CsvDialect New = new(new UTF8Encoding(false, true), [0xEF, 0xBB, 0xBF], ';', "\r\n");
@@ -17,12 +18,20 @@ internal sealed record CsvDialect(Encoding Encoding, byte[] Preamble, char Delim
     /// <summary>С разделителем «;» (Excel с русскими настройками) дробная часть пишется через запятую.</summary>
     public bool DecimalComma => Delimiter == ';';
 
-    public string EncodingName => Encoding.CodePage switch
+    /// <summary>
+    /// Кодировка для записи. Файл без BOM только из латиницы мог сохранить и Excel (в кодировке Windows этого компьютера),
+    /// и другая программа (в UTF-8) — по нему не видно. Excel откроет такой файл в кодировке Windows, поэтому в неё и
+    /// пишется (на Windows); иначе — UTF-8.
+    /// </summary>
+    public Encoding WriteEncoding(string text) =>
+        AsciiOnly && !text.All(char.IsAscii) && OperatingSystem.IsWindows() ? CsvDocument.WindowsAnsi.Value : Encoding;
+
+    public static string EncodingTitle(Encoding encoding, byte[] preamble) => encoding.CodePage switch
     {
-        1251 => "Windows-1251",
         1200 => "UTF-16",
         1201 => "UTF-16 BE",
-        _ => Preamble.Length > 0 ? "UTF-8 с BOM" : "UTF-8",
+        65001 => preamble.Length > 0 ? "UTF-8 с BOM" : "UTF-8",
+        var page => $"Windows-{page}",
     };
 
     /// <summary>Текст ячейки, как он запишется и прочитается: число — с дробной частью этого файла, да/нет — словами.</summary>
@@ -36,31 +45,44 @@ internal sealed record CsvDialect(Encoding Encoding, byte[] Preamble, char Delim
         var text = value!.GetValueKind() switch
         {
             JsonValueKind.Number => DecimalComma ? TableValues.Text(value).Replace('.', ',') : TableValues.Text(value),
-            JsonValueKind.String => Guard(value.GetValue<string>()),
             _ => TableValues.Text(value),
         };
         return JsonValue.Create(text);
     }
 
     /// <summary>
-    /// Текст, который Excel принял бы за формулу («=», «+», «-», «@» в начале, кроме обычного числа вроде «-5»), пишется с
-    /// апострофом впереди: данные с сайта или из сообщения не должны стать формулой при открытии файла.
+    /// Текст, который Excel принял бы за формулу («=», «+», «-», «@», табуляция или перевод строки в начале, в том числе
+    /// полноширинные знаки; кроме обычного числа вроде «-5»), пишется с апострофом впереди: данные с сайта или из
+    /// сообщения не должны стать формулой при открытии файла. При чтении этот апостроф убирается (<see cref="Unguard"/>),
+    /// поэтому Pepa находит записанное ею значение как есть. Текст, который сам начинается с такого апострофа, тоже
+    /// получает свой — иначе он прочитался бы без него.
     /// </summary>
     public static string Guard(string text) =>
-        text.Length > 0 && text[0] is '=' or '+' or '-' or '@' && !TableValues.IsPlainNumber(text.Trim()) ? "'" + text : text;
+        text.Length > 0 && (IsFormulaStart(text[0]) && !TableValues.IsPlainNumber(text.Trim()) ||
+                            text[0] == '\'' && text.Length > 1 && IsFormulaStart(text[1]))
+            ? "'" + text
+            : text;
+
+    public static string Unguard(string text) => text.Length > 1 && text[0] == '\'' && IsFormulaStart(text[1]) ? text[1..] : text;
+
+    private static bool IsFormulaStart(char c) => c is '=' or '+' or '-' or '@' or '\t' or '\r' or '＝' or '＋' or '－' or '＠';
 }
 
 /// <summary>CSV-файл, прочитанный для изменения: текст и границы каждой строки и поля в нём.</summary>
-internal sealed class CsvDocument
+internal sealed partial class CsvDocument
 {
     private readonly List<CsvRecord> _records;
 
-    private CsvDocument(string text, List<CsvRecord> records, CsvDialect dialect)
+    private CsvDocument(string text, List<CsvRecord> records, CsvDialect dialect, int? unclosedRow)
     {
         Text = text;
         _records = records;
         Dialect = dialect;
+        _unclosedRow = unclosedRow;
     }
+
+    /// <summary>Строка, где кавычка не закрыта до конца файла: дописанное попало бы внутрь её поля.</summary>
+    private readonly int? _unclosedRow;
 
     public string Text { get; }
     public CsvDialect Dialect { get; }
@@ -84,12 +106,26 @@ internal sealed class CsvDocument
         }
 
         var newLine = text.Contains("\r\n", StringComparison.Ordinal) || !text.Contains('\n') ? "\r\n" : "\n";
-        var delimiter = extension.Equals(".tsv", StringComparison.OrdinalIgnoreCase) ? '\t' : DetectDelimiter(text);
-        var dialect = new CsvDialect(encoding, preamble, delimiter, newLine);
-        return new CsvDocument(text, Split(text, delimiter), dialect);
+        // Первая строка «sep=;» (так её пишет и понимает Excel) задаёт разделитель и строкой таблицы не считается.
+        var start = 0;
+        char? declared = null;
+        if (SepLine().Match(text) is { Success: true } sep)
+        {
+            declared = sep.Groups[1].Value[0];
+            start = sep.Length;
+        }
+
+        var delimiter = declared ?? (extension.Equals(".tsv", StringComparison.OrdinalIgnoreCase) ? '\t' : DetectDelimiter(text));
+        var asciiOnly = preamble.Length == 0 && bytes.All(b => b < 0x80);
+        var dialect = new CsvDialect(encoding, preamble, delimiter, newLine, asciiOnly);
+        var (records, unclosed) = Split(text, delimiter, start);
+        return new CsvDocument(text, records, dialect, unclosed);
     }
 
-    public static CsvDocument Empty(CsvDialect dialect) => new("", [], dialect);
+    [GeneratedRegex(@"\Asep=([^\r\n])\r?\n?", RegexOptions.IgnoreCase)]
+    private static partial Regex SepLine();
+
+    public static CsvDocument Empty(CsvDialect dialect) => new("", [], dialect, null);
 
     public TableSheet ToSheet()
     {
@@ -99,7 +135,8 @@ internal sealed class CsvDocument
             var fields = _records[i].Fields;
             for (var j = 0; j < fields.Count; j++)
             {
-                sheet.Set(i + 1, j + 1, fields[j].Value.Length > 0 ? JsonValue.Create(fields[j].Value) : null);
+                var value = CsvDialect.Unguard(fields[j].Value);
+                sheet.Set(i + 1, j + 1, value.Length > 0 ? JsonValue.Create(value) : null);
             }
         }
 
@@ -112,6 +149,13 @@ internal sealed class CsvDocument
     /// </summary>
     public byte[] With(IReadOnlyDictionary<int, IReadOnlyDictionary<int, JsonNode?>> changes)
     {
+        if (_unclosedRow is { } broken)
+        {
+            throw new NodeInputException(
+                $"В строке {broken} файла кавычка не закрыта до самого конца — Pepa не будет менять такой файл: записанное " +
+                "попало бы внутрь этого поля. Исправьте кавычку в строке и запустите снова.");
+        }
+
         var text = new StringBuilder(Text);
         // С конца файла к началу: правка строки не сдвигает границы строк выше.
         foreach (var (row, cells) in changes.Where(c => c.Key <= _records.Count).OrderByDescending(c => c.Key))
@@ -142,14 +186,15 @@ internal sealed class CsvDocument
         }
 
         var result = text.ToString();
+        var encoding = Dialect.WriteEncoding(result);
         try
         {
-            return [.. Dialect.Preamble, .. Dialect.Encoding.GetBytes(result)];
+            return [.. Dialect.Preamble, .. encoding.GetBytes(result)];
         }
         catch (EncoderFallbackException ex)
         {
             throw new NodeInputException(
-                $"Знак «{ex.CharUnknown}» нельзя записать в этот CSV-файл: он в кодировке {Dialect.EncodingName}. " +
+                $"Знак «{ex.CharUnknown}» нельзя записать в этот CSV-файл: он в кодировке {CsvDialect.EncodingTitle(encoding, Dialect.Preamble)}. " +
                 "Сохраните таблицу как «CSV UTF-8» или .xlsx.");
         }
     }
@@ -161,7 +206,7 @@ internal sealed class CsvDocument
         for (var i = 0; i < count; i++)
         {
             parts[i] = cells.TryGetValue(i + 1, out var value)
-                ? Quote(TableValues.Text(Dialect.Stored(value)))
+                ? Quote(CsvDialect.Guard(TableValues.Text(Dialect.Stored(value))))
                 : record is not null && i < record.Fields.Count
                     ? Text[record.Fields[i].Start..record.Fields[i].End]
                     : "";
@@ -211,6 +256,13 @@ internal sealed class CsvDocument
         return Encoding.GetEncoding(1251, EncoderFallback.ExceptionFallback, DecoderFallback.ExceptionFallback);
     });
 
+    /// <summary>Кодировка Windows этого компьютера (в ней Excel открывает и сохраняет CSV без BOM).</summary>
+    internal static readonly Lazy<Encoding> WindowsAnsi = new(() =>
+    {
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        return Encoding.GetEncoding(Encoding.GetEncoding(0).CodePage, EncoderFallback.ExceptionFallback, DecoderFallback.ExceptionFallback);
+    });
+
     /// <summary>Разделитель — тот из «;», «,», табуляции, которого больше в первой непустой строке (вне кавычек).</summary>
     private static char DetectDelimiter(string text)
     {
@@ -233,10 +285,11 @@ internal sealed class CsvDocument
         return best.Value > 0 && best.Value > counts[';'] ? best.Key : ';';
     }
 
-    private static List<CsvRecord> Split(string text, char delimiter)
+    private static (List<CsvRecord> Records, int? UnclosedRow) Split(string text, char delimiter, int start)
     {
         var records = new List<CsvRecord>();
-        var i = 0;
+        int? unclosed = null;
+        var i = start;
         while (i < text.Length)
         {
             var recordStart = i;
@@ -248,6 +301,7 @@ internal sealed class CsvDocument
                 if (i < text.Length && text[i] == '"')
                 {
                     var builder = new StringBuilder();
+                    var closed = false;
                     i++;
                     while (i < text.Length)
                     {
@@ -261,10 +315,16 @@ internal sealed class CsvDocument
                             }
 
                             i++;
+                            closed = true;
                             break;
                         }
 
                         builder.Append(text[i++]);
+                    }
+
+                    if (!closed)
+                    {
+                        unclosed ??= records.Count + 1;
                     }
 
                     // Нестрогий CSV: знаки после закрывающей кавычки — часть значения.
@@ -309,6 +369,6 @@ internal sealed class CsvDocument
             records.Add(new CsvRecord(recordStart, recordEnd, fields));
         }
 
-        return records;
+        return (records, unclosed);
     }
 }

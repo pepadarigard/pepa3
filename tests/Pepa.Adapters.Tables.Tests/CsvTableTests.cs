@@ -76,11 +76,16 @@ public sealed class CsvTableTests : TableTestKit
             ["path"] = "ввод.csv", ["values"] = new JsonObject { ["Текст"] = "@SUM(A1)", ["Число"] = "+7 916" },
         });
 
+        Assert.Equal("Текст;Число\r\n\"'=HYPERLINK(\"\"http://x\"\")\";-5\r\n'@SUM(A1);'+7 916\r\n",
+            (await File.ReadAllTextAsync(P("ввод.csv"))).TrimStart('\uFEFF'));
+        // Апостроф — только защита в файле: Pepa читает и находит значения такими, какими их записала.
         var rows = await ReadRows("ввод.csv");
-        Assert.Equal("'=HYPERLINK(\"http://x\")", rows[0]!["Текст"]!.GetValue<string>());
+        Assert.Equal("=HYPERLINK(\"http://x\")", rows[0]!["Текст"]!.GetValue<string>());
         Assert.Equal("-5", rows[0]!["Число"]!.GetValue<string>());
-        Assert.Equal("'@SUM(A1)", rows[1]!["Текст"]!.GetValue<string>());
-        Assert.Equal("'+7 916", rows[1]!["Число"]!.GetValue<string>());
+        Assert.Equal("+7 916", rows[1]!["Число"]!.GetValue<string>());
+        var found = Ok(await new FindRowNode(Workspace).ExecuteAsync(
+            Context(new { path = "ввод.csv", column = "Число", value = "+7 916", saveTo = "row" }), CancellationToken.None));
+        Assert.Equal("@SUM(A1)", found.VariableUpdates["row"]!["Текст"]!.GetValue<string>());
     }
 
     [Fact]

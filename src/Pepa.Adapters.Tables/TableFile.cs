@@ -8,8 +8,11 @@ namespace Pepa.Adapters.Tables;
 /// <summary>Запись не состоялась, но может получиться позже (файл открыт в Excel, занят, изменился во время записи).</summary>
 internal sealed class TableBusyException(string message) : Exception(message);
 
-/// <summary>Прочитанный файл таблицы: лист, исходные байты и отметка, по которой видно, что файл с тех пор не менялся.</summary>
-internal sealed record TableSnapshot(TableSheet Sheet, byte[] Bytes, (long Length, DateTime Written) Stamp, CsvDocument? Csv);
+/// <summary>Прочитанный файл таблицы: лист и исходные байты (по ним видно, что файл с тех пор не менялся).</summary>
+internal sealed record TableSnapshot(TableSheet Sheet, byte[] Bytes, CsvDocument? Csv)
+{
+    public string Hash => FileState.Sha256(Bytes);
+}
 
 /// <summary>
 /// Файл таблицы в рабочей папке: .xlsx/.xlsm (Excel) или .csv/.tsv. Запись — целиком во временный файл рядом и
@@ -63,27 +66,38 @@ internal sealed class TableFile
         }
 
         byte[] bytes;
-        (long, DateTime) stamp;
-        // Чтение не мешает Excel, в котором таблица может быть открыта.
-        using (var stream = new FileStream(FullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        try
         {
+            // Чтение не мешает Excel, в котором таблица может быть открыта.
+            using var stream = new FileStream(FullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             if (stream.Length > MaxBytes)
             {
                 throw new NodeInputException($"Таблица «{Relative}» больше 10 МБ ({stream.Length / 1024 / 1024} МБ) — разделите её на части.");
             }
 
-            stamp = Stamp();
             bytes = new byte[stream.Length];
             stream.ReadExactly(bytes);
+        }
+        catch (FileNotFoundException)
+        {
+            throw new NodeInputException($"Таблица «{Relative}» не найдена.");
+        }
+        catch (IOException ex)
+        {
+            throw new TableBusyException($"Не удалось прочитать таблицу «{Relative}»: {ex.Message}");
+        }
+        catch (UnauthorizedAccessException)
+        {
+            throw new NodeInputException($"Нет доступа к таблице «{Relative}».");
         }
 
         if (IsCsv)
         {
             var csv = CsvDocument.Parse(bytes, Path.GetExtension(FullPath));
-            return new TableSnapshot(csv.ToSheet(), bytes, stamp, csv);
+            return new TableSnapshot(csv.ToSheet(), bytes, csv);
         }
 
-        return new TableSnapshot(XlsxFormat.Read(bytes, sheet, Relative), bytes, stamp, null);
+        return new TableSnapshot(XlsxFormat.Read(bytes, sheet, Relative), bytes, null);
     }
 
     /// <summary>Пустой лист нового файла (файла ещё нет).</summary>
@@ -94,34 +108,53 @@ internal sealed class TableFile
     /// <summary>
     /// Записать изменённые ячейки (строка → колонка → значение; null — очистить). <paramref name="snapshot"/> — то, что
     /// прочитано перед изменением (null — создать новый файл). Если файл с тех пор изменился, открыт в Excel или занят —
-    /// <see cref="TableBusyException"/>, и файл не тронут.
+    /// <see cref="TableBusyException"/>, и файл не тронут. <paramref name="append"/> — строки дописываются в конец
+    /// (тогда «умная таблица» над ними растягивается на них).
     /// </summary>
     public void Write(TableSnapshot? snapshot, string? sheet, IReadOnlyDictionary<int, IReadOnlyDictionary<int, JsonNode?>> changes,
-        int headerRow)
+        int headerRow, bool append)
     {
         EnsureNotOpenElsewhere();
-        var data = IsCsv
-            ? (snapshot?.Csv ?? CsvDocument.Empty(CsvDialect.New)).With(changes)
-            : XlsxFormat.Write(snapshot?.Bytes, sheet, changes, headerRow, Relative);
-
-        Directory.CreateDirectory(Path.GetDirectoryName(FullPath)!);
-        var temp = Path.Combine(Path.GetDirectoryName(FullPath)!, $"{FileState.TempMarker}{Guid.NewGuid():N}.tmp");
+        byte[] data;
         try
         {
+            data = IsCsv
+                ? (snapshot?.Csv ?? CsvDocument.Empty(CsvDialect.New)).With(changes)
+                : XlsxFormat.Write(snapshot?.Bytes, sheet, changes, headerRow, append, Relative,
+                    macroEnabled: Path.GetExtension(FullPath).Equals(".xlsm", StringComparison.OrdinalIgnoreCase));
+        }
+        catch (Exception ex) when (ex is not (NodeInputException or TableBusyException or OperationCanceledException))
+        {
+            // Файл ещё не тронут: изменённая таблица собирается в памяти.
+            throw new NodeInputException($"Не удалось подготовить изменённую таблицу «{Relative}»: {ex.Message}");
+        }
+
+        var folder = Path.GetDirectoryName(FullPath)!;
+        var temp = Path.Combine(folder, $"{FileState.TempMarker}{Guid.NewGuid():N}.tmp");
+        var backup = Path.Combine(folder, $"{FileState.TempMarker}{Guid.NewGuid():N}.tmp");
+        try
+        {
+            Directory.CreateDirectory(folder);
             using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
                 stream.Write(data);
                 stream.Flush(flushToDisk: true);
             }
 
-            if (snapshot is null ? File.Exists(FullPath) : !File.Exists(FullPath) || Stamp() != snapshot.Stamp)
+            if (snapshot is null ? File.Exists(FullPath) : !File.Exists(FullPath) || FileState.Sha256(FullPath) != FileState.Sha256(snapshot.Bytes))
             {
                 throw new TableBusyException($"Таблица «{Relative}» изменилась, пока Pepa её записывала.");
             }
 
             EnsureNotOpenElsewhere();
-            // Одно переименование: на Windows не проходит, пока файл открыт программой без разрешения на замену.
-            File.Move(temp, FullPath, overwrite: snapshot is not null);
+            if (snapshot is null)
+            {
+                File.Move(temp, FullPath, overwrite: false);
+            }
+            else
+            {
+                Replace(temp, backup);
+            }
         }
         catch (IOException ex)
         {
@@ -129,21 +162,55 @@ internal sealed class TableFile
         }
         catch (UnauthorizedAccessException)
         {
-            throw new NodeInputException($"Нет права изменить «{Relative}» (файл только для чтения или защищён).");
+            // На Windows замена файла, открытого другой программой, — тоже «нет доступа»: это можно повторить позже.
+            if (File.Exists(FullPath) && (File.GetAttributes(FullPath) & FileAttributes.ReadOnly) != 0)
+            {
+                throw new NodeInputException($"Таблица «{Relative}» только для чтения — снимите этот признак в свойствах файла.");
+            }
+
+            throw new TableBusyException($"Нет доступа к таблице «{Relative}»: возможно, она открыта в другой программе.");
         }
         finally
         {
-            try
+            TryDelete(temp);
+            // Прежняя версия удаляется, только если таблица на месте (иначе в ней — единственная копия).
+            if (File.Exists(FullPath))
             {
-                File.Delete(temp);
+                TryDelete(backup);
             }
-            catch (IOException)
-            {
-                // Временный файл помечен и не попадает в списки файлов.
-            }
-            catch (UnauthorizedAccessException)
-            {
-            }
+        }
+    }
+
+    /// <summary>
+    /// Замена с сохранением свойств файла (права, атрибуты, отметка «загружено из интернета» — Office по ней не
+    /// включает макросы). Если замена не удалась на полпути и таблица осталась под именем прежней версии, она
+    /// возвращается на место.
+    /// </summary>
+    private void Replace(string temp, string backup)
+    {
+        try
+        {
+            File.Replace(temp, FullPath, backup, ignoreMetadataErrors: true);
+        }
+        catch (Exception) when (!File.Exists(FullPath) && File.Exists(backup))
+        {
+            File.Move(backup, FullPath);
+            throw;
+        }
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (IOException)
+        {
+            // Временный файл помечен и не попадает в списки файлов.
+        }
+        catch (UnauthorizedAccessException)
+        {
         }
     }
 
@@ -164,12 +231,6 @@ internal sealed class TableFile
                     $"программа при сохранении сотрёт то, что запишет Pepa. Если программа уже закрыта, а «{marker}» остался после сбоя, удалите его.");
             }
         }
-    }
-
-    private (long, DateTime) Stamp()
-    {
-        var info = new FileInfo(FullPath);
-        return (info.Length, info.LastWriteTimeUtc);
     }
 
     /// <summary>

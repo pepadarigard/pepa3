@@ -106,21 +106,34 @@ public sealed class XlsxTableTests : TableTestKit
     }
 
     [Fact]
-    public async Task Verification_finds_the_row_only_among_rows_added_after_the_step_started()
+    public async Task Verification_is_sure_only_about_a_unique_new_row()
     {
         CreateBook(Book);
         var node = new AppendRowNode(Workspace);
-        var input = new JsonObject { ["path"] = Book, ["values"] = new JsonObject { ["Имя"] = "Анна", ["Сумма"] = 100.5 } };
-        var context = Context(input);
-        context = context with { Checkpoint = await node.PrepareAsync(context, CancellationToken.None) };
+        async Task<NodeExecutionContext> Prepared(JsonObject values)
+        {
+            var context = Context(new JsonObject { ["path"] = Book, ["values"] = values });
+            return context with { Checkpoint = await node.PrepareAsync(context, CancellationToken.None) };
+        }
 
-        // Такая же строка уже есть выше (строка 2) — но она была до шага: строка не добавлена.
-        Assert.Equal(VerificationOutcome.NotDone, (await node.VerifyAsync(context, CancellationToken.None)).Outcome);
-        Ok(await node.ExecuteAsync(context, CancellationToken.None));
-        Assert.Equal(VerificationOutcome.Done, (await node.VerifyAsync(context, CancellationToken.None)).Outcome);
-        // Кто-то добавил такую же строку ещё раз — чья из них, неясно.
-        Ok(await node.ExecuteAsync(context with { Checkpoint = new JsonObject { ["exists"] = true, ["lastRow"] = 4 } }, CancellationToken.None));
-        Assert.Equal(VerificationOutcome.Inconclusive, (await node.VerifyAsync(context, CancellationToken.None)).Outcome);
+        // Таблица не менялась с начала шага — строка точно не добавлена.
+        var vera = await Prepared(new JsonObject { ["Имя"] = "Вера", ["Сумма"] = 7 });
+        Assert.Equal(VerificationOutcome.NotDone, (await node.VerifyAsync(vera, CancellationToken.None)).Outcome);
+        Ok(await node.ExecuteAsync(vera, CancellationToken.None));
+        Assert.Equal(VerificationOutcome.Done, (await node.VerifyAsync(vera, CancellationToken.None)).Outcome);
+
+        // Такая же строка уже была выше (строка 2): свою от чужой не отличить — решает пользователь.
+        var anna = await Prepared(new JsonObject { ["Имя"] = "Анна", ["Сумма"] = 100.5 });
+        Ok(await node.ExecuteAsync(anna, CancellationToken.None));
+        Assert.Equal(VerificationOutcome.Inconclusive, (await node.VerifyAsync(anna, CancellationToken.None)).Outcome);
+
+        // Таблица изменилась, а строки нет (например, её переставили) — не «не выполнено», иначе была бы вторая.
+        var gleb = await Prepared(new JsonObject { ["Имя"] = "Глеб" });
+        Ok(await new UpdateRowNode(Workspace).ExecuteAsync(Context(new JsonObject
+        {
+            ["path"] = Book, ["column"] = "Имя", ["value"] = "Борис", ["values"] = new JsonObject { ["Сумма"] = 1 },
+        }) with { Checkpoint = new JsonObject { ["row"] = 3 } }, CancellationToken.None));
+        Assert.Equal(VerificationOutcome.Inconclusive, (await node.VerifyAsync(gleb, CancellationToken.None)).Outcome);
     }
 
     [Fact]

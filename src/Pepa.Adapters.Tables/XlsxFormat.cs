@@ -31,7 +31,10 @@ internal static partial class XlsxFormat
             return JsonValue.Create(digits);
         }
 
-        return value.DeepClone();
+        // Перевод строки в ячейке Excel — «\n» (файл XML хранит «\r\n» как «\n»).
+        return value.GetValueKind() == JsonValueKind.String
+            ? JsonValue.Create(value.GetValue<string>().Replace("\r\n", "\n").Replace('\r', '\n'))
+            : value.DeepClone();
     }
 
     public static string NewSheetName(string? name)
@@ -78,7 +81,12 @@ internal static partial class XlsxFormat
             {
                 column = Column(cell) ?? column + 1;
                 var style = cell.StyleIndex?.Value is { } s && s < formats.Length ? formats[s] : 0u;
-                result.Set(rowIndex, column, Value(cell, shared, IsDate(style, custom), date1904));
+                var value = Value(cell, shared, Kind(style, custom), date1904, out var serial);
+                result.Set(rowIndex, column, value);
+                if (serial is { } number && value is not null)
+                {
+                    result.Serials[(rowIndex, column)] = number;
+                }
             }
         }
 
@@ -90,12 +98,12 @@ internal static partial class XlsxFormat
     /// строкой данных берёт её оформление (формат даты, границы), под заголовком — нет. Заменить формулу нельзя.
     /// </summary>
     public static byte[] Write(byte[]? original, string? sheetName, IReadOnlyDictionary<int, IReadOnlyDictionary<int, JsonNode?>> changes,
-        int headerRow, string relative)
+        int headerRow, bool append, string relative, bool macroEnabled)
     {
         using var stream = new MemoryStream();
         if (original is null)
         {
-            CreateBook(stream, NewSheetName(sheetName));
+            CreateBook(stream, NewSheetName(sheetName), macroEnabled);
         }
         else
         {
@@ -108,7 +116,13 @@ internal static partial class XlsxFormat
             var (workbook, _, part) = FindSheet(document, sheetName, relative);
             var worksheet = part.Worksheet ?? throw Broken(relative);
             var data = worksheet.GetFirstChild<SheetData>() ?? throw Broken(relative);
+            if (worksheet.GetFirstChild<SheetProtection>() is { Sheet.Value: true })
+            {
+                throw new NodeInputException($"Лист «{SheetTitle(document, sheetName)}» таблицы «{relative}» защищён от изменений — снимите защиту в Excel.");
+            }
+
             NumberRowsAndCells(data);
+            var arrays = ArrayRanges(data);
             foreach (var (row, cells) in changes.OrderBy(c => c.Key))
             {
                 if (row is < 1 or > TableValues.MaxRow)
@@ -121,7 +135,7 @@ internal static partial class XlsxFormat
                 foreach (var (column, value) in cells.OrderBy(c => c.Key))
                 {
                     var cell = CellAt(rowElement, column, out var created);
-                    if (cell.CellFormula is not null)
+                    if (cell.CellFormula is not null || arrays.Any(a => a.Contains(row, column)))
                     {
                         throw new NodeInputException($"В ячейке {cell.CellReference} таблицы «{relative}» формула — Pepa не заменяет формулы.");
                     }
@@ -136,7 +150,10 @@ internal static partial class XlsxFormat
             }
 
             UpdateDimension(worksheet, data);
-            ExtendTables(part, changes.Keys);
+            if (append)
+            {
+                ExtendTables(part, changes.Keys);
+            }
             // Формулы, которые считают по этим ячейкам (итог, счётчик), Excel пересчитает при открытии.
             var book = workbook.Workbook ?? throw Broken(relative);
             book.CalculationProperties ??= new CalculationProperties();
@@ -146,17 +163,49 @@ internal static partial class XlsxFormat
         return stream.ToArray();
     }
 
+    /// <summary>Распакованная часть книги больше — не читается: 10 МБ сжатого файла могли бы развернуться в гигабайты.</summary>
+    private const long MaxCharactersInPart = 100_000_000;
+
     private static SpreadsheetDocument OpenDocument(Stream stream, bool editable, string relative)
     {
         try
         {
-            return SpreadsheetDocument.Open(stream, editable);
+            return SpreadsheetDocument.Open(stream, editable, new OpenSettings { MaxCharactersInPart = MaxCharactersInPart });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            throw new NodeInputException($"«{relative}» не открывается как таблица Excel: файл повреждён, защищён паролем или это другой формат.");
+            throw new NodeInputException(
+                $"«{relative}» не открывается как таблица Excel: файл повреждён, защищён паролем, слишком велик в распакованном виде или это другой формат.");
         }
     }
+
+    private static string SheetTitle(SpreadsheetDocument document, string? name) =>
+        name?.Trim() is { Length: > 0 } wanted ? wanted : document.WorkbookPart?.Workbook?.Sheets?.Elements<Sheet>().FirstOrDefault()?.Name?.Value ?? "";
+
+    /// <summary>Диапазон ячеек (строки и колонки с 1).</summary>
+    private sealed record Range(int Top, int Left, int Bottom, int Right)
+    {
+        public bool Contains(int row, int column) => row >= Top && row <= Bottom && column >= Left && column <= Right;
+
+        public static Range? Parse(string? reference)
+        {
+            if (reference?.Split(':') is not { Length: 1 or 2 } parts || ColumnOf(parts[0]) is not { } left || RowOf(parts[0]) is not { } top)
+            {
+                return null;
+            }
+
+            var end = parts[^1];
+            return ColumnOf(end) is { } right && RowOf(end) is { } bottom ? new Range(top, left, bottom, right) : null;
+        }
+    }
+
+    /// <summary>Ячейки формул массива (и «разливающихся» динамических): их значения считает Excel, писать в них нельзя.</summary>
+    private static List<Range> ArrayRanges(SheetData data) =>
+        data.Descendants<CellFormula>()
+            .Where(f => f.FormulaType?.Value == CellFormulaValues.Array)
+            .Select(f => Range.Parse(f.Reference?.Value))
+            .OfType<Range>()
+            .ToList();
 
     private static NodeInputException Broken(string relative) => new($"Таблица «{relative}» повреждена: в ней нет данных листа.");
 
@@ -184,9 +233,11 @@ internal static partial class XlsxFormat
         return (workbook, sheet, part);
     }
 
-    private static void CreateBook(Stream stream, string sheetName)
+    private static void CreateBook(Stream stream, string sheetName, bool macroEnabled)
     {
-        using var document = SpreadsheetDocument.Create(stream, SpreadsheetDocumentType.Workbook);
+        // У .xlsm — свой тип книги: иначе Excel не откроет файл («формат не соответствует расширению»).
+        using var document = SpreadsheetDocument.Create(stream,
+            macroEnabled ? SpreadsheetDocumentType.MacroEnabledWorkbook : SpreadsheetDocumentType.Workbook);
         var workbook = document.AddWorkbookPart();
         workbook.Workbook = new Workbook();
         var worksheet = workbook.AddNewPart<WorksheetPart>();
@@ -195,14 +246,35 @@ internal static partial class XlsxFormat
     }
 
     private static string ItemText(SharedStringItem item) =>
-        item.Text?.Text ?? string.Concat(item.Elements<Run>().Select(r => r.Text?.Text));
+        Decode(item.Text?.Text ?? string.Concat(item.Elements<Run>().Select(r => r.Text?.Text)));
 
-    private static JsonNode? Value(Cell cell, string[] shared, bool date, bool date1904)
+    /// <summary>Знаки, которые Excel хранит как «_x000D_» (возврат каретки и другие служебные), — обратно в знаки.</summary>
+    private static string Decode(string text) =>
+        text.Contains("_x", StringComparison.Ordinal)
+            ? Escape().Replace(text, m => ((char)int.Parse(m.Groups[1].Value, NumberStyles.HexNumber, CultureInfo.InvariantCulture)).ToString())
+            : text;
+
+    /// <summary>Текст, похожий на такую запись («_x0041_»), записывается так, чтобы Excel не превратил его в знак.</summary>
+    private static string Encode(string text) =>
+        text.Contains("_x", StringComparison.Ordinal) ? Escape().Replace(text, m => "_x005F" + m.Value) : text;
+
+    [GeneratedRegex("_x([0-9A-Fa-f]{4})_")]
+    private static partial Regex Escape();
+
+    private enum NumberKind
     {
+        Number,
+        Date,
+        Duration,
+    }
+
+    private static JsonNode? Value(Cell cell, string[] shared, NumberKind kind, bool date1904, out double? serial)
+    {
+        serial = null;
         var type = cell.DataType?.Value;
         if (type == CellValues.InlineString)
         {
-            return Text(cell.InlineString is { } inline ? inline.Text?.Text ?? string.Concat(inline.Elements<Run>().Select(r => r.Text?.Text)) : null);
+            return Text(cell.InlineString is { } inline ? Decode(inline.Text?.Text ?? string.Concat(inline.Elements<Run>().Select(r => r.Text?.Text))) : null);
         }
 
         var raw = cell.CellValue?.Text;
@@ -225,7 +297,7 @@ internal static partial class XlsxFormat
 
         if (type == CellValues.String || type == CellValues.Error || type == CellValues.Date)
         {
-            return Text(raw);
+            return Text(Decode(raw));
         }
 
         if (!double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var number) || !double.IsFinite(number))
@@ -233,8 +305,9 @@ internal static partial class XlsxFormat
             return Text(raw);
         }
 
-        if (date && Date(number, date1904) is { } text)
+        if ((kind == NumberKind.Duration ? Duration(number) : kind == NumberKind.Date ? Date(number, date1904) : null) is { } text)
         {
+            serial = number;
             return JsonValue.Create(text);
         }
 
@@ -248,7 +321,13 @@ internal static partial class XlsxFormat
     /// <summary>Дата Excel (число дней) — текст ISO: дата, дата и время или только время.</summary>
     private static string? Date(double serial, bool date1904)
     {
-        var days = date1904 ? serial + 1462 : serial;
+        // Excel считает 1900 год високосным: дни до несуществующего 29 февраля 1900 (число 60) идут на день раньше.
+        if (!date1904 && serial >= 60 && serial < 61)
+        {
+            return null;
+        }
+
+        var days = date1904 ? serial + 1462 : serial >= 1 && serial < 60 ? serial + 1 : serial;
         if (days is < 0 or > 2_958_465)
         {
             return null;
@@ -266,16 +345,49 @@ internal static partial class XlsxFormat
             : value.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture);
     }
 
-    /// <summary>Формат ячейки — дата или время: встроенные форматы дат Excel или свой формат с д/м/г/ч/с.</summary>
-    private static bool IsDate(uint format, Dictionary<uint, string> custom)
+    /// <summary>Длительность ([ч]:мм:сс) — текст «36:00:00»: часов может быть больше суток.</summary>
+    private static string? Duration(double serial)
+    {
+        if (serial is < 0 or > 1_000_000)
+        {
+            return null;
+        }
+
+        var seconds = (long)Math.Round(serial * 86_400);
+        return $"{seconds / 3600}:{seconds / 60 % 60:00}:{seconds % 60:00}";
+    }
+
+    /// <summary>
+    /// Формат ячейки: дата или время (встроенные форматы дат Excel или свой с д/м/г/ч/с), длительность ([ч]:мм) или
+    /// число.
+    /// </summary>
+    private static NumberKind Kind(uint format, Dictionary<uint, string> custom)
     {
         if (custom.TryGetValue(format, out var code))
         {
-            return DateLetters().IsMatch(FormatNoise().Replace(code, ""));
+            var plain = Quoted().Replace(code, "");
+            if (Elapsed().IsMatch(plain))
+            {
+                return NumberKind.Duration;
+            }
+
+            return DateLetters().IsMatch(FormatNoise().Replace(code, "")) ? NumberKind.Date : NumberKind.Number;
         }
 
-        return format is >= 14 and <= 22 or >= 27 and <= 36 or >= 45 and <= 47 or >= 50 and <= 58;
+        return format switch
+        {
+            46 => NumberKind.Duration,
+            >= 14 and <= 22 or >= 27 and <= 36 or 45 or 47 or >= 50 and <= 58 => NumberKind.Date,
+            _ => NumberKind.Number,
+        };
     }
+
+    [GeneratedRegex("\"[^\"]*\"|\\\\.")]
+    private static partial Regex Quoted();
+
+    /// <summary>Прошедшее время: [h], [hh], [m], [s].</summary>
+    [GeneratedRegex(@"\[(h+|m+|s+)\]", RegexOptions.IgnoreCase)]
+    private static partial Regex Elapsed();
 
     /// <summary>Текст в кавычках, экранированные знаки и [цвет/язык] — не часть формата даты.</summary>
     [GeneratedRegex("\"[^\"]*\"|\\\\.|\\[[^\\]]*\\]")]
@@ -376,7 +488,7 @@ internal static partial class XlsxFormat
                 return;
             case JsonValueKind.String:
                 cell.DataType = CellValues.InlineString;
-                cell.InlineString = new InlineString(new Text(value.GetValue<string>()) { Space = SpaceProcessingModeValues.Preserve });
+                cell.InlineString = new InlineString(new Text(Encode(value.GetValue<string>())) { Space = SpaceProcessingModeValues.Preserve });
                 return;
             case JsonValueKind.Number:
                 cell.CellValue = new CellValue(TableValues.Text(value));

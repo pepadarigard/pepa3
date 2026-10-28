@@ -43,8 +43,11 @@ public sealed class AppendRowNode(IWorkspace workspace) : INodeExecutor
             return ValueTask.FromResult<JsonObject?>(new JsonObject { ["exists"] = false });
         }
 
-        var sheet = file.Read(context.GetString("sheet")).Sheet;
-        return ValueTask.FromResult<JsonObject?>(new JsonObject { ["exists"] = true, ["lastRow"] = sheet.LastRow });
+        var snapshot = file.Read(context.GetString("sheet"));
+        return ValueTask.FromResult<JsonObject?>(new JsonObject
+        {
+            ["exists"] = true, ["lastRow"] = snapshot.Sheet.LastRow, ["hash"] = snapshot.Hash,
+        });
     }
 
     public async ValueTask<NodeResult> ExecuteAsync(NodeExecutionContext context, CancellationToken cancellationToken)
@@ -58,12 +61,21 @@ public sealed class AppendRowNode(IWorkspace workspace) : INodeExecutor
 
         var header = context.GetBoolean("header", true);
         var sheetName = context.GetString("sheet");
-        var snapshot = file.Exists ? file.Read(sheetName) : null;
+        TableSnapshot? snapshot;
+        try
+        {
+            snapshot = file.Exists ? file.Read(sheetName) : null;
+        }
+        catch (TableBusyException ex)
+        {
+            return NodeResult.Fail(ex.Message);
+        }
+
         var sheet = snapshot?.Sheet ?? file.New(sheetName);
         var (row, headerRow, changes) = Plan(sheet, header, context.Input["values"]);
         try
         {
-            file.Write(snapshot, sheetName, changes, headerRow);
+            file.Write(snapshot, sheetName, changes, headerRow, append: true);
         }
         catch (TableBusyException ex)
         {
@@ -139,6 +151,12 @@ public sealed class AppendRowNode(IWorkspace workspace) : INodeExecutor
         return (row, headerRow, changes);
     }
 
+    /// <summary>
+    /// Добавлена ли строка. «Не выполнено» — только если таблица с начала шага не изменилась вовсе (иначе строку могли
+    /// переставить при сортировке или пересохранить по-другому — и повтор добавил бы её второй раз). «Выполнено» — если
+    /// среди строк, появившихся после начала шага, ровно одна такая, а выше таких не было: одинаковые строки (свою от
+    /// чужой) проверка не различает, тогда решает пользователь.
+    /// </summary>
     public ValueTask<VerificationResult> VerifyAsync(NodeExecutionContext context, CancellationToken cancellationToken)
     {
         var file = TableFile.Open(workspace, context.GetString("path"));
@@ -150,12 +168,26 @@ public sealed class AppendRowNode(IWorkspace workspace) : INodeExecutor
                 : VerificationResult.NotDone($"таблицы «{file.Relative}» нет — строка не добавлена."));
         }
 
-        TableSheet sheet;
+        TableSnapshot snapshot;
+        try
+        {
+            snapshot = file.Read(context.GetString("sheet"));
+        }
+        catch (Exception ex) when (ex is NodeInputException or TableBusyException)
+        {
+            return ValueTask.FromResult(VerificationResult.Inconclusive($"таблицу не удалось сверить: {ex.Message}"));
+        }
+
+        if (existed && snapshot.Hash == context.Checkpoint?.GetString("hash"))
+        {
+            return ValueTask.FromResult(VerificationResult.NotDone($"таблица «{file.Relative}» не менялась с начала шага — строка не добавлена."));
+        }
+
+        var sheet = snapshot.Sheet;
         IReadOnlyList<(TableColumn Column, JsonNode? Value)> cells;
         TableLayout layout;
         try
         {
-            sheet = file.Read(context.GetString("sheet")).Sheet;
             layout = TableLayout.Of(sheet, context.GetBoolean("header", true));
             cells = layout.Resolve(context.Input["values"]);
         }
@@ -165,22 +197,18 @@ public sealed class AppendRowNode(IWorkspace workspace) : INodeExecutor
         }
 
         var before = existed ? (int)(context.Checkpoint?.GetNumber("lastRow") ?? 0) : 0;
-        if (sheet.LastRow < before)
+        var filled = cells.Where(c => !TableValues.IsEmpty(c.Value)).ToList();
+        var same = layout.DataRows.Where(r => filled.All(c => sheet.Holds(r, c.Column.Index, c.Value))).ToList();
+        var added = same.Where(r => r > before).ToList();
+        if (added is [var row] && same.Count == 1)
         {
-            return ValueTask.FromResult(VerificationResult.Inconclusive($"в таблице «{file.Relative}» стало меньше строк, чем до действия."));
+            return ValueTask.FromResult(VerificationResult.Done($"строка {row} в «{file.Relative}» уже добавлена."));
         }
 
-        var filled = cells.Where(c => !TableValues.IsEmpty(c.Value)).ToList();
-        var matches = layout.DataRows
-            .Where(r => r > before && filled.All(c => TableValues.Same(sheet.Cell(r, c.Column.Index), sheet.Stored(c.Value))))
-            .ToList();
-        return ValueTask.FromResult(matches.Count switch
-        {
-            0 => VerificationResult.NotDone($"после строки {before} такой строки в «{file.Relative}» нет."),
-            1 => VerificationResult.Done($"строка {matches[0]} в «{file.Relative}» уже добавлена."),
-            _ => VerificationResult.Inconclusive(
-                $"после строки {before} в «{file.Relative}» таких строк несколько ({TableNodes.RowList(matches)}) — какая из них добавлена этим шагом, неясно."),
-        });
+        return ValueTask.FromResult(VerificationResult.Inconclusive(added.Count == 0
+            ? $"таблица «{file.Relative}» изменилась после начала шага, а такой строки после строки {before} нет — " +
+              "добавлена ли она (и, например, переставлена сортировкой), неясно."
+            : $"в «{file.Relative}» таких строк несколько ({TableNodes.RowList(same)}) — добавил ли эту строку этот шаг, неясно."));
     }
 }
 
@@ -220,10 +248,10 @@ public sealed class UpdateRowNode(IWorkspace workspace) : INodeExecutor
     private Target Find(NodeExecutionContext context)
     {
         var file = TableFile.Open(workspace, context.GetString("path"));
+        var value = TableNodes.RequireValue(context);
         var snapshot = file.Read(context.GetString("sheet"));
         var layout = TableLayout.Of(snapshot.Sheet, context.GetBoolean("header", true));
         var column = TableNodes.RequireColumn(layout, context.GetString("column"), file);
-        var value = context.GetString("value") ?? "";
         return new Target(file, snapshot, layout, column, value, layout.Match(column, value));
     }
 
@@ -253,7 +281,16 @@ public sealed class UpdateRowNode(IWorkspace workspace) : INodeExecutor
             return NodeResult.Fail($"Не дождались очереди к таблице «{file.Relative}» — строка не изменена.");
         }
 
-        var target = Find(context);
+        Target target;
+        try
+        {
+            target = Find(context);
+        }
+        catch (TableBusyException ex)
+        {
+            return NodeResult.Fail(ex.Message);
+        }
+
         var sheet = target.Snapshot.Sheet;
         var where = TableNodes.Where(target.Column, target.Value);
         switch (target.Rows.Count)
@@ -276,7 +313,7 @@ public sealed class UpdateRowNode(IWorkspace workspace) : INodeExecutor
 
         var cells = target.Layout.Resolve(context.Input["values"]);
         var output = TableNodes.Output(file, sheet, ("found", 1), ("row", row));
-        if (cells.All(c => TableValues.Same(sheet.Cell(row, c.Column.Index), sheet.Stored(c.Value))))
+        if (cells.All(c => sheet.Holds(row, c.Column.Index, c.Value)))
         {
             return NodeResult.Ok(Ports.Out, new Dictionary<string, JsonNode?>(), output, $"В строке {row} уже эти значения.");
         }
@@ -285,7 +322,7 @@ public sealed class UpdateRowNode(IWorkspace workspace) : INodeExecutor
         {
             file.Write(target.Snapshot, context.GetString("sheet"),
                 new Dictionary<int, IReadOnlyDictionary<int, JsonNode?>> { [row] = cells.ToDictionary(c => c.Column.Index, c => c.Value) },
-                target.Layout.HeaderRow);
+                target.Layout.HeaderRow, append: false);
         }
         catch (TableBusyException ex)
         {
@@ -295,6 +332,10 @@ public sealed class UpdateRowNode(IWorkspace workspace) : INodeExecutor
         return NodeResult.Ok(Ports.Out, new Dictionary<string, JsonNode?>(), output, $"Изменена строка {row}.");
     }
 
+    /// <summary>
+    /// Изменена ли строка. Сначала — та ли это ещё запись: в строке по-прежнему искомое значение (или новое, если
+    /// меняется сама колонка поиска); иначе таблицу отсортировали или изменили, и ответ — за пользователем.
+    /// </summary>
     public ValueTask<VerificationResult> VerifyAsync(NodeExecutionContext context, CancellationToken cancellationToken)
     {
         if (context.Checkpoint?.GetNumber("row") is not { } planned)
@@ -304,26 +345,39 @@ public sealed class UpdateRowNode(IWorkspace workspace) : INodeExecutor
 
         var row = (int)planned;
         TableSheet sheet;
+        TableColumn column;
         IReadOnlyList<(TableColumn Column, JsonNode? Value)> cells;
         try
         {
             var file = TableFile.Open(workspace, context.GetString("path"));
             sheet = file.Read(context.GetString("sheet")).Sheet;
-            cells = TableLayout.Of(sheet, context.GetBoolean("header", true)).Resolve(context.Input["values"]);
+            var layout = TableLayout.Of(sheet, context.GetBoolean("header", true));
+            column = TableNodes.RequireColumn(layout, context.GetString("column"), file);
+            cells = layout.Resolve(context.Input["values"]);
         }
-        catch (NodeInputException ex)
+        catch (Exception ex) when (ex is NodeInputException or TableBusyException)
         {
             return ValueTask.FromResult(VerificationResult.Inconclusive($"таблицу не удалось сверить: {ex.Message}"));
         }
 
-        var before = context.Checkpoint?["before"] as JsonObject;
-        string Key(TableColumn column) => column.Index.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        if (cells.All(c => TableValues.Same(sheet.Cell(row, c.Column.Index), sheet.Stored(c.Value))))
+        var newKey = cells.FirstOrDefault(c => c.Column.Index == column.Index);
+        var sameRecord = TableValues.Matches(sheet.Cell(row, column.Index), context.GetString("value") ?? "") ||
+                         (newKey.Column is not null && sheet.Holds(row, column.Index, newKey.Value));
+        if (!sameRecord)
+        {
+            return ValueTask.FromResult(VerificationResult.Inconclusive(
+                $"в строке {row} уже другая запись (нет «{(context.GetString("value") ?? "").Trim()}» в колонке «{column.Name}») — " +
+                "таблицу, возможно, отсортировали или изменили."));
+        }
+
+        if (cells.All(c => sheet.Holds(row, c.Column.Index, c.Value)))
         {
             return ValueTask.FromResult(VerificationResult.Done($"в строке {row} уже новые значения."));
         }
 
-        return ValueTask.FromResult(before is not null && cells.All(c => TableValues.Same(sheet.Cell(row, c.Column.Index), before[Key(c.Column)]))
+        var before = context.Checkpoint?["before"] as JsonObject;
+        string Key(TableColumn c) => c.Index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        return ValueTask.FromResult(before is not null && cells.All(c => TableValues.Holds(sheet.Cell(row, c.Column.Index), before[Key(c.Column)]))
             ? VerificationResult.NotDone($"в строке {row} прежние значения.")
             : VerificationResult.Inconclusive($"в строке {row} не прежние и не новые значения — её, возможно, изменил кто-то ещё."));
     }

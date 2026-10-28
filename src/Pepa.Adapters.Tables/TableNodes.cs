@@ -80,6 +80,15 @@ public static class TableNodes
 
     internal static string Where(TableColumn column, string value) => $"«{column.Name}» = «{value.Trim()}»";
 
+    /// <summary>
+    /// Искомое значение. Пустое — ошибка: так получается из опечатки в подстановке ({{ vars.row.Логн }}), и иначе нашлась бы
+    /// строка с пустой ячейкой (например, «Итого»).
+    /// </summary>
+    internal static string RequireValue(NodeExecutionContext context) =>
+        context.GetString("value") is { } value && value.Trim().Length > 0
+            ? value
+            : throw new NodeInputException("Значение для поиска пустое — проверьте подстановку в поле «Значение в ней».");
+
     internal static string RowList(IReadOnlyList<int> rows) =>
         string.Join(", ", rows.Take(10)) + (rows.Count > 10 ? " …" : "");
 }
@@ -117,7 +126,16 @@ public sealed class ReadTableNode(IWorkspace workspace) : INodeExecutor
     public ValueTask<NodeResult> ExecuteAsync(NodeExecutionContext context, CancellationToken cancellationToken)
     {
         var file = TableFile.Open(workspace, context.GetString("path"));
-        var sheet = file.Read(context.GetString("sheet")).Sheet;
+        TableSheet sheet;
+        try
+        {
+            sheet = file.Read(context.GetString("sheet")).Sheet;
+        }
+        catch (TableBusyException ex)
+        {
+            return ValueTask.FromResult<NodeResult>(NodeResult.Fail(ex.Message));
+        }
+
         var layout = TableLayout.Of(sheet, context.GetBoolean("header", true));
         if (layout.DataRows.Count > TableValues.MaxRows)
         {
@@ -171,10 +189,25 @@ public sealed class FindRowNode(IWorkspace workspace) : INodeExecutor
     public ValueTask<NodeResult> ExecuteAsync(NodeExecutionContext context, CancellationToken cancellationToken)
     {
         var file = TableFile.Open(workspace, context.GetString("path"));
-        var sheet = file.Read(context.GetString("sheet")).Sheet;
+        var value = TableNodes.RequireValue(context);
+        var which = context.GetString("which") ?? "only";
+        if (which is not ("only" or "first" or "all"))
+        {
+            throw new NodeInputException($"«{which}» — не вариант поля «Если подходит несколько строк».");
+        }
+
+        TableSheet sheet;
+        try
+        {
+            sheet = file.Read(context.GetString("sheet")).Sheet;
+        }
+        catch (TableBusyException ex)
+        {
+            return ValueTask.FromResult<NodeResult>(NodeResult.Fail(ex.Message));
+        }
+
         var layout = TableLayout.Of(sheet, context.GetBoolean("header", true));
         var column = TableNodes.RequireColumn(layout, context.GetString("column"), file);
-        var value = context.GetString("value") ?? "";
         var rows = layout.Match(column, value);
         var where = TableNodes.Where(column, value);
         if (rows.Count == 0)
@@ -183,7 +216,6 @@ public sealed class FindRowNode(IWorkspace workspace) : INodeExecutor
                 TableNodes.Output(file, sheet, ("found", 0)), $"Строка с {where} не найдена."));
         }
 
-        var which = context.GetString("which") ?? "only";
         if (rows.Count > 1 && which == "only")
         {
             return ValueTask.FromResult<NodeResult>(NodeResult.Fail(

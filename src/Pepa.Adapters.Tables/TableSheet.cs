@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using System.Xml;
 using Pepa.Core.Nodes;
 
 namespace Pepa.Adapters.Tables;
@@ -15,6 +16,9 @@ internal sealed class TableSheet
     public required string Name { get; init; }
 
     public SortedDictionary<int, SortedDictionary<int, JsonNode>> Rows { get; } = [];
+
+    /// <summary>Число Excel под датой или длительностью (ячейка показана текстом): по нему сверяется записанное число.</summary>
+    public Dictionary<(int Row, int Column), double> Serials { get; } = [];
 
     /// <summary>Как записывать значения в этот файл (для CSV — разделитель, кодировка, дробная часть).</summary>
     public CsvDialect? Csv { get; init; }
@@ -47,14 +51,22 @@ internal sealed class TableSheet
 
     /// <summary>Как значение прочитается из этого файла после записи (CSV хранит только текст).</summary>
     public JsonNode? Stored(JsonNode? value) => Csv is { } csv ? csv.Stored(value) : XlsxFormat.Stored(value);
+
+    /// <summary>В ячейке ровно то, что запишет Pepa (<see cref="Stored"/>): текст — как есть, число — по значению.</summary>
+    public bool Holds(int row, int column, JsonNode? value) =>
+        TableValues.Holds(Cell(row, column), Stored(value), Serials.TryGetValue((row, column), out var serial) ? serial : null);
 }
 
-/// <summary>Колонка таблицы: название (из строки заголовков или буква) и номер.</summary>
-internal sealed record TableColumn(string Name, int Index);
+/// <summary>
+/// Колонка таблицы: имя в строке данных (название из строки заголовков, буква колонки или «название (буква)» у
+/// повторяющегося названия), номер и само название из заголовка (null — его нет).
+/// </summary>
+internal sealed record TableColumn(string Name, int Index, string? Header = null);
 
 /// <summary>
 /// Разметка листа: строка заголовков (0 — без заголовков), колонки и строки с данными. Названия колонок — из первой
-/// непустой строки; пустое название — буква колонки, повторное — с номером: «Имя (2)».
+/// непустой строки; колонка без названия называется буквой; повторяющееся название — неоднозначно: обратиться к такой
+/// колонке по названию нельзя (только «Имя (B)»).
 /// </summary>
 internal sealed class TableLayout
 {
@@ -74,40 +86,49 @@ internal sealed class TableLayout
     public static TableLayout Of(TableSheet sheet, bool header)
     {
         var headerRow = header && sheet.Rows.Count > 0 ? sheet.Rows.Keys.First() : 0;
-        var columns = new List<TableColumn>();
-        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        void Add(int index, string name)
-        {
-            var unique = name;
-            for (var n = 2; !names.Add(unique); n++)
-            {
-                unique = $"{name} ({n})";
-            }
-
-            columns.Add(new TableColumn(unique, index));
-        }
-
+        var headers = new Dictionary<int, string>();
         if (headerRow > 0)
         {
             foreach (var (index, value) in sheet.Rows[headerRow])
             {
-                var name = TableValues.Text(value).Trim();
-                Add(index, name.Length > 0 ? name : TableValues.Letter(index));
+                if (TableValues.Text(value).Trim() is { Length: > 0 } name)
+                {
+                    headers[index] = name;
+                }
             }
         }
 
         // Значения в колонках без названия не теряются: такая колонка называется буквой.
-        var known = columns.Select(c => c.Index).ToHashSet();
-        foreach (var index in sheet.Rows.Where(r => r.Key != headerRow).SelectMany(r => r.Value.Keys).Distinct().Order())
+        var indexes = headers.Keys
+            .Concat(sheet.Rows.Where(r => r.Key != headerRow).SelectMany(r => r.Value.Keys))
+            .Distinct().Order().ToList();
+        var counts = headers.Values.GroupBy(n => n, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
+        var taken = new HashSet<string>(headers.Values, StringComparer.OrdinalIgnoreCase);
+        var columns = new List<TableColumn>();
+        foreach (var index in indexes)
         {
-            if (known.Add(index))
+            var letter = TableValues.Letter(index);
+            if (headers.TryGetValue(index, out var name) && counts[name] == 1)
             {
-                Add(index, TableValues.Letter(index));
+                columns.Add(new TableColumn(name, index, name));
+                continue;
             }
+
+            var unique = name is null ? letter : $"{name} ({letter})";
+            for (var n = 2; name is null ? taken.Contains(unique) : !taken.Add(unique); n++)
+            {
+                unique = name is null ? $"{letter} ({n})" : $"{name} ({letter}, {n})";
+            }
+
+            if (name is null)
+            {
+                taken.Add(unique);
+            }
+
+            columns.Add(new TableColumn(unique, index, name));
         }
 
-        columns.Sort((a, b) => a.Index.CompareTo(b.Index));
         return new TableLayout(sheet, headerRow, columns, sheet.Rows.Keys.Where(r => r != headerRow).ToList());
     }
 
@@ -122,7 +143,10 @@ internal sealed class TableLayout
         return result;
     }
 
-    /// <summary>Колонка по названию (при заголовках) или по букве (без них); null — такой нет.</summary>
+    /// <summary>
+    /// Колонка по названию (при заголовках) или по букве (без них); null — такой нет. Название, которое в заголовке
+    /// встречается несколько раз (без учёта регистра), — ошибка: Pepa не выбирает одну из них сама.
+    /// </summary>
     public TableColumn? Find(string name)
     {
         var trimmed = name.Trim();
@@ -133,7 +157,16 @@ internal sealed class TableLayout
                 : null;
         }
 
-        return Columns.FirstOrDefault(c => c.Name == trimmed) ??
+        var byHeader = Columns.Where(c => string.Equals(c.Header, trimmed, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (byHeader.Count > 1)
+        {
+            throw new NodeInputException(
+                $"В таблице несколько колонок «{trimmed}» ({string.Join(", ", byHeader.Select(c => TableValues.Letter(c.Index)))}) — " +
+                $"какая нужна, неясно. Переименуйте их или укажите {string.Join(" или ", byHeader.Select(c => $"«{c.Name}»"))}.");
+        }
+
+        return byHeader.FirstOrDefault() ??
+               Columns.FirstOrDefault(c => c.Name == trimmed) ??
                Columns.FirstOrDefault(c => string.Equals(c.Name, trimmed, StringComparison.OrdinalIgnoreCase));
     }
 
@@ -186,9 +219,9 @@ internal sealed class TableLayout
         return result;
     }
 
-    /// <summary>Строки, где в колонке — искомое значение (без учёта регистра и пробелов по краям; 91,5 = 91.5).</summary>
+    /// <summary>Строки, где в колонке — искомое значение (см. <see cref="TableValues.Matches"/>).</summary>
     public List<int> Match(TableColumn column, string value) =>
-        DataRows.Where(row => TableValues.Same(Sheet.Cell(row, column.Index), value)).ToList();
+        DataRows.Where(row => TableValues.Matches(Sheet.Cell(row, column.Index), value)).ToList();
 }
 
 internal static partial class TableValues
@@ -198,6 +231,9 @@ internal static partial class TableValues
 
     public const int MaxColumn = 16_384;
     public const int MaxRow = 1_048_576;
+
+    /// <summary>Больше значащих цифр число double хранит неточно: такие числа сравниваются только как текст.</summary>
+    private const int MaxExactDigits = 15;
 
     public static bool IsEmpty(JsonNode? value) =>
         value is null || (value is JsonValue v && v.TryGetValue<string>(out var text) && string.IsNullOrWhiteSpace(text));
@@ -240,7 +276,7 @@ internal static partial class TableValues
                         throw new NodeInputException($"Значение колонки «{column}» длиннее 32 767 знаков — столько в ячейку не помещается.");
                     }
 
-                    if (text.Any(c => char.IsControl(c) && c is not ('\t' or '\n' or '\r')) || HasBrokenSurrogate(text))
+                    if (!IsWritable(text))
                     {
                         throw new NodeInputException($"В значении колонки «{column}» есть служебные знаки, которые нельзя записать в таблицу.");
                     }
@@ -253,7 +289,8 @@ internal static partial class TableValues
         }
     }
 
-    private static bool HasBrokenSurrogate(string text)
+    /// <summary>Только знаки, допустимые в XML (как в файле Excel): без служебных, кроме табуляции и перевода строки.</summary>
+    private static bool IsWritable(string text)
     {
         for (var i = 0; i < text.Length; i++)
         {
@@ -261,42 +298,88 @@ internal static partial class TableValues
             {
                 i++;
             }
-            else if (char.IsSurrogate(text[i]))
+            else if (char.IsSurrogate(text[i]) || !XmlConvert.IsXmlChar(text[i]))
             {
-                return true;
+                return false;
             }
         }
 
-        return false;
+        return true;
     }
 
-    /// <summary>Одинаковы ли значения ячеек: без учёта регистра и пробелов по краям, числа — по значению.</summary>
-    public static bool Same(JsonNode? cell, JsonNode? expected)
+    /// <summary>
+    /// Подходит ли ячейка к искомому значению (поиск строки): без учёта регистра и пробелов по краям; число в ячейке
+    /// Excel — по значению; дробная часть — через запятую или точку. Номера с нулями впереди и длинные номера (счёт,
+    /// карта) сравниваются только как текст: «007» ≠ «7», счета, отличающиеся последней цифрой, — разные. Пустое значение
+    /// не подходит ни к чему.
+    /// </summary>
+    public static bool Matches(JsonNode? cell, string wanted)
     {
-        if (IsEmpty(cell) || IsEmpty(expected))
+        var key = wanted.Trim();
+        if (key.Length == 0)
         {
-            return IsEmpty(cell) && IsEmpty(expected);
+            return false;
         }
 
-        return Same(cell, Text(expected));
-    }
-
-    public static bool Same(JsonNode? cell, string expected)
-    {
         var text = Text(cell).Trim();
-        var wanted = expected.Trim();
-        if (string.Equals(text, wanted, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(text, key, StringComparison.OrdinalIgnoreCase))
         {
             return true;
         }
 
-        return ParseNumber(text) is { } a && ParseNumber(wanted) is { } b && a == b;
+        if (cell is JsonValue value && value.GetValueKind() == JsonValueKind.Number)
+        {
+            return ExactNumber(key) is { } number && AsDouble(value) == number;
+        }
+
+        return IsPlainNumber(text) && IsPlainNumber(key) && text.Replace(',', '.') == key.Replace(',', '.');
     }
 
-    private static double? ParseNumber(string text) =>
-        PlainNumber().IsMatch(text) && double.TryParse(text.Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out var number)
+    /// <summary>
+    /// В ячейке ровно записанное значение (<paramref name="stored"/> — как его прочитает Pepa): текст — точно, с учётом
+    /// регистра; число — по значению (у ячейки с датой — по её числу <paramref name="serial"/>); да/нет — как есть.
+    /// </summary>
+    public static bool Holds(JsonNode? cell, JsonNode? stored, double? serial = null)
+    {
+        if (IsEmpty(stored))
+        {
+            return IsEmpty(cell);
+        }
+
+        var expected = (JsonValue)stored!;
+        switch (expected.GetValueKind())
+        {
+            case JsonValueKind.Number:
+                var number = AsDouble(expected);
+                return serial is { } raw
+                    ? raw == number
+                    : cell is JsonValue actual && actual.GetValueKind() == JsonValueKind.Number && AsDouble(actual) == number;
+            case JsonValueKind.True or JsonValueKind.False:
+                return cell is JsonValue flag && flag.GetValueKind() is JsonValueKind.True or JsonValueKind.False &&
+                       flag.GetValue<bool>() == expected.GetValue<bool>();
+            default:
+                return cell is JsonValue text && text.TryGetValue<string>(out var value) && value == expected.GetValue<string>();
+        }
+    }
+
+    /// <summary>Число, которое можно сравнивать по значению: без нулей впереди и не длиннее 15 значащих цифр.</summary>
+    private static double? ExactNumber(string text)
+    {
+        var normalized = text.Replace(',', '.');
+        if (!ExactNumberPattern().IsMatch(normalized))
+        {
+            return null;
+        }
+
+        var mantissa = normalized.Split('e', 'E')[0].TrimStart('+', '-').Replace(".", "").TrimStart('0');
+        return mantissa.Length <= MaxExactDigits &&
+               double.TryParse(normalized, NumberStyles.Float, CultureInfo.InvariantCulture, out var number) && double.IsFinite(number)
             ? number
             : null;
+    }
+
+    [GeneratedRegex(@"^[+-]?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$")]
+    private static partial Regex ExactNumberPattern();
 
     [GeneratedRegex(@"^[+-]?[0-9]+([.,][0-9]+)?$")]
     private static partial Regex PlainNumber();
