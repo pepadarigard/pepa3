@@ -14,7 +14,8 @@ const details = {
     { id: 1, nodeId: "fill", nodeType: "browser.fill", nodeLabel: "Ввести пароль", attempt: 1, effect: "external", state: "succeeded",
       input: { text: "секрет-123" }, output: null, port: "out", error: null, resolution: null, plannedAt: "2026-10-27T10:00:01Z", startedAt: null, finishedAt: null },
     { id: 2, nodeId: "click", nodeType: "browser.click", nodeLabel: "Нажать «Войти»", attempt: 2, effect: "external", state: "unknown",
-      input: null, output: null, port: null, error: "Связь с браузером прервалась", resolution: null, plannedAt: "2026-10-27T10:00:02Z", startedAt: null, finishedAt: null },
+      input: null, output: { snapshot: { image: "001.jpg", url: "https://bank.example/cabinet?id=anna", title: "Кабинет" } }, port: null,
+      error: "Связь с браузером прервалась", resolution: null, plannedAt: "2026-10-27T10:00:02Z", startedAt: null, finishedAt: null },
   ],
   journal: [{ id: 1, stepId: 2, nodeId: "click", at: "2026-10-27T10:00:03Z", level: "error", message: "Браузер закрылся" }],
   activeNodeIds: ["click"],
@@ -34,5 +35,7 @@ describe("отчёт о процессе", () => {
     expect(text).toContain("adspower:k1");
     expect(text).not.toContain("секрет-123");
     expect(text).not.toContain("anna");
+    expect(text).toContain("снимок экрана в момент ошибки — на странице процесса");
+    expect(text).not.toContain("bank.example");
   });
 });

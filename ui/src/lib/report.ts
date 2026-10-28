@@ -39,6 +39,8 @@ export function processReport(details: ProcessDetails, version: string | null): 
     lines.push(parts.join(" "));
     if (s.error) lines.push(`    ошибка: ${s.error}`);
     if (s.resolution) lines.push(`    решение: ${s.resolution}`);
+    // Сам снимок и адрес страницы в отчёт не попадают (там бывают личные данные) — только что он есть.
+    if (s.output?.snapshot) lines.push("    снимок экрана в момент ошибки — на странице процесса (в отчёт не входит)");
   }
 
   lines.push("", `Журнал${details.journal.length > MAX_JOURNAL ? ` (последние ${MAX_JOURNAL} из ${details.journal.length})` : ""}:`);
