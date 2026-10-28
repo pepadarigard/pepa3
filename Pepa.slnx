@@ -23,6 +23,7 @@
     <Project Path="tests/Pepa.Adapters.Desktop.Tests/Pepa.Adapters.Desktop.Tests.csproj" />
     <Project Path="tests/Pepa.Adapters.FileSystem.Tests/Pepa.Adapters.FileSystem.Tests.csproj" />
     <Project Path="tests/Pepa.Adapters.Http.Tests/Pepa.Adapters.Http.Tests.csproj" />
+    <Project Path="tests/Pepa.Adapters.Tables.Tests/Pepa.Adapters.Tables.Tests.csproj" />
     <Project Path="tests/Pepa.Adapters.Telegram.Tests/Pepa.Adapters.Telegram.Tests.csproj" />
     <Project Path="tests/Pepa.Assistant.Tests/Pepa.Assistant.Tests.csproj" />
     <Project Path="tests/Pepa.Core.Tests/Pepa.Core.Tests.csproj" />

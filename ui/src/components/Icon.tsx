@@ -15,6 +15,8 @@ import {
   Download,
   Fingerprint,
   Globe,
+  Grid2x2Check,
+  Grid2x2Plus,
   Keyboard,
   Link,
   MessageCircle,
@@ -41,6 +43,7 @@ import {
   ListTree,
   Play,
   ScrollText,
+  Sheet,
   Timer,
   Trash2,
   Variable,
@@ -95,6 +98,9 @@ const nodeIcons: Record<string, LucideIcon> = {
   download: Download,
   "cloud-download": CloudDownload,
   "cloud-upload": CloudUpload,
+  sheet: Sheet,
+  "grid-2x2-plus": Grid2x2Plus,
+  "grid-2x2-check": Grid2x2Check,
 };
 
 export function NodeIcon({ name, ...props }: { name: string } & LucideProps) {
@@ -114,6 +120,8 @@ export function categoryColor(category: string): string {
       return "var(--cat-browser)";
     case "web":
       return "var(--cat-web)";
+    case "tables":
+      return "var(--cat-tables)";
     case "telegram":
       return "var(--cat-telegram)";
     case "desktop":

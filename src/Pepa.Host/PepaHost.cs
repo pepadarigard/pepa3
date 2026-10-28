@@ -11,6 +11,7 @@ using Microsoft.Extensions.Logging;
 using Pepa.Adapters.Browser;
 using Pepa.Adapters.FileSystem;
 using Pepa.Adapters.Http;
+using Pepa.Adapters.Tables;
 using Pepa.Adapters.Desktop;
 using Pepa.Adapters.Telegram;
 using Pepa.Core.Expressions;
@@ -105,7 +106,7 @@ public sealed class PepaHost : IAsyncDisposable
         var desktop = options.Desktop ?? new UnavailableDesktop(
             "Окна Windows, мышь и клавиатура доступны только в приложении Pepa для Windows (Pepa.exe), а сейчас Pepa запущена без окна.");
         var registry = new NodeRegistry().RegisterLogicNodes().RegisterFlowNodes().RegisterFileNodes(workspace, () => settings.Current.FolderWatches)
-            .RegisterHttpNodes().RegisterBrowserNodes(browsers, workspace).RegisterTelegramNodes(telegram, workspace).RegisterDesktopNodes(desktop);
+            .RegisterTableNodes(workspace).RegisterHttpNodes().RegisterBrowserNodes(browsers, workspace).RegisterTelegramNodes(telegram, workspace).RegisterDesktopNodes(desktop);
         // Расширения — до движка и помощника: их блоки должны быть в реестре с самого начала (и в каталоге помощника).
         var plugins = PluginLoader.Load(options.PluginsDirectory ?? Path.Combine(dataDirectory, "plugins"), dataDirectory, registry,
             () => settings.Current.WorkspaceRoot, path => workspace.Resolve(path), elevated: options.Elevated ?? (OperatingSystem.IsWindows() && Environment.IsPrivilegedProcess));

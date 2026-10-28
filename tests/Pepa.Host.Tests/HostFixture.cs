@@ -138,6 +138,10 @@ public sealed class HostFixture : IAsyncDisposable
         catch (IOException)
         {
         }
+        catch (UnauthorizedAccessException)
+        {
+            // Windows не даёт удалить загруженную сборку расширения, пока жив процесс проверок; папка временная.
+        }
     }
 
     public static readonly JsonSerializerOptions Json = PepaJson.Options;

@@ -9,7 +9,7 @@ public static class SampleScenarios
     public static IReadOnlyList<ScenarioDefinition> All() => [.. Versioned().Select(s => s.Scenario)];
 
     /// <summary>Текущая версия набора примеров: при обновлении Pepa добавляются только новые.</summary>
-    public const int CurrentVersion = 7;
+    public const int CurrentVersion = 8;
 
     /// <summary>Примеры с номером версии набора, в которой они появились.</summary>
     public static IReadOnlyList<(int Version, ScenarioDefinition Scenario)> Versioned() =>
@@ -21,6 +21,7 @@ public static class SampleScenarios
         (5, Parallel()),
         (6, Notepad()),
         (7, ExchangeRate()), (7, AskAndWrite()),
+        (8, RunLog()),
     ];
 
     private static NodeDefinition N(string id, string type, double x, double y, JsonObject? config = null,
@@ -535,5 +536,30 @@ public static class SampleScenarios
             E("name", "write", Ports.Event), E("name", "late", Ports.Timeout), E("write", "done"),
         ],
     };
-}
 
+    public static ScenarioDefinition RunLog() => new()
+    {
+        Name = "Пример 15. Таблица: журнал запусков",
+        Description = "Дописывает строку в таблицу Excel «примеры/журнал запусков.xlsx» (при первом запуске создаёт её) и читает, " +
+                      "сколько в ней строк. Таблица, открытая в Excel, не меняется — процесс остановится и попросит её закрыть.",
+        Variables =
+        [
+            new VariableDefinition { Name = "name", Type = VariableType.Text, Default = "мир", IsInput = true, Description = "Кто запустил" },
+            new VariableDefinition { Name = "rows", Type = VariableType.List, Description = "Строки журнала" },
+        ],
+        Nodes =
+        [
+            N("start", "start", 0, 100),
+            N("append", "table.append", 260, 100, new JsonObject
+            {
+                ["path"] = "примеры/журнал запусков.xlsx",
+                ["values"] = "({ 'Запущен (UTC)': process.startedAt.slice(0, 19).replace('T', ' '), Кто: vars.name, Процесс: process.id })",
+            }, "Добавить строку"),
+            N("read", "table.read", 540, 100, new JsonObject { ["path"] = "примеры/журнал запусков.xlsx", ["saveTo"] = "rows" }, "Прочитать журнал"),
+            N("done", "end", 820, 100, new JsonObject { ["outcome"] = "success", ["message"] = "В журнале строк: {{ vars.rows.length }}." }),
+            N("failed", "end", 540, 260, new JsonObject { ["outcome"] = "failure", ["message"] = "Журнал не записан: {{ lastError.message }}" },
+                "Не записано"),
+        ],
+        Edges = [E("start", "append"), E("append", "read"), E("append", "failed", Ports.Error), E("read", "done")],
+    };
+}

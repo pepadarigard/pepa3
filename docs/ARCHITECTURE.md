@@ -29,6 +29,7 @@ Windows-сервере без включённого ПК пользовател
 | `Pepa.Engine` | движок, жизненный цикл процессов, восстановление, логические блоки, контракты хранилища, `ScenarioService` | Core |
 | `Pepa.Storage.Sqlite` | хранилище: схема, миграции, транзакции | Engine, Microsoft.Data.Sqlite |
 | `Pepa.Adapters.FileSystem` | файловые действия, рабочая папка, слежение за папками (события «files») | Core |
+| `Pepa.Adapters.Tables` | таблицы Excel (.xlsx) и CSV в рабочей папке: прочитать, найти, добавить и изменить строку с проверкой | Core, FileSystem, DocumentFormat.OpenXml |
 | `Pepa.Adapters.Http` | запросы к сайтам и API: «Получить по адресу» (только чтение) и «Отправить запрос» (без повтора вслепую, ключ от повтора) | Core |
 | `Pepa.Adapters.Browser` | браузер через Playwright (Edge/Chrome), профили AdsPower через Local API и CDP | Core, FileSystem, Microsoft.Playwright |
 | `Pepa.Assistant` | ИИ-помощник: каталог блоков → указания модели, структурированный ответ → блоки, проверка и исправление | Core, Anthropic (официальный SDK) |
@@ -49,7 +50,7 @@ Windows-сервере без включённого ПК пользовател
 | Scheduler and Queues | `Pepa.Engine` (таймер ожиданий, очередь исполнителей, расписания `ProcessEngine.Triggers.cs`) | есть |
 | Resource Manager | `Pepa.Engine/ProcessEngine.Platform.cs` (ресурсы, очередь, взаимные блокировки) | есть |
 | Persistence Layer | `Pepa.Storage.Sqlite` | есть |
-| Integration Adapters | `Pepa.Adapters.*` | файлы, запросы HTTP, браузер, AdsPower, Telegram, окна Windows (`Desktop` + `Desktop.Windows`) |
+| Integration Adapters | `Pepa.Adapters.*` | файлы, таблицы, запросы HTTP, браузер, AdsPower, Telegram, окна Windows (`Desktop` + `Desktop.Windows`) |
 | Extensions | `Pepa.Core.Plugins` (контракт), `Pepa.Host/Plugins` (загрузка) | свои блоки из сборок в `plugins/<имя>/`: отдельный контекст загрузки, те же правила надёжности (D-043) |
 | Permission System | рабочая папка (`Workspace`), запрет системных папок | начато |
 | Observability | шаги, журнал процесса, журнал платформы `logs/` | есть |
