@@ -433,9 +433,15 @@ export interface EmailAccount {
   login: string;
   folder: string;
   enabled: boolean;
+  /** Сервер отправки (SMTP); пусто — письма не отправляются. Логин и пароль — те же. */
+  smtpServer: string | null;
+  smtpPort: number;
+  smtpSecurity: EmailSecurity;
+  /** Папка отправленных (для проверки, ушло ли письмо); пусто — найти самой. */
+  sentFolder: string | null;
 }
 
-/** Почта (IMAP): состояние и ящик. Пароль наружу не отдаётся. */
+/** Почта: состояние и ящик. Пароль наружу не отдаётся. */
 export interface EmailStatus {
   state: EmailState;
   account: EmailAccount | null;
@@ -443,6 +449,8 @@ export interface EmailStatus {
   error: string | null;
   messages: number | null;
   note: string | null;
+  /** Почему «Отправить письмо» сейчас не сработает; null — отправка настроена. */
+  sendProblem: string | null;
 }
 
 /** Ящик из формы; пароль пусто — прежний (если сервер и логин те же). */

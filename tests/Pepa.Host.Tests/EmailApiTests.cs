@@ -68,4 +68,50 @@ public sealed class EmailApiTests
         var (_, cleared) = await f.SendAsync(HttpMethod.Delete, "/api/integrations/email");
         Assert.Equal("notConfigured", cleared!["state"]!.GetValue<string>());
     }
+
+    [Fact]
+    public async Task Sending_server_is_set_in_integrations_and_a_process_sends_a_mail()
+    {
+        await using var imap = new FakeImapServer();
+        await using var smtp = new FakeSmtpServer();
+        await using var f = await HostFixture.StartAsync(seedSamples: false);
+        var mailbox = new
+        {
+            server = "127.0.0.1", port = imap.Port, security = "none", login = imap.Login, folder = "INBOX", password = imap.Password,
+            smtpServer = "127.0.0.1", smtpPort = smtp.Port, smtpSecurity = "none",
+        };
+
+        var (_, check) = await f.SendAsync(HttpMethod.Post, "/api/integrations/email/check", mailbox);
+        Assert.True(check!["ok"]!.GetValue<bool>(), check["message"]!.GetValue<string>());
+        Assert.Contains("Сервер отправки 127.0.0.1 принял вход", check["message"]!.GetValue<string>());
+        var (_, saved) = await f.SendAsync(HttpMethod.Put, "/api/integrations/email", mailbox);
+        Assert.Equal(smtp.Port, saved!["account"]!["smtpPort"]!.GetValue<int>());
+        Assert.Null(saved["sendProblem"]);
+
+        var scenario = new
+        {
+            name = "Письмо клиенту",
+            nodes = new object[]
+            {
+                new { id = "start", type = "start", position = new { x = 0, y = 0 }, config = new { } },
+                new { id = "send", type = "email.send", position = new { x = 200, y = 0 }, config = new { to = "client@site.ru", subject = "Счёт", text = "Счёт во вложении." } },
+                new { id = "end", type = "end", position = new { x = 400, y = 0 }, config = new { } },
+            },
+            edges = new object[]
+            {
+                new { id = "e1", source = "start", sourcePort = "out", target = "send" },
+                new { id = "e2", source = "send", sourcePort = "out", target = "end" },
+            },
+        };
+        var (_, created) = await f.SendAsync(HttpMethod.Post, "/api/scenarios", scenario);
+        var (_, run) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{created!["id"]!.GetValue<string>()}/run", new { });
+        await f.WaitForProcessAsync(run!["processId"]!.GetValue<string>(), p => HostFixture.Status(p) == "completed");
+        var (raw, recipients) = Assert.Single(smtp.Messages);
+        Assert.Equal(["client@site.ru"], recipients);
+        Assert.Contains("Subject: =?utf-8?", raw, StringComparison.OrdinalIgnoreCase);
+
+        // Без сервера отправки — понятная причина, а не попытка.
+        var (_, off) = await f.SendAsync(HttpMethod.Put, "/api/integrations/email", mailbox with { smtpServer = "" });
+        Assert.Contains("Отправка писем не настроена", off!["sendProblem"]!.GetValue<string>());
+    }
 }

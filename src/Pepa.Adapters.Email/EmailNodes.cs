@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Pepa.Adapters.FileSystem;
 using Pepa.Core;
 using Pepa.Core.Model;
 using Pepa.Core.Nodes;
@@ -9,10 +10,10 @@ public static class EmailNodes
 {
     public static readonly NodeCategory Category = new("email", "Почта", 22);
 
-    /// <param name="problem">Почему ждать письмо бессмысленно (почта не подключена, пароль не принят); null — можно ждать.</param>
-    public static NodeRegistry RegisterEmailNodes(this NodeRegistry registry, Func<string?> problem) => registry
+    public static NodeRegistry RegisterEmailNodes(this NodeRegistry registry, EmailService email, IWorkspace workspace) => registry
         .RegisterCategory(Category)
-        .Register(new WaitEmailNode(problem));
+        .Register(new WaitEmailNode(() => email.Problem))
+        .Register(new SendEmailNode(email, workspace));
 }
 
 /// <summary>

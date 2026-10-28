@@ -56,19 +56,22 @@ public sealed partial class FakeImapServer : IAsyncDisposable
         }
     }
 
-    private sealed class Mailbox(string name)
+    private sealed class Mailbox(string name, string? attributes = null)
     {
         public string Name { get; } = name;
+
+        /// <summary>Отметка папки в списке (например, «\Sent» — «Отправленные»).</summary>
+        public string? Attributes { get; } = attributes;
         public uint UidValidity { get; set; } = 1;
         public uint NextUid { get; set; } = 1;
         public List<(uint Uid, byte[] Raw, DateTimeOffset Received)> Messages { get; } = [];
     }
 
-    public void AddFolder(string name)
+    public void AddFolder(string name, string? attributes = null)
     {
         lock (_gate)
         {
-            _folders[name] = new Mailbox(name);
+            _folders[name] = new Mailbox(name, attributes);
         }
     }
 
@@ -198,9 +201,10 @@ public sealed partial class FakeImapServer : IAsyncDisposable
                         {
                             lock (_gate)
                             {
-                                foreach (var name in _folders.Keys.Where(n => pattern is "*" or "%" || n.Equals(pattern, StringComparison.OrdinalIgnoreCase)))
+                                foreach (var (name, folder) in _folders.Where(f => pattern is "*" or "%" || f.Key.Equals(pattern, StringComparison.OrdinalIgnoreCase)))
                                 {
-                                    text.Append($"* LIST (\\HasNoChildren) \"/\" \"{EncodeName(name)}\"\r\n");
+                                    var flags = folder.Attributes is { } extra ? $"\\HasNoChildren {extra}" : "\\HasNoChildren";
+                                    text.Append($"* LIST ({flags}) \"/\" \"{EncodeName(name)}\"\r\n");
                                 }
                             }
                         }
@@ -270,9 +274,13 @@ public sealed partial class FakeImapServer : IAsyncDisposable
         if (sub == "SEARCH")
         {
             var query = args[(sub.Length + 1)..].Trim();
-            var found = query.Equals("ALL", StringComparison.OrdinalIgnoreCase)
-                ? messages.Select(m => m.Uid)
-                : messages.Select(m => m.Uid).Where(Set(query.Split(' ').Last(), max));
+            var header = HeaderSearch().Match(query);
+            var found = header.Success
+                ? messages.Where(m => HeaderValue(m.Raw, header.Groups[1].Value)?.Contains(header.Groups[2].Value, StringComparison.OrdinalIgnoreCase) == true)
+                    .Select(m => m.Uid)
+                : query.Equals("ALL", StringComparison.OrdinalIgnoreCase)
+                    ? messages.Select(m => m.Uid)
+                    : messages.Select(m => m.Uid).Where(Set(query.Split(' ').Last(), max));
             await Write(stream, $"* SEARCH {string.Join(' ', found)}\r\n{tag} OK done\r\n");
             return;
         }
@@ -490,6 +498,28 @@ public sealed partial class FakeImapServer : IAsyncDisposable
 
     [GeneratedRegex(@"\{(\d+)\+?\}$")]
     private static partial Regex LiteralAtEnd();
+
+    /// <summary>Значение заголовка письма (первого с таким именем) или null.</summary>
+    private static string? HeaderValue(byte[] raw, string name)
+    {
+        foreach (var line in Encoding.UTF8.GetString(raw).Split("\r\n"))
+        {
+            if (line.Length == 0)
+            {
+                return null;
+            }
+
+            if (line.StartsWith(name + ":", StringComparison.OrdinalIgnoreCase))
+            {
+                return line[(name.Length + 1)..].Trim();
+            }
+        }
+
+        return null;
+    }
+
+    [GeneratedRegex("""HEADER\s+"?([^"\s]+)"?\s+"?([^"]*)"?""", RegexOptions.IgnoreCase)]
+    private static partial Regex HeaderSearch();
 
     public async ValueTask DisposeAsync()
     {

@@ -36,6 +36,20 @@ public sealed record EmailAccount
 
     public bool Enabled { get; init; } = true;
 
+    /// <summary>Сервер отправки (SMTP), например smtp.yandex.ru; пусто — Pepa письма не отправляет. Логин и пароль — те же.</summary>
+    public string? SmtpServer { get; init; }
+
+    public int SmtpPort { get; init; } = 465;
+
+    /// <summary>Защита соединения с сервером отправки: «по порту» — 465 шифрование сразу, иначе STARTTLS.</summary>
+    public EmailSecurity SmtpSecurity { get; init; } = EmailSecurity.Auto;
+
+    /// <summary>
+    /// Папка отправленных, где проверяется, ушло ли письмо, если ответ сервера потерялся; пусто — найти самой (отмеченная
+    /// сервером как «Отправленные» или с таким названием).
+    /// </summary>
+    public string? SentFolder { get; init; }
+
     /// <summary>
     /// Какой это ящик и папка (без порта и способа защиты: смена только их — тот же ящик, и письма за время без связи
     /// не теряются). Смена ящика или папки — счёт с того, что в ней уже есть.
@@ -68,6 +82,26 @@ public sealed class EmailUnavailableException(string message, Exception? inner =
 {
     /// <summary>Само не пройдёт (пароль не принят, папки нет) — ждать письма бессмысленно, пока не исправят настройки.</summary>
     public bool Lasting { get; } = lasting;
+}
+
+/// <summary>Письмо не отправлено — и это точно: сервер отказал или до отправки дело не дошло.</summary>
+public sealed class EmailNotSentException(string message, bool retryable, Exception? inner = null) : Exception(message, inner)
+{
+    /// <summary>Повтор может помочь (сервер был недоступен, временная ошибка); нет — адрес отклонён, письмо не принято.</summary>
+    public bool Retryable { get; } = retryable;
+}
+
+/// <summary>Связь прервалась, когда письмо уже передавалось серверу: ушло ли оно — неизвестно.</summary>
+public sealed class EmailSendUncertainException(string message, Exception? inner = null) : Exception(message, inner);
+
+/// <summary>Итог поиска отправленного письма в «Отправленных».</summary>
+public enum SentCheck
+{
+    /// <summary>Письмо с этим Message-ID есть в «Отправленных» — оно ушло.</summary>
+    Found,
+
+    /// <summary>Не найдено. Это не доказывает, что письмо не ушло: не все серверы кладут отправленное в «Отправленные».</summary>
+    NotFound,
 }
 
 /// <summary>События почты: новое письмо в отслеживаемой папке.</summary>

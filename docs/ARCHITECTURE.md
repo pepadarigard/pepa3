@@ -29,7 +29,7 @@ Windows-сервере без включённого ПК пользовател
 | `Pepa.Engine` | движок, жизненный цикл процессов, восстановление, логические блоки, контракты хранилища, `ScenarioService` | Core |
 | `Pepa.Storage.Sqlite` | хранилище: схема, миграции, транзакции | Engine, Microsoft.Data.Sqlite |
 | `Pepa.Adapters.FileSystem` | файловые действия, рабочая папка, слежение за папками (события «files») | Core |
-| `Pepa.Adapters.Email` | почта по IMAP: новые письма в папке — события «email», блок «Ждать письмо»; ящик только читается | Core, MailKit |
+| `Pepa.Adapters.Email` | почта: новые письма в папке (IMAP, только чтение) — события «email», «Ждать письмо»; «Отправить письмо» (SMTP) с проверкой по «Отправленным» | Core, FileSystem, MailKit |
 | `Pepa.Adapters.Tables` | таблицы Excel (.xlsx) и CSV в рабочей папке: прочитать, найти, добавить и изменить строку с проверкой | Core, FileSystem, DocumentFormat.OpenXml |
 | `Pepa.Adapters.Http` | запросы к сайтам и API: «Получить по адресу» (только чтение) и «Отправить запрос» (без повтора вслепую, ключ от повтора) | Core |
 | `Pepa.Adapters.Browser` | браузер через Playwright (Edge/Chrome), профили AdsPower через Local API и CDP | Core, FileSystem, Microsoft.Playwright |

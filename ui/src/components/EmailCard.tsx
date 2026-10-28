@@ -17,17 +17,20 @@ const stateBadge: Record<EmailState, { tone: Tone; text: string; pulse?: boolean
   error: { tone: "warn", text: "Нет связи", pulse: true },
 };
 
-/** Готовые настройки популярных почт: сервер IMAP и где взять пароль приложения. */
-const presets: { id: string; title: string; server: string; hint: string }[] = [
-  { id: "yandex", title: "Яндекс", server: "imap.yandex.ru", hint: "Яндекс ID → Безопасность → Пароли приложений (тип «Почта»). В настройках почты включите «С сервера imap.yandex.ru по протоколу IMAP»." },
-  { id: "mailru", title: "Mail.ru", server: "imap.mail.ru", hint: "Настройки → Безопасность → Пароли для внешних приложений." },
-  { id: "gmail", title: "Gmail", server: "imap.gmail.com", hint: "Аккаунт Google → Безопасность → Пароли приложений (нужна двухэтапная проверка)." },
-  { id: "other", title: "Другая", server: "", hint: "Сервер IMAP и порт — в справке вашей почты. Обычно порт 993 и шифрование SSL." },
+/** Готовые настройки популярных почт: серверы IMAP и SMTP и где взять пароль приложения. */
+const presets: { id: string; title: string; server: string; smtp: string; hint: string }[] = [
+  { id: "yandex", title: "Яндекс", server: "imap.yandex.ru", smtp: "smtp.yandex.ru", hint: "Яндекс ID → Безопасность → Пароли приложений (тип «Почта»). В настройках почты включите «С сервера imap.yandex.ru по протоколу IMAP»." },
+  { id: "mailru", title: "Mail.ru", server: "imap.mail.ru", smtp: "smtp.mail.ru", hint: "Настройки → Безопасность → Пароли для внешних приложений." },
+  { id: "gmail", title: "Gmail", server: "imap.gmail.com", smtp: "smtp.gmail.com", hint: "Аккаунт Google → Безопасность → Пароли приложений (нужна двухэтапная проверка)." },
+  { id: "other", title: "Другая", server: "", smtp: "", hint: "Серверы IMAP и SMTP и порты — в справке вашей почты. Обычно порт 993 (чтение) и 465 (отправка), шифрование SSL." },
 ];
 
-const empty: EmailAccountRequest = { server: "", port: 993, security: "auto", login: "", folder: "INBOX", enabled: true, password: null };
+const empty: EmailAccountRequest = {
+  server: "", port: 993, security: "auto", login: "", folder: "INBOX", enabled: true, password: null,
+  smtpServer: "", smtpPort: 465, smtpSecurity: "auto", sentFolder: "",
+};
 
-/** Почта (IMAP): ящик, из которого блок «Ждать письмо» получает письма. Pepa только читает — письма не меняются. */
+/** Почта: ящик, из которого «Ждать письмо» получает письма (IMAP, только чтение), и с которого «Отправить письмо» отправляет (SMTP). */
 export function EmailCard() {
   const query = useEmail();
   const client = useQueryClient();
@@ -66,7 +69,9 @@ export function EmailCard() {
         <p className="muted small">
           Блок «Ждать письмо» получает новые письма из ящика (по IMAP) — например, код или ссылку подтверждения после регистрации на
           сайте. Pepa только читает: письма не отмечаются прочитанными и не удаляются. Письма, пришедшие, пока Pepa была закрыта, доходят
-          до ждущих процессов после запуска; то, что лежало в ящике до подключения, событиями не становится.
+          до ждущих процессов после запуска; то, что лежало в ящике до подключения, событиями не становится. С сервером отправки (SMTP)
+          работает и «Отправить письмо»: если связь оборвётся во время отправки, Pepa не отправит письмо второй раз, а поищет его в
+          «Отправленных».
         </p>
 
         {query.isLoading && <Spinner />}
@@ -79,6 +84,14 @@ export function EmailCard() {
             {status.lastCheckAt && <span className="muted"> · проверено {formatDateTime(status.lastCheckAt)}</span>}
           </p>
         )}
+        {status?.account && !showForm && (
+          <p className="small">
+            {status.account.smtpServer
+              ? <>Отправка: <strong>{status.account.smtpServer}</strong>:{status.account.smtpPort}</>
+              : <span className="muted">Отправка писем выключена — чтобы работал блок «Отправить письмо», укажите сервер отправки.</span>}
+          </p>
+        )}
+        {status?.account?.smtpServer && status.sendProblem && !showForm && <Callout tone="attention">{status.sendProblem}</Callout>}
         {status?.error && !showForm && <Callout tone="attention">{status.error}</Callout>}
         {status?.note && !showForm && <Callout tone="info">{status.note}</Callout>}
 
@@ -103,12 +116,15 @@ function AccountForm({ status, onSaved, onCancel }: {
   onCancel?: () => void;
 }) {
   const feedback = useFeedback();
-  const [form, setForm] = useState<EmailAccountRequest>(status.account ? { ...status.account, password: null } : empty);
+  const [form, setForm] = useState<EmailAccountRequest>(status.account
+    ? { ...status.account, smtpServer: status.account.smtpServer ?? "", sentFolder: status.account.sentFolder ?? "", password: null }
+    : empty);
   const [busy, setBusy] = useState<"save" | "check" | null>(null);
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
   const preset = presets.find((p) => p.server !== "" && p.server === form.server.trim()) ?? presets[presets.length - 1];
   const passwordSaved = status.account !== null && status.account.server === form.server.trim() && status.account.login === form.login.trim();
-  const valid = form.server.trim().length > 0 && form.login.trim().length > 0 && form.port > 0 &&
+  const sending = (form.smtpServer ?? "").trim().length > 0;
+  const valid = form.server.trim().length > 0 && form.login.trim().length > 0 && form.port > 0 && (!sending || form.smtpPort > 0) &&
     (passwordSaved || (form.password ?? "").length > 0);
 
   useEffect(() => setResult(null), [form]);
@@ -144,7 +160,7 @@ function AccountForm({ status, onSaved, onCancel }: {
       <div className="row wrap" role="group" aria-label="Почта">
         {presets.map((p) => (
           <button key={p.id} type="button" className={`chip option${p.id === preset.id ? " active" : ""}`}
-            onClick={() => setForm((f) => ({ ...f, server: p.server, port: 993, security: "auto" }))}>
+            onClick={() => setForm((f) => ({ ...f, server: p.server, port: 993, security: "auto", smtpServer: p.smtp, smtpPort: 465, smtpSecurity: "auto" }))}>
             {p.title}
           </button>
         ))}
@@ -187,8 +203,35 @@ function AccountForm({ status, onSaved, onCancel }: {
           </select>
         </label>
       </div>
+      <div className="grid-3">
+        <label className="field">
+          <span className="field-label">Сервер отправки (SMTP)</span>
+          <input className="input mono" autoComplete="off" value={form.smtpServer ?? ""} placeholder="smtp.yandex.ru — пусто: не отправлять"
+            onChange={(e) => set("smtpServer", e.target.value)} />
+        </label>
+        <label className="field">
+          <span className="field-label">Порт отправки</span>
+          <input className="input mono" inputMode="numeric" value={String(form.smtpPort)} disabled={!sending}
+            onChange={(e) => set("smtpPort", Number(e.target.value.replace(/\D/g, "")) || 0)} />
+        </label>
+        <label className="field">
+          <span className="field-label">Защита отправки</span>
+          <select className="input" value={form.smtpSecurity} disabled={!sending} onChange={(e) => set("smtpSecurity", e.target.value as EmailSecurity)}>
+            <option value="auto">Автоматически (465 — SSL)</option>
+            <option value="ssl">SSL/TLS</option>
+            <option value="startTls">STARTTLS</option>
+            <option value="none">Без шифрования (только этот компьютер)</option>
+          </select>
+        </label>
+        <label className="field">
+          <span className="field-label">Папка отправленных</span>
+          <input className="input mono" autoComplete="off" value={form.sentFolder ?? ""} placeholder="найти самой" disabled={!sending}
+            onChange={(e) => set("sentFolder", e.target.value)} />
+        </label>
+      </div>
       <p className="small faint">
-        Папка — обычно INBOX («Входящие»). Пароль хранится на этом компьютере зашифрованным для вашей учётной записи Windows.
+        Папка — обычно INBOX («Входящие»). Логин и пароль для отправки — те же. Письма уходят от адреса ящика. Пароль хранится на этом
+        компьютере зашифрованным для вашей учётной записи Windows.
       </p>
       {result && <Callout tone={result.ok ? "success" : "danger"}>{result.message}</Callout>}
       <div className="row">

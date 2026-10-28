@@ -28,6 +28,14 @@ public sealed record EmailServiceOptions
 
     /// <summary>Письмо, которое сервер столько проверок подряд не отдаёт, пропускается — иначе за ним застряли бы все остальные.</summary>
     public int MaxMessageFailures { get; init; } = 3;
+
+    /// <summary>
+    /// Поиск отправленного письма в «Отправленных» (когда ответ сервера отправки потерялся): сколько раз и с какой паузой —
+    /// копия появляется там не мгновенно.
+    /// </summary>
+    public int SentCheckAttempts { get; init; } = 3;
+
+    public TimeSpan SentCheckDelay { get; init; } = TimeSpan.FromSeconds(3);
 }
 
 /// <summary>
@@ -40,7 +48,7 @@ public sealed record EmailServiceOptions
 /// ящике до подключения, — не события. Одно письмо ящика (его номер) — одно событие.
 /// </para>
 /// </summary>
-public sealed class EmailService : IAsyncDisposable
+public sealed partial class EmailService : IAsyncDisposable
 {
     public const string SecretPurpose = "Pepa.Email";
 
@@ -75,7 +83,8 @@ public sealed class EmailService : IAsyncDisposable
     private sealed record MailState(string Key, uint UidValidity, uint LastUid, DateTimeOffset? CheckedAt = null, uint? FailedUid = null,
         int Failures = 0);
 
-    private sealed record AccountFile(string? Server, int Port, EmailSecurity Security, string? Login, string? Folder, bool Enabled, string? Password);
+    private sealed record AccountFile(string? Server, int Port, EmailSecurity Security, string? Login, string? Folder, bool Enabled, string? Password,
+        string? SmtpServer = null, int SmtpPort = 465, EmailSecurity SmtpSecurity = EmailSecurity.Auto, string? SentFolder = null);
 
     public EmailService(string dataDirectory, Func<EventInput, Task> publish, EmailServiceOptions? options = null)
     {
@@ -414,6 +423,10 @@ public sealed class EmailService : IAsyncDisposable
         if (account.Enabled)
         {
             count = await TestAsync(account, secret, cancellationToken);
+            if (account.SmtpServer is not null)
+            {
+                await TestSmtpAsync(account, secret, cancellationToken);
+            }
         }
 
         await _lock.WaitAsync(cancellationToken);
@@ -519,7 +532,30 @@ public sealed class EmailService : IAsyncDisposable
             throw new EmailUnavailableException("Выберите способ защиты соединения.");
         }
 
-        return account with { Server = server, Login = login, Folder = folder };
+        var smtp = string.IsNullOrWhiteSpace(account.SmtpServer) ? null : account.SmtpServer.Trim();
+        if (smtp is not null)
+        {
+            if (smtp.Any(char.IsWhiteSpace) || smtp.Contains('/'))
+            {
+                throw new EmailUnavailableException("Сервер отправки (SMTP) — только имя, например smtp.yandex.ru.");
+            }
+
+            if (account.SmtpPort is < 1 or > 65535)
+            {
+                throw new EmailUnavailableException("Порт сервера отправки — число от 1 до 65535 (обычно 465 или 587).");
+            }
+
+            if (!Enum.IsDefined(account.SmtpSecurity))
+            {
+                throw new EmailUnavailableException("Выберите способ защиты соединения с сервером отправки.");
+            }
+        }
+
+        return account with
+        {
+            Server = server, Login = login, Folder = folder, SmtpServer = smtp,
+            SentFolder = string.IsNullOrWhiteSpace(account.SentFolder) ? null : account.SentFolder.Trim(),
+        };
     }
 
     private async Task<ImapClient> ConnectAsync(EmailAccount account, string password, CancellationToken cancellationToken)
@@ -638,7 +674,7 @@ public sealed class EmailService : IAsyncDisposable
         try
         {
             var file = JsonSerializer.Deserialize<AccountFile>(File.ReadAllText(AccountPath), Json);
-            if (file is not { Server.Length: > 0, Login.Length: > 0 } || !Enum.IsDefined(file.Security))
+            if (file is not { Server.Length: > 0, Login.Length: > 0 } || !Enum.IsDefined(file.Security) || !Enum.IsDefined(file.SmtpSecurity))
             {
                 _loadProblem = "Настройки почты повреждены — подключите ящик заново.";
                 return null;
@@ -661,6 +697,9 @@ public sealed class EmailService : IAsyncDisposable
             {
                 Server = file.Server, Port = file.Port, Security = file.Security, Login = file.Login,
                 Folder = string.IsNullOrWhiteSpace(file.Folder) ? "INBOX" : file.Folder, Enabled = file.Enabled,
+                SmtpServer = string.IsNullOrWhiteSpace(file.SmtpServer) ? null : file.SmtpServer,
+                SmtpPort = file.SmtpPort is >= 1 and <= 65535 ? file.SmtpPort : 465, SmtpSecurity = file.SmtpSecurity,
+                SentFolder = string.IsNullOrWhiteSpace(file.SentFolder) ? null : file.SentFolder,
             }, password);
         }
         catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException or NotSupportedException)
@@ -674,7 +713,8 @@ public sealed class EmailService : IAsyncDisposable
     {
         var account = stored.Account;
         WriteAtomic(AccountPath, JsonSerializer.Serialize(new AccountFile(account.Server, account.Port, account.Security, account.Login,
-            account.Folder, account.Enabled, stored.Password is { } password ? Secrets.Protect(password, SecretPurpose) : null), Json));
+            account.Folder, account.Enabled, stored.Password is { } password ? Secrets.Protect(password, SecretPurpose) : null,
+            account.SmtpServer, account.SmtpPort, account.SmtpSecurity, account.SentFolder), Json));
     }
 
     private MailState? LoadState()

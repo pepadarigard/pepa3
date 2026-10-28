@@ -498,8 +498,11 @@ async function main() {
     await mail.getByText("Не подключена").waitFor();
     await mail.getByRole("button", { name: "Яндекс" }).click();
     if ((await mail.getByRole("textbox", { name: "Сервер IMAP" }).inputValue()) !== "imap.yandex.ru") throw new Error("Не подставился сервер Яндекса");
+    if ((await mail.getByRole("textbox", { name: "Сервер отправки (SMTP)" }).inputValue()) !== "smtp.yandex.ru") throw new Error("Не подставился сервер отправки Яндекса");
+    await mail.getByRole("textbox", { name: "Сервер отправки (SMTP)" }).fill("");
+    if (!(await mail.getByRole("textbox", { name: "Порт отправки" }).isDisabled())) throw new Error("Без сервера отправки его порт должен быть недоступен");
     await mail.getByRole("textbox", { name: "Сервер IMAP" }).fill("127.0.0.1");
-    await mail.getByRole("textbox", { name: "Порт" }).fill("1");
+    await mail.getByRole("textbox", { name: "Порт", exact: true }).fill("1");
     await mail.getByRole("combobox", { name: "Защита соединения" }).selectOption("none");
     await mail.getByRole("textbox", { name: "Адрес почты (логин)" }).fill("anna@example.com");
     await mail.getByLabel("Пароль приложения").fill("secret-app-pass");

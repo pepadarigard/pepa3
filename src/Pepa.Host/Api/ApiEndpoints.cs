@@ -107,14 +107,15 @@ internal static class ApiEndpoints
             }
         });
 
-        // ───────────── Почта (IMAP) ─────────────
-        api.MapGet("/integrations/email", (Adapters.Email.EmailService email) => EmailDto(email.Status));
+        // ───────────── Почта (IMAP — чтение, SMTP — отправка) ─────────────
+        api.MapGet("/integrations/email", (Adapters.Email.EmailService email) => EmailDto(email, email.Status));
 
         api.MapPut("/integrations/email", async (EmailAccountRequest request, Adapters.Email.EmailService email, CancellationToken ct) =>
         {
             try
             {
-                return Results.Ok(EmailDto(await email.ConfigureAsync(ToAccount(request), request.Password, ct)));
+                var status = await email.ConfigureAsync(ToAccount(request), request.Password, ct);
+                return Results.Ok(EmailDto(email, status));
             }
             catch (Adapters.Email.EmailUnavailableException ex)
             {
@@ -126,8 +127,16 @@ internal static class ApiEndpoints
         {
             try
             {
-                var count = await email.TestAsync(ToAccount(request), request.Password, ct);
-                return new CheckResultDto(true, $"Ящик на связи: в папке «{(string.IsNullOrWhiteSpace(request.Folder) ? "INBOX" : request.Folder.Trim())}» писем: {count}.");
+                var account = ToAccount(request);
+                var count = await email.TestAsync(account, request.Password, ct);
+                var message = $"Ящик на связи: в папке «{(string.IsNullOrWhiteSpace(request.Folder) ? "INBOX" : request.Folder.Trim())}» писем: {count}.";
+                if (!string.IsNullOrWhiteSpace(account.SmtpServer))
+                {
+                    await email.TestSmtpAsync(account, request.Password, ct);
+                    message += $" Сервер отправки {account.SmtpServer.Trim()} принял вход.";
+                }
+
+                return new CheckResultDto(true, message);
             }
             catch (Adapters.Email.EmailUnavailableException ex)
             {
@@ -136,7 +145,7 @@ internal static class ApiEndpoints
         });
 
         api.MapDelete("/integrations/email", async (Adapters.Email.EmailService email, CancellationToken ct) =>
-            EmailDto(await email.ClearAsync(ct)));
+            EmailDto(email, await email.ClearAsync(ct)));
 
         api.MapGet("/integrations/telegram", (Adapters.Telegram.TelegramService telegram) => TelegramDto(telegram));
 
@@ -984,13 +993,14 @@ internal static class ApiEndpoints
     private static RecorderStateDto RecorderDto(Adapters.Browser.RecorderState state) =>
         new(state.Recording, state.Browser?.ToString().ToLowerInvariant(), state.ProfileId, state.StartUrl, state.Actions);
 
-    private static EmailStatusDto EmailDto(Adapters.Email.EmailStatus status) => new(
+    private static EmailStatusDto EmailDto(Adapters.Email.EmailService email, Adapters.Email.EmailStatus status) => new(
         JsonNamingPolicy.CamelCase.ConvertName(status.State.ToString()),
         status.Account is { } account
             ? new EmailAccountDto(account.Server, account.Port, JsonNamingPolicy.CamelCase.ConvertName(account.Security.ToString()), account.Login,
-                account.Folder, account.Enabled)
+                account.Folder, account.Enabled, account.SmtpServer, account.SmtpPort,
+                JsonNamingPolicy.CamelCase.ConvertName(account.SmtpSecurity.ToString()), account.SentFolder)
             : null,
-        status.LastCheckAt, status.Error, status.Messages, status.Note);
+        status.LastCheckAt, status.Error, status.Messages, status.Note, status.Account is null ? null : email.SendProblem);
 
     private static Adapters.Email.EmailAccount ToAccount(EmailAccountRequest request) => new()
     {
@@ -1002,6 +1012,12 @@ internal static class ApiEndpoints
         Login = request.Login ?? "",
         Folder = request.Folder ?? "INBOX",
         Enabled = request.Enabled ?? true,
+        SmtpServer = string.IsNullOrWhiteSpace(request.SmtpServer) ? null : request.SmtpServer,
+        SmtpPort = request.SmtpPort ?? 465,
+        SmtpSecurity = Enum.TryParse<Adapters.Email.EmailSecurity>(request.SmtpSecurity, ignoreCase: true, out var smtpSecurity)
+            ? smtpSecurity
+            : Adapters.Email.EmailSecurity.Auto,
+        SentFolder = string.IsNullOrWhiteSpace(request.SentFolder) ? null : request.SentFolder,
     };
 
     private static TelegramStatusDto TelegramDto(Adapters.Telegram.TelegramService telegram)

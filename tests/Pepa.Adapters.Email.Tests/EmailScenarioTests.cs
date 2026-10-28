@@ -8,22 +8,29 @@ using Pepa.Engine.Tests.Infrastructure;
 namespace Pepa.Adapters.Email.Tests;
 
 /// <summary>«Ждать письмо» в настоящем движке: код из письма, письмо своему процессу, письмо, пришедшее без Pepa.</summary>
-public sealed class EmailScenarioTests : IAsyncDisposable
+public sealed partial class EmailScenarioTests : IAsyncDisposable
 {
     private readonly FakeImapServer _server = new();
+    private readonly string _root = Path.Combine(Path.GetTempPath(), "pepa-email-tests", Guid.NewGuid().ToString("N"));
     private EmailService? _email;
 
-    private async Task<EngineHarness> CreateAsync(bool configure = true)
+    /// <summary>Рабочая папка (вложения писем).</summary>
+    private string Workspace => Path.Combine(_root, "workspace");
+
+    private async Task<EngineHarness> CreateAsync(bool configure = true, FakeSmtpServer? smtp = null)
     {
         EngineHarness? harness = null;
-        harness = await EngineHarness.CreateAsync(extraNodes: registry => registry.RegisterEmailNodes(() => _email is null ? "почта не создана" : _email.Problem));
-        _email = new EmailService(harness.Directory, input => harness.Engine.PublishEventAsync(input),
-            new EmailServiceOptions { OperationTimeout = TimeSpan.FromSeconds(10) });
+        Directory.CreateDirectory(Workspace);
+        _email = new EmailService(Path.Combine(_root, "data"), input => harness!.Engine.PublishEventAsync(input),
+            new EmailServiceOptions { OperationTimeout = TimeSpan.FromSeconds(10), SentCheckDelay = TimeSpan.FromMilliseconds(50) });
+        harness = await EngineHarness.CreateAsync(extraNodes: registry =>
+            registry.RegisterEmailNodes(_email, new FileSystem.Workspace(() => Workspace)));
         if (configure)
         {
             await _email.ConfigureAsync(new EmailAccount
             {
                 Server = "127.0.0.1", Port = _server.Port, Security = EmailSecurity.None, Login = _server.Login,
+                SmtpServer = smtp is null ? null : "127.0.0.1", SmtpPort = smtp?.Port ?? 465, SmtpSecurity = EmailSecurity.None,
             }, _server.Password, CancellationToken.None);
             _email.Start(DateTimeOffset.UtcNow, runLoop: false);
             await _email.CheckAsync(CancellationToken.None);
@@ -147,5 +154,12 @@ public sealed class EmailScenarioTests : IAsyncDisposable
         }
 
         await _server.DisposeAsync();
+        try
+        {
+            Directory.Delete(_root, recursive: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+        }
     }
 }
