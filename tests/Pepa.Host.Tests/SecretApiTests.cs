@@ -13,7 +13,7 @@ public sealed class SecretApiTests
             variables = new object[]
             {
                 new { name = "password", type = "text", isInput = true, secret = true },
-                new { name = "pin", type = "text", secret = true, @default = "7391" },
+                new { name = "pin", type = "text", secret = true, @default = "pin-7391" },
                 new { name = "login", type = "text", isInput = true },
             },
             nodes = new object[]
@@ -37,7 +37,7 @@ public sealed class SecretApiTests
 
         var text = await f.Client.GetStringAsync($"/api/processes/{id}");
         Assert.DoesNotContain("S3cr3t-Pa55", text);
-        Assert.DoesNotContain("7391", text);
+        Assert.DoesNotContain("pin-7391", text); // с буквами: одни цифры могли бы встретиться во времени шага
         var details = await f.GetAsync($"/api/processes/{id}");
         Assert.Equal("••••", details["variables"]!["password"]!.GetValue<string>());
         Assert.Equal("••••", details["variables"]!["pin"]!.GetValue<string>());
