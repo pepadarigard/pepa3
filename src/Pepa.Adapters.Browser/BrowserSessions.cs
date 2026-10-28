@@ -3,6 +3,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Playwright;
+using Pepa.Core.Nodes;
 
 namespace Pepa.Adapters.Browser;
 
@@ -93,6 +94,9 @@ public sealed record BrowserModuleOptions
 
     /// <summary>Свой исполняемый файл браузера вместо Edge/Chrome (для проверки и разработки).</summary>
     public string? ExecutablePathOverride { get; init; }
+
+    /// <summary>Куда сохранять снимок страницы, когда шаг не удался; null — не снимать.</summary>
+    public ISnapshotStore? Snapshots { get; init; }
 }
 
 /// <summary>
@@ -121,6 +125,8 @@ public sealed class BrowserSessions : IAsyncDisposable
     }
 
     public AdsPowerClient AdsPower => _adsPower;
+
+    public ISnapshotStore? Snapshots => _options.Snapshots;
 
     public string ProfilesDirectory => Path.Combine(_options.DataDirectory, "browser-profiles");
 

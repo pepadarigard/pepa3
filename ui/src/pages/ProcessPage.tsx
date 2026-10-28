@@ -1,8 +1,10 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { ReactFlow } from "@xyflow/react";
 import { AlertTriangle, ArrowLeft, BellRing, CircleAlert, ClipboardCopy, Info, ListChecks, Lock, Pencil, RotateCw, ScrollText, Workflow, X } from "lucide-react";
+import { api } from "../api/client";
 import { useDescriptors, useInfo, useProcess } from "../api/hooks";
-import type { NodeTypeDescriptor, ProcessDetails, ScenarioDefinition, Step, Wait } from "../api/types";
+import type { Json, NodeTypeDescriptor, ProcessDetails, ScenarioDefinition, Step, Wait } from "../api/types";
 import { processIcons, ProcessActions, ProcessStatusBadge, ProcessTable, StepStateBadge } from "../components/process";
 import { useRunScenario } from "../components/RunDialog";
 import { Dialog, useFeedback } from "../components/feedback";
@@ -58,6 +60,8 @@ export function ProcessPage({ id }: { id: string }) {
   const StatusIcon = processIcons[p.status];
   const steps = selectedNode ? data.steps.filter((s) => s.nodeId === selectedNode) : data.steps;
   const step = data.steps.find((s) => s.id === selectedStep) ?? null;
+  // Процесс ждёт решения после ошибки шага — снимок того, что было на экране, сразу под объяснением.
+  const stopped = p.status === "needsAttention" ? data.steps.findLast((s) => (s.state === "failed" || s.state === "unknown") && snapshotOf(s)) : undefined;
 
   return (
     <div className="page">
@@ -102,6 +106,7 @@ export function ProcessPage({ id }: { id: string }) {
           <h2>{explanation.title}</h2>
           {explanation.text && <p style={{ color: "var(--text-2)" }}>{explanation.text}</p>}
           {advice && <p className="small muted">{advice}</p>}
+          {stopped && <StepSnapshot processId={p.id} step={stopped} />}
           {p.allowedActions.length > 0 && <div style={{ marginTop: 6 }}><ProcessActions process={p} /></div>}
         </div>
       </div>
@@ -119,7 +124,7 @@ export function ProcessPage({ id }: { id: string }) {
 
       <div className="grid-2" style={{ gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", alignItems: "start" }}>
         <div className="stack" style={{ gap: 16 }}>
-          {step && <StepDetails step={step} descriptor={descriptors.get(step.nodeType)} onClose={() => setSelectedStep(null)} />}
+          {step && <StepDetails processId={p.id} step={step} descriptor={descriptors.get(step.nodeType)} onClose={() => setSelectedStep(null)} />}
           <Card title={<h2 className="row"><ListChecks size={16} /> Шаги{selectedNode ? " блока" : ""} · {steps.length}</h2>}>
             <div style={{ padding: "6px 16px 12px", maxHeight: 640, overflow: "auto" }}>
               {steps.length === 0 ? (
@@ -222,7 +227,82 @@ function stepToneOf(step: Step): Tone {
   }
 }
 
-function StepDetails({ step, descriptor, onClose }: { step: Step; descriptor: NodeTypeDescriptor | undefined; onClose: () => void }) {
+interface Snapshot {
+  image: string | null;
+  url: string | null;
+  title: string | null;
+  note: string | null;
+}
+
+/** Снимок экрана при ошибке шага (из результата шага), если есть. */
+function snapshotOf(step: Step): Snapshot | null {
+  const value = step.output?.snapshot;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const text = (v: Json | undefined) => (typeof v === "string" && v.length > 0 ? v : null);
+  return { image: text(value.image), url: text(value.url), title: text(value.title), note: text(value.note) };
+}
+
+function StepSnapshot({ processId, step }: { processId: string; step: Step }) {
+  const snapshot = snapshotOf(step);
+  const [url, setUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [zoomed, setZoomed] = useState(false);
+  const image = snapshot?.image ?? null;
+  useEffect(() => {
+    if (!image) return;
+    let revoked = false;
+    let created: string | null = null;
+    setUrl(null);
+    setError(null);
+    api.stepSnapshot(processId, image).then(
+      (value) => {
+        created = value;
+        if (revoked) URL.revokeObjectURL(value);
+        else setUrl(value);
+      },
+      (e: unknown) => setError(e instanceof Error ? e.message : String(e)),
+    );
+    return () => {
+      revoked = true;
+      if (created) URL.revokeObjectURL(created);
+    };
+  }, [processId, image]);
+  useEffect(() => {
+    if (!zoomed) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setZoomed(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [zoomed]);
+  if (!snapshot) return null;
+  return (
+    <div className="snapshot small">
+      <div className="muted">Что было на экране, когда шаг «{step.nodeLabel}» не удался:</div>
+      {(snapshot.title || snapshot.url) && (
+        <div className="snapshot-place">
+          {snapshot.title && <span>{snapshot.title}</span>}
+          {snapshot.url && <span className="mono faint">{snapshot.url}</span>}
+        </div>
+      )}
+      {url && (
+        <img className="snapshot-image" src={url} alt="Снимок экрана при ошибке" title="Нажмите, чтобы увеличить" onClick={() => setZoomed(true)} />
+      )}
+      {error && <div className="muted">Снимок не открылся: {error}</div>}
+      {!image && <div className="faint">{snapshot.note ?? "Снимок не сохранён: у процесса уже много снимков."}</div>}
+      {zoomed && url && createPortal(
+        <div className="overlay snapshot-zoom" onMouseDown={() => setZoomed(false)} role="dialog" aria-label="Снимок экрана">
+          <img src={url} alt="Снимок экрана при ошибке" />
+        </div>,
+        document.body,
+      )}
+    </div>
+  );
+}
+
+function StepDetails({ processId, step, descriptor, onClose }: { processId: string; step: Step; descriptor: NodeTypeDescriptor | undefined; onClose: () => void }) {
+  // Снимок показан картинкой — в результате шага он не повторяется.
+  const output = Object.fromEntries(Object.entries(step.output ?? {}).filter(([key]) => key !== "snapshot"));
   return (
     <Card title={`Шаг: ${step.nodeLabel}`} actions={<Button size="small" variant="ghost" iconOnly icon={X} title="Закрыть" onClick={onClose} />}>
       <div className="stack" style={{ padding: 14 }}>
@@ -246,10 +326,11 @@ function StepDetails({ step, descriptor, onClose }: { step: Step; descriptor: No
             <pre className="json">{JSON.stringify(step.input, null, 2)}</pre>
           </div>
         )}
-        {step.output && (
+        <StepSnapshot processId={processId} step={step} />
+        {Object.keys(output).length > 0 && (
           <div className="small">
             <div className="muted">Результат:</div>
-            <pre className="json">{JSON.stringify(step.output, null, 2)}</pre>
+            <pre className="json">{JSON.stringify(output, null, 2)}</pre>
           </div>
         )}
         <span className="small faint">{ru.stepState[step.state]} · шаг №{step.id}</span>

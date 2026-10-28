@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Pepa.Host.Snapshots;
 using Pepa.Storage.Sqlite;
 
 namespace Pepa.Host.Backups;
@@ -7,8 +8,10 @@ namespace Pepa.Host.Backups;
 /// История не растёт бесконечно: завершённые процессы старше срока из «Настроек» удаляются (раз в шесть часов). Незавершённые
 /// не удаляются никогда, как и завершённые, связанные с ещё работающими (см. <see cref="SqliteStore.DeleteFinishedProcessesAsync"/>).
 /// У обработанных событий старше срока удаляются данные, а через год — и сами строки (см. <see cref="SqliteStore.PruneEventsAsync"/>).
+/// Снимки экрана удалённых процессов удаляются вслед за ними.
 /// </summary>
-public sealed class HistoryRetention(SqliteStore store, Func<int> days, TimeProvider time, ILogger logger) : IAsyncDisposable
+public sealed class HistoryRetention(SqliteStore store, Func<int> days, TimeProvider time, ILogger logger, SnapshotFolder? snapshots = null)
+    : IAsyncDisposable
 {
     private static readonly TimeSpan Interval = TimeSpan.FromHours(6);
 
@@ -41,6 +44,16 @@ public sealed class HistoryRetention(SqliteStore store, Func<int> days, TimeProv
         if (cleared > 0 || removed > 0)
         {
             logger.LogInformation("События старше {Days} дн.: данные удалены у {Cleared}, удалено совсем {Removed}.", keep, cleared, removed);
+        }
+
+        if (snapshots is not null)
+        {
+            var orphans = await snapshots.DeleteOrphansAsync(async id => await store.GetProcessAsync(id, cancellationToken) is not null,
+                cancellationToken);
+            if (orphans > 0)
+            {
+                logger.LogInformation("Удалены снимки экрана процессов, которых больше нет в истории: {Count}.", orphans);
+            }
         }
 
         return deleted;

@@ -9,13 +9,6 @@ namespace Pepa.Host.Tests;
 /// <summary>Резервные копии базы: ежедневная при запуске, по кнопке, старые удаляются.</summary>
 public sealed class BackupApiTests
 {
-    private sealed class ManualTime(DateTimeOffset now) : TimeProvider
-    {
-        public DateTimeOffset Now { get; set; } = now;
-        public override DateTimeOffset GetUtcNow() => Now;
-        public override TimeZoneInfo LocalTimeZone => TimeZoneInfo.Utc;
-    }
-
     [Fact]
     public async Task Daily_copy_is_made_at_start_and_a_copy_can_be_made_by_hand()
     {

@@ -99,6 +99,15 @@ public static class BrowserNodes
             return NodeResult.Fail(ads.Message, retryable: true);
         }
 
+        var result = await RunActionAsync(session, page, cancellationToken, action, what);
+        return result is NodeResult.Failure or NodeResult.Unknown && !session.Closed && !page.IsClosed
+            ? await WithSnapshotAsync(result, sessions, context, page, cancellationToken)
+            : result;
+    }
+
+    private static async Task<NodeResult> RunActionAsync(BrowserSession session, IPage page, CancellationToken cancellationToken,
+        Func<BrowserSession, IPage, Task<NodeResult>> action, string what)
+    {
         try
         {
             return await action(session, page).WaitAsync(cancellationToken);
@@ -130,6 +139,40 @@ public static class BrowserNodes
         {
             return new NodeResult.Unknown($"Браузер не ответил вовремя во время действия «{what}»: {BrowserSessions.FirstLine(ex.Message)}");
         }
+    }
+
+    private static readonly TimeSpan SnapshotTimeout = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Шаг не удался — снимок того, что видно на странице (адрес, заголовок, картинка), чтобы было понятно, что пошло не так.
+    /// Снимок — подсказка: не получился (страница занята, диск) — итог шага тот же, без снимка.
+    /// </summary>
+    internal static async Task<NodeResult> WithSnapshotAsync(NodeResult result, BrowserSessions sessions, NodeExecutionContext context,
+        IPage page, CancellationToken cancellationToken)
+    {
+        if (sessions.Snapshots is not { } store || cancellationToken.IsCancellationRequested)
+        {
+            return result;
+        }
+
+        var snapshot = new JsonObject { ["url"] = page.Url };
+        try
+        {
+            snapshot["title"] = await page.TitleAsync().WaitAsync(SnapshotTimeout, cancellationToken);
+            var image = await page.ScreenshotAsync(new PageScreenshotOptions
+            {
+                Type = ScreenshotType.Jpeg, Quality = 70, Timeout = (float)SnapshotTimeout.TotalMilliseconds,
+                Animations = ScreenshotAnimations.Disabled,
+            }).WaitAsync(SnapshotTimeout, cancellationToken);
+            snapshot["image"] = await store.SaveAsync(context.ProcessId, image, ".jpg", cancellationToken);
+        }
+        catch (Exception)
+        {
+            // Любая ошибка снимка (страница закрылась, браузер не ответил, диск) — итог шага остаётся тем же.
+            snapshot["note"] = "Снимок страницы не получился.";
+        }
+
+        return result with { Snapshot = snapshot };
     }
 
     private static bool IsStrictViolation(PlaywrightException ex) =>

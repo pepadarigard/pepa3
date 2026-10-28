@@ -98,6 +98,12 @@ public sealed class NodeInputException(string message) : Exception(message);
 /// <summary>Итог выполнения шага.</summary>
 public abstract record NodeResult
 {
+    /// <summary>
+    /// Что было на экране, когда шаг не удался (снимок страницы или окна, адрес, заголовок), — подсказка для разбора.
+    /// Сохраняется в результате шага при ошибке и неизвестном итоге; на сам итог не влияет.
+    /// </summary>
+    public JsonObject? Snapshot { get; init; }
+
     /// <summary>Действие подтверждено выполненным; процесс идёт по порту <paramref name="Port"/>.</summary>
     public sealed record Success(
         string Port,
@@ -223,4 +229,14 @@ public sealed record VerificationResult(
 
     public static VerificationResult NotSupported() =>
         new(VerificationOutcome.NotSupported, "Этот блок не умеет проверять результат.");
+}
+
+/// <summary>
+/// Хранилище снимков экрана при ошибках шагов: у каждого процесса — свои, не больше нескольких десятков; удаляются вместе с
+/// историей процесса.
+/// </summary>
+public interface ISnapshotStore
+{
+    /// <summary>Сохранить снимок; возвращает его имя (для результата шага) или null — не сохранён (лимит процесса, диск).</summary>
+    ValueTask<string?> SaveAsync(string processId, byte[] image, string extension, CancellationToken cancellationToken);
 }

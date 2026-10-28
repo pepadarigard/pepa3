@@ -109,6 +109,7 @@ public sealed class TestActionNode(ExternalWorld world) : INodeExecutor
             new FieldDescriptor { Name = "saveTo", Label = "Сохранить в", Kind = FieldKind.Variable },
             new FieldDescriptor { Name = "resource", Label = "Ресурс блока", Kind = FieldKind.Template },
             new FieldDescriptor { Name = "release", Label = "Освободить ресурс после", Kind = FieldKind.Template },
+            new FieldDescriptor { Name = "snapshotUrl", Label = "Адрес на снимке при ошибке", Kind = FieldKind.Template },
         ],
     };
 
@@ -131,7 +132,10 @@ public sealed class TestActionNode(ExternalWorld world) : INodeExecutor
         switch (mode)
         {
             case ActionMode.Fail:
-                return NodeResult.Fail($"Отказ внешней системы для «{key}».");
+                var failure = NodeResult.Fail($"Отказ внешней системы для «{key}».");
+                return context.GetString("snapshotUrl") is { Length: > 0 } url
+                    ? failure with { Snapshot = new JsonObject { ["url"] = url, ["image"] = "001.jpg" } }
+                    : failure;
             case ActionMode.ThrowBeforeEffect:
                 throw new InvalidOperationException("Сбой до действия.");
         }

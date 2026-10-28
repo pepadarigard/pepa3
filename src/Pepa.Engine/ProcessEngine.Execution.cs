@@ -339,6 +339,9 @@ public sealed partial class ProcessEngine
             slot.EndStep(stepCancellation);
         }
 
+        // Снимок экрана при ошибке — из итога самого блока: проверки ниже могут заменить итог, а снимок останется.
+        var snapshot = result.Snapshot;
+
         // Действие только читало внешнее состояние — ничего не изменилось, итог не может быть «неизвестен».
         if (result is NodeResult.Unknown readOnlyUnknown && descriptor.Effect == NodeEffect.ReadOnly)
         {
@@ -393,6 +396,11 @@ public sealed partial class ProcessEngine
         }
 
         // 6. Итог.
+        if (snapshot is not null && result is NodeResult.Failure or NodeResult.Unknown)
+        {
+            result = result with { Snapshot = snapshot };
+        }
+
         await ApplyResultAsync(process, graph, token, node, descriptor, step, result, resolution, settle: settle);
     }
 
@@ -572,7 +580,10 @@ public sealed partial class ProcessEngine
             uncertainOutput = new JsonObject { ["uncertainStepId"] = earliest.Id };
             if (result is NodeResult.Failure final)
             {
-                result = new NodeResult.Unknown(final.Error + " Прошлая попытка этого шага могла выполниться — проверьте и решите.");
+                result = new NodeResult.Unknown(final.Error + " Прошлая попытка этого шага могла выполниться — проверьте и решите.")
+                {
+                    Snapshot = final.Snapshot,
+                };
                 uncertainOutput["failure"] = Redact(final.Error, secrets);
             }
         }
@@ -641,11 +652,16 @@ public sealed partial class ProcessEngine
                 finalStep = finalStep with
                 {
                     State = StepState.Failed, Error = failure.Error,
-                    Output = failure.MaybeExecuted ? new JsonObject { ["maybeExecuted"] = true } : finalStep.Output,
+                    Output = WithSnapshot(failure.MaybeExecuted ? new JsonObject { ["maybeExecuted"] = true } : finalStep.Output,
+                        failure.Snapshot, secrets),
                 };
                 break;
             case NodeResult.Unknown unknown:
-                finalStep = finalStep with { State = StepState.Unknown, Error = unknown.Reason, Output = uncertainOutput ?? finalStep.Output };
+                finalStep = finalStep with
+                {
+                    State = StepState.Unknown, Error = unknown.Reason,
+                    Output = WithSnapshot(uncertainOutput ?? finalStep.Output, unknown.Snapshot, secrets),
+                };
                 break;
         }
 
@@ -989,6 +1005,19 @@ public sealed partial class ProcessEngine
 
         await write.CommitAsync();
         return p;
+    }
+
+    /// <summary>Результат шага со снимком экрана при ошибке (адрес и заголовок — без значений секретов).</summary>
+    private static JsonObject? WithSnapshot(JsonObject? output, JsonObject? snapshot, IReadOnlyList<string> secrets)
+    {
+        if (snapshot is null)
+        {
+            return output;
+        }
+
+        var result = output?.DeepClone() as JsonObject ?? [];
+        result["snapshot"] = Redact(snapshot.DeepClone() as JsonObject, secrets);
+        return result;
     }
 
     /// <summary>Последний (внутренний) параллельный участок маркера и то, что снаружи него.</summary>

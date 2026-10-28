@@ -18,6 +18,7 @@ internal sealed class BrowserFixture : IAsyncDisposable
     public BrowserSessions Sessions { get; private set; } = null!;
     public TestSite Site { get; } = new();
     public FakeAdsPower? Ads { get; private set; }
+    public TestSnapshots Snapshots { get; } = new();
     public string Workspace => Path.Combine(_root, "workspace");
     public string DataDirectory => Path.Combine(_root, "data");
 
@@ -48,6 +49,7 @@ internal sealed class BrowserFixture : IAsyncDisposable
         {
             DataDirectory = DataDirectory,
             ExecutablePathOverride = TestBrowser.ExecutablePath,
+            Snapshots = Snapshots,
         }, _client);
         return Sessions;
     }
@@ -89,5 +91,18 @@ internal sealed class BrowserFixture : IAsyncDisposable
         catch (UnauthorizedAccessException)
         {
         }
+    }
+}
+
+/// <summary>Снимки при ошибках — в памяти теста.</summary>
+internal sealed class TestSnapshots : Pepa.Core.Nodes.ISnapshotStore
+{
+    public System.Collections.Concurrent.ConcurrentQueue<(string ProcessId, byte[] Image, string Name)> Saved { get; } = new();
+
+    public ValueTask<string?> SaveAsync(string processId, byte[] image, string extension, CancellationToken cancellationToken)
+    {
+        var name = $"{Saved.Count + 1:000}{extension}";
+        Saved.Enqueue((processId, image, name));
+        return ValueTask.FromResult<string?>(name);
     }
 }

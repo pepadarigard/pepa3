@@ -49,6 +49,15 @@ public sealed class BrowserScenarioTests
         Assert.Equal(AttentionKind.StepFailed, process.Attention);
         Assert.Contains("не появился", process.StatusMessage);
         Assert.Equal(0, f.Site.Submits);
+
+        // Что было на странице в момент ошибки — снимок, адрес и заголовок в результате шага.
+        var failed = (await f.H.StepsAsync(id)).Single(s => s.State == StepState.Failed);
+        var snapshot = failed.Output!["snapshot"]!.AsObject();
+        Assert.Equal(f.Site.Url("/form"), snapshot["url"]!.GetValue<string>());
+        Assert.Equal("Форма", snapshot["title"]!.GetValue<string>());
+        var saved = Assert.Single(f.Snapshots.Saved);
+        Assert.Equal((id, snapshot["image"]!.GetValue<string>()), (saved.ProcessId, saved.Name));
+        Assert.Equal([0xFF, 0xD8], saved.Image[..2]);
     }
 
     [Fact]

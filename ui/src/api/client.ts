@@ -118,6 +118,15 @@ function safeParse(text: string): unknown {
   }
 }
 
+async function imageUrl(path: string): Promise<string> {
+  const response = await fetch(path, { headers: { "X-Pepa-Token": memoryToken ?? "" } });
+  if (!response.ok) {
+    const body = safeParse(await response.text()) as { error?: string } | undefined;
+    throw new ApiError(body?.error ?? `Ошибка ${response.status}`, response.status);
+  }
+  return URL.createObjectURL(await response.blob());
+}
+
 export const api = {
   info: () => request<Info>("GET", "/info"),
   nodeTypes: () => request<NodeTypes>("GET", "/node-types"),
@@ -158,14 +167,10 @@ export const api = {
   answer: (id: number, answer: { answer?: string; option?: number }) =>
     request<{ duplicate: boolean }>("POST", `/questions/${id}/answer`, answer),
   /** Картинка к вопросу — адресом в памяти браузера (запрос с ключом доступа, обычной ссылкой не открыть). */
-  questionImage: async (id: number): Promise<string> => {
-    const response = await fetch(`/api/questions/${id}/image`, { headers: { "X-Pepa-Token": memoryToken ?? "" } });
-    if (!response.ok) {
-      const body = safeParse(await response.text()) as { error?: string } | undefined;
-      throw new ApiError(body?.error ?? `Ошибка ${response.status}`, response.status);
-    }
-    return URL.createObjectURL(await response.blob());
-  },
+  questionImage: (id: number): Promise<string> => imageUrl(`/api/questions/${id}/image`),
+  /** Снимок экрана при ошибке шага — так же, адресом в памяти браузера. */
+  stepSnapshot: (processId: string, name: string): Promise<string> =>
+    imageUrl(`/api/processes/${encodeURIComponent(processId)}/snapshots/${encodeURIComponent(name)}`),
 
   resources: () => request<Resource[]>("GET", "/resources"),
   releaseResource: (key: string) => request<{ message: string }>("POST", "/resources/release", { key }),

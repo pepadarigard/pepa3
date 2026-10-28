@@ -92,10 +92,12 @@ public sealed class PepaHost : IAsyncDisposable
             BaseUrl = settings.Current.AdsPowerUrl,
             ApiKey = settings.Current.AdsPowerApiKey,
         });
+        var snapshots = new Snapshots.SnapshotFolder(Path.Combine(dataDirectory, "snapshots"));
         var browsers = new BrowserSessions(new BrowserModuleOptions
         {
             DataDirectory = dataDirectory,
             ExecutablePathOverride = options.BrowserExecutablePath,
+            Snapshots = snapshots,
         }, adsPower);
         // Входящие сообщения Telegram становятся событиями движка (движок создаётся позже, поэтому ссылка — отложенная).
         ProcessEngine? engineRef = null;
@@ -160,6 +162,7 @@ public sealed class PepaHost : IAsyncDisposable
         builder.Services.AddSingleton<EventHub>();
         builder.Services.AddSingleton(adsPower);
         builder.Services.AddSingleton(browsers);
+        builder.Services.AddSingleton(snapshots);
         var recorder = new BrowserRecorder(browsers);
         builder.Services.AddSingleton(recorder);
         builder.Services.AddSingleton(telegram);
@@ -173,7 +176,7 @@ public sealed class PepaHost : IAsyncDisposable
             questions: async (process, ct) => (await sp.GetRequiredService<ProcessEngine>().ListQuestionsAsync(process.Id, ct))
                 .Select(asked => new Notifications.AskedQuestion(asked.Subscription.Id, ProcessMapper.Question(asked).Text)).ToList()));
         builder.Services.AddSingleton(sp => new Backups.HistoryRetention(store, () => settings.Current.HistoryDays, TimeProvider.System,
-            sp.GetRequiredService<ILogger<Backups.HistoryRetention>>()));
+            sp.GetRequiredService<ILogger<Backups.HistoryRetention>>(), snapshots));
         builder.Services.AddSingleton(sp => new Backups.DatabaseBackups(store, TimeProvider.System, sp.GetRequiredService<ILogger<Backups.DatabaseBackups>>()));
         // Новые файлы в отслеживаемых папках — события движка.
         builder.Services.AddSingleton(sp => new FolderWatcher(workspace, Path.Combine(dataDirectory, "watches"),

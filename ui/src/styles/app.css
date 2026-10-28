@@ -2122,3 +2122,38 @@ pre.json {
   align-self: flex-start;
 }
 
+/* Снимок экрана при ошибке шага */
+.snapshot {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.snapshot-place {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.snapshot-place .mono {
+  overflow-wrap: anywhere;
+}
+.snapshot-image {
+  max-width: min(100%, 560px);
+  max-height: 360px;
+  object-fit: contain;
+  object-position: left top;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: zoom-in;
+  align-self: flex-start;
+}
+.snapshot-zoom {
+  cursor: zoom-out;
+}
+.snapshot-zoom img {
+  max-width: 96vw;
+  max-height: 94vh;
+  object-fit: contain;
+  border-radius: 6px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+}

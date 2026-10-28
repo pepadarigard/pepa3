@@ -610,6 +610,12 @@ internal static class ApiEndpoints
             return await mapper.SummariesAsync(processes, ct);
         });
 
+        // Снимок экрана при ошибке шага (имя — из результата шага).
+        api.MapGet("/processes/{id}/snapshots/{name}", (string id, string name, Snapshots.SnapshotFolder snapshots) =>
+            snapshots.Find(id, name) is { } path
+                ? Results.File(path, name.EndsWith(".png", StringComparison.Ordinal) ? "image/png" : "image/jpeg")
+                : NotFound("Снимка нет: он удалён вместе с историей процесса или не сохранился."));
+
         api.MapGet("/processes/{id}", async (string id, IPepaStore store, ProcessMapper mapper, CancellationToken ct) =>
         {
             var process = await store.GetProcessAsync(id, ct);

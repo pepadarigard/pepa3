@@ -96,8 +96,9 @@ async function waitForServer() {
 
 async function main() {
   const anthropic = startFakeAnthropic();
+  // Браузер для блоков «Браузер» в процессах — тот же Chromium, что у самой проверки.
   const server = spawn("dotnet", [serverDll, "--data-dir", path.join(temp, "data"), "--workspace", workspace, "--port", String(port), "--token", token, "--ui", ui,
-    "--assistant-url", `http://127.0.0.1:${assistantPort}`], {
+    "--assistant-url", `http://127.0.0.1:${assistantPort}`, "--browser", process.env.PEPA_E2E_BROWSER ?? chromium.executablePath()], {
     stdio: ["ignore", "pipe", "pipe"],
   });
   let serverLog = "";
@@ -316,6 +317,43 @@ async function main() {
     await page.goto(`${base}/#/process/${httpRun.processId}`);
     await page.locator(".badge", { hasText: "Завершён" }).first().waitFor({ timeout: 15000 });
     await page.getByText("страница получена: да").first().waitFor();
+
+    step("Снимок страницы при ошибке шага браузера");
+    const shotScenario = await (await fetch(`${base}/api/scenarios`, {
+      method: "POST",
+      headers: { "X-Pepa-Token": token, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "E2E: нажать несуществующее",
+        nodes: [
+          { id: "start", type: "start", position: { x: 0, y: 0 } },
+          { id: "open", type: "browser.open", position: { x: 260, y: 0 }, config: { browser: "chrome", headless: true, url: `${base}/` } },
+          { id: "click", type: "browser.click", position: { x: 520, y: 0 }, config: { selector: "#нет-такого", waitSeconds: 1 } },
+          { id: "end", type: "end", position: { x: 780, y: 0 } },
+        ],
+        edges: [
+          { id: "e1", source: "start", sourcePort: "out", target: "open" },
+          { id: "e2", source: "open", sourcePort: "out", target: "click" },
+          { id: "e3", source: "click", sourcePort: "out", target: "end" },
+        ],
+      }),
+    })).json();
+    const shotRun = await (await fetch(`${base}/api/scenarios/${shotScenario.id}/run`, {
+      method: "POST",
+      headers: { "X-Pepa-Token": token, "Content-Type": "application/json" },
+      body: "{}",
+    })).json();
+    await page.goto(`${base}/#/process/${shotRun.processId}`);
+    const snapshot = page.locator(".process-hero .snapshot-image");
+    await snapshot.waitFor({ timeout: 60000 });
+    await page.locator(".process-hero .snapshot-place", { hasText: `${base}/` }).waitFor();
+    if (!(await snapshot.evaluate((img) => img.complete && img.naturalWidth > 0))) throw new Error("Снимок страницы не загрузился");
+    await snapshot.click();
+    await page.locator(".snapshot-zoom img").waitFor();
+    await page.waitForTimeout(300); // окно появляется плавно
+    await page.screenshot({ path: path.join(shots, "snapshot.png") });
+    await page.locator(".snapshot-zoom").click();
+    await page.locator(".snapshot-zoom").waitFor({ state: "detached" });
+    await fetch(`${base}/api/processes/${shotRun.processId}/cancel`, { method: "POST", headers: { "X-Pepa-Token": token } });
 
     step("Спросить пользователя: вопрос на «Главной» и ответ кнопкой");
     const askScenario = await (await fetch(`${base}/api/scenarios`, {
