@@ -113,6 +113,8 @@ public sealed class SubprocessAndLoopTests
         var called = await ChildOfAsync(h, calling);
         var started = await ChildOfAsync(h, starting);
         await h.WaitForStatusAsync(called.Id, ProcessStatus.Waiting);
+        // Запущенный без ожидания тоже должен дойти до своего ожидания — иначе проверка ниже зависела бы от скорости машины.
+        await h.WaitForStatusAsync(started.Id, ProcessStatus.Waiting);
         await h.WaitForStatusAsync(starting, ProcessStatus.Completed);
         Assert.Equal(started.Id, (await h.ProcessAsync(starting)).Variables["childResult"]?.GetValue<string>());
 
