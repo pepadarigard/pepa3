@@ -52,14 +52,15 @@ public sealed class CsvTableTests : TableTestKit
     [Fact]
     public async Task Comma_separated_utf8_file_without_final_newline_gets_a_proper_line()
     {
-        await File.WriteAllTextAsync(P("data.csv"), "name,price\nTea,1.5", new UTF8Encoding(false));
+        // Кириллица в файле — значит, он в UTF-8 (без неё кодировку по файлу не определить).
+        await File.WriteAllTextAsync(P("data.csv"), "name,price\nЧай,1.5", new UTF8Encoding(false));
 
         await Run(new AppendRowNode(Workspace), new JsonObject
         {
             ["path"] = "data.csv", ["values"] = new JsonObject { ["name"] = "Кофе, чёрный", ["price"] = 2.25 },
         });
 
-        Assert.Equal("name,price\nTea,1.5\n\"Кофе, чёрный\",2.25\n", await File.ReadAllTextAsync(P("data.csv")));
+        Assert.Equal("name,price\nЧай,1.5\n\"Кофе, чёрный\",2.25\n", await File.ReadAllTextAsync(P("data.csv")));
     }
 
     [Fact]

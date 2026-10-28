@@ -274,7 +274,7 @@ public sealed class TableReviewTests : TableTestKit
     }
 
     [Fact]
-    public async Task Ascii_only_csv_without_bom_gets_cyrillic_in_utf8_off_windows()
+    public async Task Ascii_only_csv_without_bom_gets_cyrillic_in_the_windows_code_page_if_it_has_it_else_utf8()
     {
         await File.WriteAllBytesAsync(P("a.csv"), Encoding.ASCII.GetBytes("login;status\r\nanna;new\r\n"));
 
@@ -284,7 +284,23 @@ public sealed class TableReviewTests : TableTestKit
         });
 
         var bytes = await File.ReadAllBytesAsync(P("a.csv"));
-        var expected = OperatingSystem.IsWindows() ? Encoding.GetEncoding(0) : Encoding.UTF8;
+        // Как откроет Excel: в кодировке Windows этого компьютера (Windows-1251 у русской), если в ней есть кириллица.
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        var ansi = OperatingSystem.IsWindows() ? Encoding.GetEncoding(Encoding.GetEncoding(0).CodePage, EncoderFallback.ExceptionFallback, DecoderFallback.ExceptionFallback) : null;
+        var expected = ansi is not null && CanEncode(ansi, "вера новый") ? ansi : Encoding.UTF8;
         Assert.Equal("login;status\r\nanna;new\r\nвера;новый\r\n", expected.GetString(bytes));
+    }
+
+    private static bool CanEncode(Encoding encoding, string text)
+    {
+        try
+        {
+            encoding.GetByteCount(text);
+            return true;
+        }
+        catch (EncoderFallbackException)
+        {
+            return false;
+        }
     }
 }

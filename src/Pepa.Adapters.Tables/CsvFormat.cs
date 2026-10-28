@@ -21,10 +21,26 @@ internal sealed record CsvDialect(Encoding Encoding, byte[] Preamble, char Delim
     /// <summary>
     /// Кодировка для записи. Файл без BOM только из латиницы мог сохранить и Excel (в кодировке Windows этого компьютера),
     /// и другая программа (в UTF-8) — по нему не видно. Excel откроет такой файл в кодировке Windows, поэтому в неё и
-    /// пишется (на Windows); иначе — UTF-8.
+    /// пишется (на Windows), если в ней есть все знаки (кириллица — в Windows-1251 русской Windows); иначе — UTF-8, без
+    /// потерь.
     /// </summary>
-    public Encoding WriteEncoding(string text) =>
-        AsciiOnly && !text.All(char.IsAscii) && OperatingSystem.IsWindows() ? CsvDocument.WindowsAnsi.Value : Encoding;
+    public Encoding WriteEncoding(string text)
+    {
+        if (!AsciiOnly || text.All(char.IsAscii) || !OperatingSystem.IsWindows())
+        {
+            return Encoding;
+        }
+
+        try
+        {
+            CsvDocument.WindowsAnsi.Value.GetByteCount(text);
+            return CsvDocument.WindowsAnsi.Value;
+        }
+        catch (EncoderFallbackException)
+        {
+            return Encoding;
+        }
+    }
 
     public static string EncodingTitle(Encoding encoding, byte[] preamble) => encoding.CodePage switch
     {
