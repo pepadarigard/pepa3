@@ -9,6 +9,7 @@ import { ProcessStatusBadge } from "../components/process";
 import { useRunScenario } from "../components/RunDialog";
 import { useTriggersDialog } from "../components/triggers";
 import { Badge, Button, Empty, ErrorState, Loading } from "../components/ui";
+import { exportableScenario } from "../lib/export";
 import { formatMoment, plural } from "../lib/format";
 import { navigate } from "../router";
 
@@ -148,13 +149,17 @@ function ScenarioCard({ scenario: s, onRun, triggers, onTriggers }: { scenario: 
     setMenu(false);
     try {
       const scenario = await api.scenario(s.id);
-      const blob = new Blob([JSON.stringify(scenario.definition, null, 2)], { type: "application/json" });
+      const { definition, cleared } = exportableScenario(scenario.definition);
+      const blob = new Blob([JSON.stringify(definition, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
       link.download = `${s.name.replace(/[\\/:*?"<>|]+/g, "_")}.pepa.json`;
       link.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
+      if (cleared.length > 0) {
+        feedback.toast(`Значения секретных переменных (${cleared.join(", ")}) в файл не попали — после импорта введите их заново.`);
+      }
     } catch (e) {
       feedback.error(e);
     }
