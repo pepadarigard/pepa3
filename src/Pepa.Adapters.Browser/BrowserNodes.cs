@@ -58,6 +58,24 @@ public static class BrowserNodes
         Help = "Сколько ждать, пока элемент появится и станет доступен.",
     };
 
+    /// <summary>Как ответить на окно сайта (alert, confirm, prompt), если оно появится во время шага.</summary>
+    internal static readonly FieldDescriptor DialogField = new()
+    {
+        Name = "dialog", Label = "Если сайт покажет окно", Kind = FieldKind.Select, Default = "stop",
+        Options =
+        [
+            new("stop", "Остановиться (ответить «Отмена»)"), new("accept", "Согласиться (OK)"), new("dismiss", "Отказаться (Отмена)"),
+        ],
+        Help = "Окно вида «Вы уверены?», сообщение или запрос текста. По умолчанию Pepa отвечает «Отмена» и останавливается: " +
+               "что сделал сайт, решаете вы. Если окно ожидаемо — выберите ответ.",
+    };
+
+    internal static readonly FieldDescriptor DialogTextField = new()
+    {
+        Name = "dialogText", Label = "Ответ на запрос сайта", Kind = FieldKind.Template,
+        Help = "Для окна, где сайт просит ввести текст (при «Согласиться»). Пусто — то, что предложил сайт.",
+    };
+
     internal static readonly PortDescriptor Out = new(Ports.Out, "Далее");
     internal static readonly PortDescriptor Error = new(Ports.Error, "Ошибка", PortKind.Error);
 
@@ -99,10 +117,89 @@ public static class BrowserNodes
             return NodeResult.Fail(ads.Message, retryable: true);
         }
 
-        var result = await RunActionAsync(session, page, cancellationToken, action, what);
+        // Окно, которое сайт показал между шагами (по таймеру, при загрузке): этот шаг не выполняется — страница уже не та,
+        // что ожидалась.
+        if (session.TakeDialogs() is { Count: > 0 } earlier)
+        {
+            var stale = NodeResult.Fail($"Пока процесс шёл к этому шагу, сайт показал окно: {Describe(earlier)}. Шаг «{what}» не " +
+                                        "выполнялся — посмотрите на страницу и выполните его ещё раз.", retryable: false);
+            return !session.Closed && !page.IsClosed ? await WithSnapshotAsync(stale, sessions, context, page, cancellationToken) : stale;
+        }
+
+        var answer = context.GetString("dialog") switch
+        {
+            "accept" => DialogAnswer.Accept,
+            "dismiss" => DialogAnswer.Dismiss,
+            _ => DialogAnswer.Stop,
+        };
+        session.BeginDialogs(answer, context.GetString("dialogText"));
+        NodeResult result;
+        try
+        {
+            result = await RunActionAsync(session, page, cancellationToken, action, what);
+        }
+        finally
+        {
+            session.EndDialogs();
+        }
+
+        if (session.TakeDialogs() is { Count: > 0 } shown)
+        {
+            result = WithDialogs(result, shown, answer, what);
+        }
+
         return result is NodeResult.Failure or NodeResult.Unknown && !session.Closed && !page.IsClosed
             ? await WithSnapshotAsync(result, sessions, context, page, cancellationToken)
             : result;
+    }
+
+    /// <summary>
+    /// Итог шага с окнами сайта. «Остановиться»: действие было, сайт спросил, Pepa ответила «Отмена» — что сделал сайт,
+    /// неизвестно, решает пользователь (проверка по шагу тут не поможет: она не знает про окно). С выбранным ответом —
+    /// итог тот же, окно — в сообщении.
+    /// </summary>
+    private static NodeResult WithDialogs(NodeResult result, List<SiteDialog> dialogs, DialogAnswer answer, string what)
+    {
+        var text = Describe(dialogs);
+        var output = new JsonArray([.. dialogs.Select(d => (JsonNode)new JsonObject
+        {
+            ["kind"] = d.Kind, ["message"] = d.Message, ["answer"] = d.Answer,
+        })]);
+        return result switch
+        {
+            NodeResult.Failure failure => failure with { Error = $"{failure.Error} Сайт показал окно: {text}." },
+            NodeResult.Unknown unknown => unknown with { Reason = $"{unknown.Reason} Сайт показал окно: {text}." },
+            NodeResult.Success when answer == DialogAnswer.Stop => new NodeResult.Unknown(
+                $"Во время действия «{what}» сайт показал окно: {text}. Pepa не знала, как ответить, ответила «Отмена» и остановилась: " +
+                "что сделал сайт, неизвестно — посмотрите на страницу. Если окно ожидаемо, выберите у блока ответ «Согласиться» или " +
+                "«Отказаться».")
+            {
+                AlreadyChecked = true,
+            },
+            NodeResult.Success ok => ok with
+            {
+                Message = $"{ok.Message} Сайт показал окно: {text}.".Trim(),
+                Level = MessageLevel.Warning,
+                Output = With(ok.Output, output),
+            },
+            _ => result,
+        };
+
+        static JsonObject With(JsonObject? existing, JsonArray shown)
+        {
+            var merged = existing?.DeepClone() as JsonObject ?? [];
+            merged["dialogs"] = shown;
+            return merged;
+        }
+    }
+
+    private static string Describe(IEnumerable<SiteDialog> dialogs) =>
+        string.Join("; ", dialogs.Select(d => $"{d.Kind} «{Trim(d.Message)}» ({d.At:HH:mm:ss}) — ответ «{d.Answer}»"));
+
+    private static string Trim(string message)
+    {
+        var flat = string.Join(' ', message.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        return flat.Length > 300 ? flat[..300] + "…" : flat;
     }
 
     private static async Task<NodeResult> RunActionAsync(BrowserSession session, IPage page, CancellationToken cancellationToken,
@@ -494,6 +591,8 @@ public sealed class GotoNode(BrowserSessions sessions) : INodeExecutor
                 Options = [new("load", "страница загрузилась"), new("domcontentloaded", "готова разметка (быстрее)"), new("networkidle", "сеть затихла (медленнее)")],
             },
             new FieldDescriptor { Name = "waitSeconds", Label = "Ждать загрузку, секунд", Kind = FieldKind.Seconds, Default = 60, Min = 1, Max = 600 },
+            BrowserNodes.DialogField,
+            BrowserNodes.DialogTextField,
             BrowserNodes.SessionField,
         ],
     };
@@ -576,6 +675,8 @@ public sealed class ClickNode(BrowserSessions sessions) : INodeExecutor
             },
             BrowserNodes.WaitField(),
             BrowserNodes.MatchField,
+            BrowserNodes.DialogField,
+            BrowserNodes.DialogTextField,
             BrowserNodes.SessionField,
         ],
     };
@@ -756,6 +857,8 @@ public sealed class PressNode(BrowserSessions sessions) : INodeExecutor
             },
             BrowserNodes.SelectorField("В элементе", required: false),
             BrowserNodes.WaitField(),
+            BrowserNodes.DialogField,
+            BrowserNodes.DialogTextField,
             BrowserNodes.SessionField,
         ],
     };

@@ -108,6 +108,8 @@ public sealed class BrowserRecorder(BrowserSessions sessions) : IAsyncDisposable
                 throw new RecorderException(ex.Message);
             }
 
+            // Во время записи на окна сайта отвечает сам человек.
+            session.ManualDialogs = true;
             await session.Context.ExposeBindingAsync("__pepaRecord", (BindingSource source, string json) => OnRecorded(source, json));
             await session.Context.AddInitScriptAsync(RecorderScript.Source);
             session.Context.Page += (_, page) => OnNewPage(page);

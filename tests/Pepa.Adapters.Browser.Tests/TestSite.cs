@@ -59,6 +59,16 @@ internal sealed class TestSite : IDisposable
                            </body></html>
                            """,
                 "/second" => "<!doctype html><html><head><title>Вторая</title></head><body><p id='msg'>Вторая страница</p></body></html>",
+                // Окна сайта: вопрос, сообщение, запрос текста и сообщение по таймеру (между шагами).
+                "/dialogs" => """
+                           <!doctype html><html><head><title>Окна</title></head><body>
+                           <button id="del" onclick="document.getElementById('out').textContent = confirm('Удалить запись?') ? 'удалено' : 'отменено'">Удалить</button>
+                           <button id="save" onclick="alert('Сохранено'); document.getElementById('out').textContent = 'сохранено'">Сохранить</button>
+                           <button id="ask" onclick="document.getElementById('out').textContent = 'имя: ' + prompt('Ваше имя?', '')">Спросить</button>
+                           <button id="later" onclick="setTimeout(() => { alert('Сессия скоро закончится'); document.getElementById('out').textContent = 'после окна'; }, 200)">Позже</button>
+                           <div id="out"></div>
+                           </body></html>
+                           """,
                 // Форма внутри веб-компонента с открытым теневым DOM (как у сайтов на Lit, Shoelace).
                 "/shadow" => """
                            <!doctype html><html><head><title>Компонент</title></head><body>

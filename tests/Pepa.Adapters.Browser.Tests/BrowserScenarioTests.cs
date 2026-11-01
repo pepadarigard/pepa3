@@ -1,4 +1,6 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
+using Pepa.Core;
 using Pepa.Core.Model;
 using Pepa.Engine;
 using Pepa.Engine.Persistence;
@@ -211,6 +213,90 @@ public sealed class BrowserScenarioTests
         }
 
         Assert.Empty(f.Snapshots.Saved);
+    }
+
+    private static ScenarioDefinition DialogScenario(BrowserFixture f, string selector, object? answer = null) => new ScenarioBuilder("Окно сайта")
+        .Node("start", "start")
+        .Node("open", "browser.open", BrowserFixture.OpenConfig(f.Site.Url("/dialogs")))
+        .Node("click", "browser.click", answer is null ? new { selector } : MergeSelector(selector, answer))
+        .Node("end", "end")
+        .Chain("start", "open", "click", "end")
+        .Build();
+
+    private static JsonObject MergeSelector(string selector, object answer)
+    {
+        var config = JsonSerializer.SerializeToNode(answer)!.AsObject();
+        config["selector"] = selector;
+        return config;
+    }
+
+    private static async Task<string?> PageTextAsync(BrowserFixture f, string processId, string selector) =>
+        await (await f.Sessions.GetAsync(processId, "main", CancellationToken.None)).CurrentPage().TextContentAsync(selector);
+
+    [Fact]
+    public async Task Site_question_stops_the_process_with_its_text_unless_an_answer_is_chosen()
+    {
+        TestBrowser.RequireBrowser();
+        await using var f = await BrowserFixture.CreateAsync();
+
+        // По умолчанию: «Отмена» и остановка — что сделал сайт, решает пользователь.
+        var stopped = await f.H.RunAsync(DialogScenario(f, "#del"));
+        var process = await f.H.WaitForStatusAsync(stopped, ProcessStatus.NeedsAttention);
+        Assert.Equal(AttentionKind.UnknownStep, process.Attention);
+        Assert.Contains("вопрос «Удалить запись?»", process.StatusMessage);
+        Assert.Contains("ответ «Отмена»", process.StatusMessage);
+        Assert.Equal("отменено", await PageTextAsync(f, stopped, "#out"));
+        await f.H.Engine.CancelAsync(stopped);
+
+        // Ответ выбран — процесс идёт дальше, окно видно в журнале.
+        var accepted = await f.H.RunAsync(DialogScenario(f, "#del", new { dialog = "accept" }));
+        await f.H.WaitForStatusAsync(accepted, ProcessStatus.Completed);
+        Assert.Contains(await f.H.Store.GetJournalAsync(accepted), j => j.Message.Contains("«Удалить запись?»", StringComparison.Ordinal));
+
+        var asked = await f.H.RunAsync(new ScenarioBuilder("Запрос")
+            .Variable("answer", VariableType.Any)
+            .Node("start", "start")
+            .Node("open", "browser.open", BrowserFixture.OpenConfig(f.Site.Url("/dialogs")))
+            .Node("click", "browser.click", new { selector = "#ask", dialog = "accept", dialogText = "Анна" })
+            .Node("read", "browser.read", new { what = "text", selector = "#out", saveTo = "answer" })
+            .Node("end", "end", new { message = "{{ vars.answer }}" })
+            .Chain("start", "open", "click", "read", "end")
+            .Build());
+        Assert.Equal("имя: Анна", (await f.H.WaitForStatusAsync(asked, ProcessStatus.Completed)).StatusMessage);
+    }
+
+    [Fact]
+    public async Task Site_message_between_steps_stops_the_next_step_before_it_acts()
+    {
+        TestBrowser.RequireBrowser();
+        await using var f = await BrowserFixture.CreateAsync();
+        var id = await f.H.RunAsync(new ScenarioBuilder("Окно между шагами")
+            .Node("start", "start")
+            .Node("open", "browser.open", BrowserFixture.OpenConfig(f.Site.Url("/dialogs")))
+            .Node("later", "browser.click", new { selector = "#later" })
+            .Node("wait", "event.wait", new { source = "manual", eventType = "go" })
+            .Node("save", "browser.click", new { selector = "#save", dialog = "accept" })
+            .Node("end", "end")
+            .Chain("start", "open", "later", "wait")
+            .Edge("wait", "save", Ports.Event).Edge("save", "end")
+            .Build());
+        await f.H.WaitForStatusAsync(id, ProcessStatus.Waiting);
+
+        // Сайт показывает сообщение по таймеру, пока процесс ждёт.
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+        while (await PageTextAsync(f, id, "#out") != "после окна")
+        {
+            Assert.True(DateTime.UtcNow < deadline, "Сайт не показал окно.");
+            await Task.Delay(50, TestContext.Current.CancellationToken);
+        }
+
+        await f.H.Engine.PublishEventAsync(new EventInput { Source = "manual", Type = "go" });
+        var stopped = await f.H.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
+        Assert.Equal(AttentionKind.StepFailed, stopped.Attention);
+        Assert.Contains("сообщение «Сессия скоро закончится»", stopped.StatusMessage);
+        Assert.Contains("не выполнялся", stopped.StatusMessage);
+        Assert.Equal("после окна", await PageTextAsync(f, id, "#out"));
+        await f.H.Engine.CancelAsync(id);
     }
 
     private static ScenarioDefinition ClickScenario(BrowserFixture f, string selector) => new ScenarioBuilder("Нажать")

@@ -16,9 +16,30 @@ public enum BrowserKind
     AdsPower,
 }
 
+/// <summary>Как отвечать на окно сайта (alert, confirm, prompt, «Покинуть страницу?»).</summary>
+public enum DialogAnswer
+{
+    /// <summary>Ответить «Отмена» (у простого сообщения — «OK», другого нет) и остановить процесс: решает пользователь.</summary>
+    Stop,
+
+    /// <summary>Согласиться: «OK» (в окне-вопросе — с заданным ответом).</summary>
+    Accept,
+
+    /// <summary>Отказаться: «Отмена».</summary>
+    Dismiss,
+}
+
+/// <summary>Окно сайта: что спросил сайт и что ответила Pepa.</summary>
+public sealed record SiteDialog(string Kind, string Message, string Answer, DateTimeOffset At);
+
 /// <summary>Открытый браузер, с которым работает процесс.</summary>
 public sealed class BrowserSession
 {
+    private readonly Lock _dialogGate = new();
+    private readonly List<SiteDialog> _dialogs = [];
+    private DialogAnswer _answer = DialogAnswer.Stop;
+    private string? _promptText;
+
     internal BrowserSession(string processId, string name, BrowserKind kind, IBrowserContext context, IBrowser? browser,
         IPage page, BrowserSessionInfo info)
     {
@@ -34,6 +55,14 @@ public sealed class BrowserSession
         {
             browser.Disconnected += (_, _) => Closed = true;
         }
+
+        // Окна сайта не закрываются молча: без обработчика Playwright отвечает «Отмена», а шаг считался бы выполненным.
+        foreach (var open in context.Pages)
+        {
+            WatchDialogs(open);
+        }
+
+        context.Page += (_, opened) => WatchDialogs(opened);
     }
 
     public string ProcessId { get; }
@@ -44,6 +73,91 @@ public sealed class BrowserSession
     public IPage Page { get; internal set; }
     public BrowserSessionInfo Info { get; }
     public bool Closed { get; private set; }
+
+    /// <summary>Окна отвечает человек (запись действий): Pepa их только видит.</summary>
+    internal bool ManualDialogs { get; set; }
+
+    private void WatchDialogs(IPage page) => page.Dialog += (_, dialog) => _ = AnswerAsync(dialog);
+
+    private async Task AnswerAsync(IDialog dialog)
+    {
+        if (ManualDialogs)
+        {
+            return;
+        }
+
+        DialogAnswer answer;
+        string? text;
+        lock (_dialogGate)
+        {
+            answer = _answer;
+            text = _promptText;
+        }
+
+        // У простого сообщения одна кнопка. Окно запоминается до ответа: ответ отпускает страницу, и шаг может закончиться
+        // раньше, чем эта запись.
+        var accept = answer == DialogAnswer.Accept || dialog.Type == DialogType.Alert;
+        lock (_dialogGate)
+        {
+            _dialogs.Add(new SiteDialog(KindOf(dialog.Type), dialog.Message, accept ? "OK" : "Отмена", DateTimeOffset.Now));
+        }
+
+        try
+        {
+            if (accept)
+            {
+                await dialog.AcceptAsync(dialog.Type == DialogType.Prompt ? text ?? dialog.DefaultValue : null);
+            }
+            else
+            {
+                await dialog.DismissAsync();
+            }
+        }
+        catch (PlaywrightException)
+        {
+            // Вкладка или браузер закрылись.
+        }
+    }
+
+    private static string KindOf(string type) => type switch
+    {
+        DialogType.Alert => "сообщение",
+        DialogType.Confirm => "вопрос",
+        DialogType.Prompt => "запрос",
+        DialogType.BeforeUnload => "«Покинуть страницу?»",
+        _ => type,
+    };
+
+    /// <summary>Шаг начался: окна, которые покажет сайт, получат этот ответ.</summary>
+    internal void BeginDialogs(DialogAnswer answer, string? promptText)
+    {
+        lock (_dialogGate)
+        {
+            _answer = answer;
+            _promptText = promptText;
+        }
+    }
+
+    /// <summary>Шаг закончился: окна между шагами — «Отмена» и остановка следующего шага.</summary>
+    internal void EndDialogs()
+    {
+        lock (_dialogGate)
+        {
+            _answer = DialogAnswer.Stop;
+            _promptText = null;
+        }
+    }
+
+    /// <summary>Окна, показанные с прошлого раза (и забыть их).</summary>
+    internal List<SiteDialog> TakeDialogs()
+    {
+        lock (_dialogGate)
+        {
+            var taken = _dialogs.ToList();
+            _dialogs.Clear();
+            return taken;
+        }
+    }
 
     /// <summary>Текущая вкладка; если её закрыли — последняя открытая.</summary>
     public IPage CurrentPage()
