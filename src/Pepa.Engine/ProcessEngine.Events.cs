@@ -100,6 +100,9 @@ public sealed partial class ProcessEngine
     /// <summary>Изменились события (для обновления интерфейса).</summary>
     public event Action? EventsChanged;
 
+    /// <summary>Событие ушло в конфликт: никому не отдано и ждёт решения пользователя (для уведомлений).</summary>
+    public event Action<EventRecord>? ConflictRaised;
+
     private void SignalRouter()
     {
         if (_routerSignal.CurrentCount < 2)
@@ -210,7 +213,11 @@ public sealed partial class ProcessEngine
 
             var best = candidates.Max(c => c.Subscription.Priority);
             var top = candidates.Where(c => c.Subscription.Priority == best).ToList();
-            if (top.Count > 1)
+            // Неоднозначно — решает пользователь: подходит нескольким; условие кого-то не вычислилось (подходит ли — неизвестно);
+            // процесс уже ждёт решения по другому событию (какое из них его — тоже решает пользователь).
+            var held = await HeldByConflictsAsync(record.Id, cancellationToken);
+            var waitingDecision = top.Where(c => held.ContainsKey(c.Subscription.Id)).Select(c => held[c.Subscription.Id]).Distinct().ToList();
+            if (top.Count > 1 || top.Any(c => c.Problem is not null) || waitingDecision.Count > 0)
             {
                 await using (var write = await _store.BeginWriteAsync(cancellationToken))
                 {
@@ -223,7 +230,7 @@ public sealed partial class ProcessEngine
                                 ["processId"] = c.Process.Id,
                                 ["scenarioName"] = c.Process.ScenarioName,
                             }).ToArray()),
-                            Note = Waiters(top.Select(c => c.Process.Id).ToList()) + " Выберите, кому его отдать.",
+                            Note = ConflictNote(top, waitingDecision),
                             HandledAt = _time.GetUtcNow(),
                         }, expected))
                     {
@@ -233,8 +240,8 @@ public sealed partial class ProcessEngine
                     foreach (var processId in top.Select(c => c.Process.Id).Distinct())
                     {
                         await write.AddJournalAsync(Journal(processId, JournalLevel.Warning,
-                            $"Событие #{record.Id} «{record.Source}» подходит сразу нескольким ожиданиям. " +
-                            "Оно не отдано никому — нужно решение на странице «Выполнение»."));
+                            $"Событие #{record.Id} «{record.Source}» может подходить этому ожиданию, но отдать его само нельзя: " +
+                            $"{ConflictNote(top, waitingDecision)}"));
                     }
 
                     await write.CommitAsync();
@@ -243,6 +250,18 @@ public sealed partial class ProcessEngine
                 foreach (var candidate in top)
                 {
                     Notify(candidate.Process.Id);
+                }
+
+                if (await _store.GetEventAsync(record.Id, cancellationToken) is { State: EventState.Conflict } raised)
+                {
+                    try
+                    {
+                        ConflictRaised?.Invoke(raised);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Ошибка в обработчике конфликта события.");
+                    }
                 }
 
                 return EventState.Conflict;
@@ -284,7 +303,60 @@ public sealed partial class ProcessEngine
         return record.State;
     }
 
-    private sealed record Candidate(SubscriptionRecord Subscription, ProcessRecord Process);
+    /// <param name="Problem">Условие ожидания не вычислилось: подходит ли событие, неизвестно.</param>
+    private sealed record Candidate(SubscriptionRecord Subscription, ProcessRecord Process, string? Problem = null);
+
+    /// <summary>Почему событие ждёт решения пользователя.</summary>
+    private string ConflictNote(IReadOnlyList<Candidate> top, IReadOnlyList<long> waitingDecision)
+    {
+        var parts = new List<string>();
+        if (top.Count > 1)
+        {
+            parts.Add(Waiters(top.Select(c => c.Process.Id).ToList()));
+        }
+
+        foreach (var uncertain in top.Where(c => c.Problem is not null))
+        {
+            // Текст ошибки — только в журнале процесса: в нём может оказаться часть условия (с подставленными значениями).
+            parts.Add($"Условие ожидания процесса #{uncertain.Process.Id[^6..]} не вычислилось (подробности — в журнале процесса) — " +
+                      "подходит ли ему событие, неизвестно.");
+        }
+
+        if (waitingDecision.Count > 0)
+        {
+            parts.Add($"Процесс уже ждёт вашего решения по событию {string.Join(", ", waitingDecision.Select(id => $"#{id}"))} — " +
+                      "какое из событий его, решаете вы.");
+        }
+
+        parts.Add("Выберите, кому его отдать.");
+        return string.Join(" ", parts);
+    }
+
+    /// <summary>
+    /// Ожидания, которые сейчас ждут решения пользователя: подписка → событие-конфликт, в кандидатах которого она есть.
+    /// Такие ожидания не завершаются по тайм-ауту и не получают другие события сами — пока пользователь не решит.
+    /// </summary>
+    private async Task<Dictionary<long, long>> HeldByConflictsAsync(long? exceptEventId, CancellationToken cancellationToken)
+    {
+        var held = new Dictionary<long, long>();
+        foreach (var conflict in await _store.ListEventsAsync(new EventQuery { States = [EventState.Conflict], Limit = 1000 }, cancellationToken))
+        {
+            if (conflict.Id == exceptEventId || conflict.Candidates is not { } candidates)
+            {
+                continue;
+            }
+
+            foreach (var candidate in candidates.OfType<JsonObject>())
+            {
+                if (candidate["subscriptionId"]?.GetValue<long>() is { } subscriptionId)
+                {
+                    held.TryAdd(subscriptionId, conflict.Id);
+                }
+            }
+        }
+
+        return held;
+    }
 
     private async Task<List<Candidate>> FindCandidatesAsync(EventRecord record, CancellationToken cancellationToken)
     {
@@ -319,10 +391,13 @@ public sealed partial class ProcessEngine
                 }
                 catch (ExpressionException ex)
                 {
+                    // Не «не подходит»: подходит ли — неизвестно. Такой кандидат делает событие конфликтом, а не отдаёт его
+                    // другому процессу молча.
                     await using var write = await _store.BeginWriteAsync(cancellationToken);
                     await write.AddJournalAsync(Journal(process.Id, JournalLevel.Warning,
                         $"Условие ожидания события не вычислилось для события #{record.Id}: {ex.Message}"));
                     await write.CommitAsync();
+                    result.Add(new Candidate(subscription, process, ex.Message));
                     continue;
                 }
 

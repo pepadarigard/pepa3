@@ -37,6 +37,7 @@ public sealed class AttentionNotifier : IAsyncDisposable
     private readonly ILogger _logger;
     private readonly TimeSpan _batchDelay;
     private readonly Channel<string> _changes = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
+    private readonly Channel<EventRecord> _conflicts = Channel.CreateUnbounded<EventRecord>(new UnboundedChannelOptions { SingleReader = true });
     private readonly Dictionary<string, Known> _notified = new(StringComparer.Ordinal);
 
     /// <summary>О чём уже сообщено: остановка (её состояние) и вопросы (номера — повтор того же текста тоже новый вопрос).</summary>
@@ -91,6 +92,7 @@ public sealed class AttentionNotifier : IAsyncDisposable
         }
 
         _background.Add(Task.Run(() => LoopAsync(_stop.Token)));
+        _background.Add(Task.Run(() => ConflictLoopAsync(_stop.Token)));
         if (recovery is not null && StartupMessage(recovery) is { } message)
         {
             _background.Add(Task.Run(() => SendWhenConnectedAsync(message, _stop.Token)));
@@ -99,6 +101,74 @@ public sealed class AttentionNotifier : IAsyncDisposable
 
     /// <summary>Процесс изменился (вызывается на каждое изменение — дёшево, разбор в фоне).</summary>
     public void OnProcessChanged(string processId) => _changes.Writer.TryWrite(processId);
+
+    /// <summary>
+    /// Событие ушло в конфликт: никому не отдано, пока вы не решите (процессы-кандидаты при этом не уходят по тайм-ауту —
+    /// без решения они стоят). Одно сообщение на конфликт; данные события в него не попадают.
+    /// </summary>
+    public void OnConflict(EventRecord conflict) => _conflicts.Writer.TryWrite(conflict);
+
+    private async Task ConflictLoopAsync(CancellationToken stop)
+    {
+        try
+        {
+            while (await _conflicts.Reader.WaitToReadAsync(stop))
+            {
+                await Task.Delay(_batchDelay, stop);
+                var raised = new List<EventRecord>();
+                while (_conflicts.Reader.TryRead(out var conflict))
+                {
+                    raised.Add(conflict);
+                }
+
+                try
+                {
+                    var text = ConflictMessage(raised);
+                    try
+                    {
+                        _desktop?.RequestAttention(text);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Не удалось привлечь внимание к окну Pepa.");
+                    }
+
+                    await TrySendAsync(text, stop);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex, "Уведомление о конфликте события не отправлено.");
+                }
+            }
+        }
+        catch (OperationCanceledException) when (stop.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Уведомления о конфликтах событий остановлены из-за ошибки.");
+        }
+    }
+
+    internal static string ConflictMessage(IReadOnlyList<EventRecord> conflicts)
+    {
+        var text = new StringBuilder();
+        text.AppendLine(conflicts.Count == 1
+            ? "Pepa: событие ждёт вашего решения — отдать его само нельзя."
+            : $"Pepa: событий ждут вашего решения — {conflicts.Count}.");
+        foreach (var conflict in conflicts.Take(MaxListed))
+        {
+            text.AppendLine($"• #{conflict.Id} «{conflict.Source}»: {Cut(conflict.Note ?? "", 400)}");
+        }
+
+        if (conflicts.Count > MaxListed)
+        {
+            text.AppendLine($"…и ещё {conflicts.Count - MaxListed}.");
+        }
+
+        text.Append("Решить — в Pepa на странице «Выполнение» (раздел «События»).");
+        return text.ToString();
+    }
 
     private async Task LoopAsync(CancellationToken stop)
     {

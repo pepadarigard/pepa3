@@ -156,6 +156,72 @@ public sealed class EventTests
     }
 
     [Fact]
+    public async Task Condition_that_fails_to_evaluate_makes_a_conflict_instead_of_a_silent_winner()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        // Условие первого падает на событии без текста; второй ждёт любой ответ. Раньше событие молча доставалось второму.
+        var picky = await h.CreateScenarioAsync(WaitReply(correlationKey: null, match: "event.payload.text.toLowerCase().includes('да')"));
+        var any = await h.CreateScenarioAsync(WaitReply(correlationKey: null));
+        var first = await StartWaitingAsync(h, picky, "1");
+        var second = await StartWaitingAsync(h, any, "2");
+
+        var published = await h.Engine.PublishEventAsync(Reply(null, payload: new JsonObject { ["code"] = 7 }));
+        var conflict = await WaitEventStateAsync(h, published.EventId, EventState.Conflict);
+        Assert.Contains("не вычислилось", conflict.Note);
+        Assert.Equal(2, conflict.Candidates!.Count);
+        await h.IdleAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(ProcessStatus.Waiting, (await h.ProcessAsync(second)).Status);
+        Assert.Equal(ProcessStatus.Waiting, (await h.ProcessAsync(first)).Status);
+    }
+
+    [Fact]
+    public async Task Timeouts_of_conflict_candidates_wait_for_the_decision()
+    {
+        var (h, scenario) = await SetupAsync(WaitReply(timeoutSeconds: 60, correlationKey: null));
+        await using var _ = h;
+        var first = await StartWaitingAsync(h, scenario, "1");
+        var second = await StartWaitingAsync(h, scenario, "2");
+        var raised = new System.Collections.Concurrent.ConcurrentQueue<long>();
+        h.Engine.ConflictRaised += record => raised.Enqueue(record.Id);
+        var published = await h.Engine.PublishEventAsync(Reply(null, payload: "ответ"));
+        await WaitEventStateAsync(h, published.EventId, EventState.Conflict);
+        Assert.Equal(published.EventId, Assert.Single(raised));
+
+        // Срок вышел, пока событие ждёт решения: никто не уходит по тайм-ауту.
+        await h.IdleAsync(TimeSpan.FromMinutes(3));
+        Assert.Equal(ProcessStatus.Waiting, (await h.ProcessAsync(first)).Status);
+        Assert.Equal(ProcessStatus.Waiting, (await h.ProcessAsync(second)).Status);
+        Assert.Single(await h.Store.GetJournalAsync(first), j => j.Message.Contains("Тайм-аут отложен до решения", StringComparison.Ordinal));
+
+        // Решение принято: выбранный получает событие, второй — тайм-аут (его срок давно вышел).
+        var subscription = (await h.Store.GetSubscriptionsAsync(second)).Single(s => s.State == SubscriptionState.Active);
+        await h.Engine.ResolveEventAsync(published.EventId, subscription.Id);
+        await h.WaitForStatusAsync(second, ProcessStatus.Completed);
+        Assert.Equal("Ответ не пришёл", (await h.WaitForStatusAsync(first, ProcessStatus.Failed, advance: TimeSpan.FromSeconds(1))).StatusMessage);
+    }
+
+    [Fact]
+    public async Task New_event_for_a_process_waiting_for_a_decision_also_waits_for_one()
+    {
+        var (h, scenario) = await SetupAsync(WaitReply());
+        await using var _ = h;
+        var lenient = await h.CreateScenarioAsync(WaitReply(correlationKey: null, match: "event.payload === 1"));
+        var keyed = await StartWaitingAsync(h, scenario, "K");
+        await StartWaitingAsync(h, lenient, "любой");
+        // Первое событие подходит обоим — конфликт.
+        var firstEvent = await h.Engine.PublishEventAsync(Reply("K", payload: 1));
+        await WaitEventStateAsync(h, firstEvent.EventId, EventState.Conflict);
+
+        // Второе подходит только процессу с ключом K, но он уже ждёт решения по первому: какое из двух событий его — решает
+        // пользователь, второе не отдаётся само.
+        var secondEvent = await h.Engine.PublishEventAsync(Reply("K", payload: 2));
+        var queued = await WaitEventStateAsync(h, secondEvent.EventId, EventState.Conflict);
+        Assert.Contains($"#{firstEvent.EventId}", queued.Note);
+        await h.IdleAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(ProcessStatus.Waiting, (await h.ProcessAsync(keyed)).Status);
+    }
+
+    [Fact]
     public async Task Higher_priority_wins_without_conflict()
     {
         await using var h = await EngineHarness.CreateAsync();

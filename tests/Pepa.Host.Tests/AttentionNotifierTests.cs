@@ -328,5 +328,20 @@ public sealed class AttentionNotifierTests
         Assert.Contains("«Главной»", text);
         Assert.Contains("«Выполнение»", text);
     }
-}
 
+    [Fact]
+    public void Conflict_message_names_the_event_and_where_to_decide_without_its_data()
+    {
+        var conflict = new EventRecord
+        {
+            Id = 42, Source = "telegram", Type = "message", State = EventState.Conflict, ReceivedAt = DateTimeOffset.UtcNow,
+            Payload = new System.Text.Json.Nodes.JsonObject { ["text"] = "код 4512" },
+            Note = "Событие ждут процессы #a1b2c3, #d4e5f6. Выберите, кому его отдать.",
+        };
+        var text = AttentionNotifier.ConflictMessage([conflict]);
+        Assert.Contains("#42 «telegram»", text);
+        Assert.Contains("#a1b2c3", text);
+        Assert.Contains("странице «Выполнение»", text);
+        Assert.DoesNotContain("4512", text);
+    }
+}

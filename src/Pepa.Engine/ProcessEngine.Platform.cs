@@ -390,6 +390,23 @@ public sealed partial class ProcessEngine
 
         if (subscription.State == SubscriptionState.Active && token.WakeAt is { } wakeAt && wakeAt <= now && TimeoutDue(subscription, wakeAt, now))
         {
+            // Событие, которое может быть ответом этому ожиданию, ждёт решения пользователя: тайм-аут — после решения, иначе
+            // ожидание ушло бы по «Тайм-ауту», а событие потом некому было бы отдать.
+            if ((await HeldByConflictsAsync(null, CancellationToken.None)).TryGetValue(subscription.Id, out var conflictId))
+            {
+                if (_heldTimeoutNoted.TryAdd(subscription.Id, true))
+                {
+                    await using var write = await _store.BeginWriteAsync();
+                    await write.AddJournalAsync(Journal(process.Id, JournalLevel.Warning,
+                        $"Срок ожидания вышел, но событие #{conflictId} может быть ответом на него и ждёт вашего решения на странице " +
+                        "«Выполнение». Тайм-аут отложен до решения.", step.Id, node.Id));
+                    await write.CommitAsync();
+                    Notify(process.Id);
+                }
+
+                return false;
+            }
+
             var isChild = subscription.Purpose == SubscriptionPurpose.ChildProcess;
             var timeoutResult = isChild
                 ? NodeResult.Ok(Ports.Timeout,
@@ -432,6 +449,9 @@ public sealed partial class ProcessEngine
     }
 
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _catchingUp = new(StringComparer.Ordinal);
+
+    /// <summary>Ожидания, о которых уже записано «тайм-аут отложен до решения» (чтобы не писать на каждом такте таймера).</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<long, bool> _heldTimeoutNoted = new();
 
     /// <summary>
     /// Источник после запуска догружает события, пришедшие, пока Pepa была закрыта: тайм-ауты ожиданий его событий,
