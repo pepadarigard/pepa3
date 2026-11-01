@@ -192,7 +192,7 @@ async function main() {
     await page.locator(".react-flow__pane").click({ position: { x: 20, y: 20 } });
     await page.keyboard.press("Control+v");
     await page.locator(".react-flow__node").nth(2).waitFor();
-    if ((await page.locator(".react-flow__node").count()) !== 3) throw new Error("Блок не вставился");
+    await expectCount(page.locator(".react-flow__node"), 3, "Блок не вставился");
     await page.locator(".react-flow__pane").click({ position: { x: 20, y: 20 } });
     await page.keyboard.press("Control+f");
     await page.getByPlaceholder("Найти блок: подпись, тип, параметр…").fill("итог");
@@ -224,7 +224,7 @@ async function main() {
     const groupCard = page.getByTestId("group-card");
     await groupCard.waitFor();
     if (!(await groupCard.innerText()).includes("2 блока")) throw new Error("Свёрнутая группа не показывает свои блоки");
-    if ((await blocks.count()) !== shownBefore - 2) throw new Error("Блоки свёрнутой группы видны");
+    await expectCount(blocks, shownBefore - 2, "Блоки свёрнутой группы видны");
     await page.screenshot({ path: path.join(shots, "16b-group-collapsed.png") });
     await page.keyboard.press("Control+s");
     await page.locator(".editor-top .badge", { hasText: /^Сохранено$/ }).waitFor();
@@ -518,7 +518,7 @@ async function main() {
     await page.getByRole("dialog").getByRole("button", { name: "Запустить" }).click();
     await page.waitForURL(/#\/process\//);
     await page.locator(".pnode-here").nth(1).waitFor({ timeout: 15000 });
-    if ((await page.locator(".pnode-here").count()) !== 2) throw new Error("Ожидались две отметки «процесс здесь»");
+    await expectCount(page.locator(".pnode-here"), 2, "Ожидались две отметки «процесс здесь»");
     await page.screenshot({ path: path.join(shots, "14-parallel.png") });
     await fetch(`${base}/api/events`, {
       method: "POST",
@@ -547,8 +547,8 @@ async function main() {
     await page.screenshot({ path: path.join(shots, "13-assistant.png") });
     await assistant.getByRole("button", { name: "Вставить в схему" }).click();
     await page.getByText("Первый подключён к «Началу»").waitFor();
-    if ((await page.locator(".react-flow__node").count()) !== 3) throw new Error("Помощник: ожидалось 3 блока на схеме");
-    if ((await page.locator(".react-flow__edge").count()) !== 2) throw new Error("Помощник: ожидалось 2 связи на схеме");
+    await expectCount(page.locator(".react-flow__node"), 3, "Помощник: ожидалось 3 блока на схеме");
+    await expectCount(page.locator(".react-flow__edge"), 2, "Помощник: ожидалось 2 связи на схеме");
 
     step("ИИ-помощник: объяснить и изменить сценарий");
     await page.getByRole("button", { name: "ИИ-помощник" }).click();
@@ -565,8 +565,8 @@ async function main() {
     await assistant.getByRole("button", { name: "Применить изменения" }).click();
     await page.getByText("Изменения помощника применены").waitFor();
     await page.locator(".pnode-summary", { hasText: "Здравствуйте" }).waitFor();
-    if ((await page.locator(".react-flow__node").count()) !== 3) throw new Error("Правка помощника: ожидалось 3 блока");
-    if ((await page.locator(".react-flow__edge").count()) !== 2) throw new Error("Правка помощника: ожидалось 2 связи");
+    await expectCount(page.locator(".react-flow__node"), 3, "Правка помощника: ожидалось 3 блока");
+    await expectCount(page.locator(".react-flow__edge"), 2, "Правка помощника: ожидалось 2 связи");
     await page.locator(".react-flow__pane").click({ position: { x: 20, y: 20 } });
     await page.keyboard.press("Control+z");
     await page.locator(".pnode-summary", { hasText: "Привет" }).waitFor();
@@ -630,6 +630,17 @@ async function main() {
     await new Promise((r) => server.once("exit", r));
     fs.rmSync(temp, { recursive: true, force: true });
   }
+}
+
+/** Ждёт нужное число элементов: схема дорисовывает блоки и связи не сразу (связи — после того, как блоки измерены). */
+async function expectCount(locator, expected, message) {
+  const deadline = Date.now() + 10000;
+  let count = await locator.count();
+  while (count !== expected && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 100));
+    count = await locator.count();
+  }
+  if (count !== expected) throw new Error(`${message} (ожидалось ${expected}, есть ${count})`);
 }
 
 async function lastProcessId() {

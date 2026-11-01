@@ -282,7 +282,8 @@ public sealed class BrowserScenarioTests
             .Build());
         await f.H.WaitForStatusAsync(id, ProcessStatus.Waiting);
 
-        // Сайт показывает сообщение по таймеру, пока процесс ждёт.
+        // Сайт показывает сообщение, пока процесс ждёт (страница ждёт разрешения теста, а не таймера).
+        f.Site.Signal();
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
         while (await PageTextAsync(f, id, "#out") != "после окна")
         {

@@ -10,6 +10,7 @@ internal sealed class TestSite : IDisposable
     private readonly HttpListener _listener = new();
     private readonly CancellationTokenSource _stop = new();
     private int _submits;
+    private int _signal;
 
     public TestSite()
     {
@@ -24,6 +25,9 @@ internal sealed class TestSite : IDisposable
 
     /// <summary>Сколько раз форма была отправлена (настоящий «внешний эффект» нажатия).</summary>
     public int Submits => Volatile.Read(ref _submits);
+
+    /// <summary>Разрешить странице то, что она ждёт (её запросы /signal начинают получать «go»).</summary>
+    public void Signal() => Volatile.Write(ref _signal, 1);
 
     public static int FreePort()
     {
@@ -65,7 +69,17 @@ internal sealed class TestSite : IDisposable
                            <button id="del" onclick="document.getElementById('out').textContent = confirm('Удалить запись?') ? 'удалено' : 'отменено'">Удалить</button>
                            <button id="save" onclick="alert('Сохранено'); document.getElementById('out').textContent = 'сохранено'">Сохранить</button>
                            <button id="ask" onclick="document.getElementById('out').textContent = 'имя: ' + prompt('Ваше имя?', '')">Спросить</button>
-                           <button id="later" onclick="setTimeout(() => { alert('Сессия скоро закончится'); document.getElementById('out').textContent = 'после окна'; }, 200)">Позже</button>
+                           <button id="later" onclick="later()">Позже</button>
+                           <script>
+                             // Сообщение — когда тест разрешит (/signal), а не по таймеру: под нагрузкой таймер успевал сработать во время шага.
+                             function later() {
+                               fetch('/signal').then(r => r.text()).then(t => {
+                                 if (t !== 'go') { setTimeout(later, 50); return; }
+                                 alert('Сессия скоро закончится');
+                                 document.getElementById('out').textContent = 'после окна';
+                               });
+                             }
+                           </script>
                            <div id="out"></div>
                            </body></html>
                            """,
@@ -117,6 +131,7 @@ internal sealed class TestSite : IDisposable
                            </body></html>
                            """,
                 "/submit" => $"Принято: {context.Request.QueryString["u"]}",
+                "/signal" => Volatile.Read(ref _signal) == 1 ? "go" : "wait",
                 _ => null,
             };
 
@@ -126,7 +141,7 @@ internal sealed class TestSite : IDisposable
             }
 
             context.Response.StatusCode = html is null ? 404 : 200;
-            context.Response.ContentType = path == "/submit" ? "text/plain; charset=utf-8" : "text/html; charset=utf-8";
+            context.Response.ContentType = path is "/submit" or "/signal" ? "text/plain; charset=utf-8" : "text/html; charset=utf-8";
             var bytes = Encoding.UTF8.GetBytes(html ?? "not found");
             await context.Response.OutputStream.WriteAsync(bytes);
             context.Response.Close();
