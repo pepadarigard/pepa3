@@ -160,4 +160,55 @@ public sealed partial class EmailScenarioTests
             (reopened.Account!.SmtpPort, reopened.Account.SmtpSecurity, reopened.Account.SentFolder));
         Assert.Null(reopened.SendProblem);
     }
+
+    [Fact]
+    public async Task Attachment_that_cannot_be_read_is_an_error_and_nothing_is_sent()
+    {
+        await using var smtp = new FakeSmtpServer();
+        await using var h = await CreateAsync(smtp: smtp);
+        var path = Path.Combine(Workspace, "отчёт.xlsx");
+        await File.WriteAllTextAsync(path, "таблица", TestContext.Current.CancellationToken);
+
+        // Файл занят другой программой целиком — прочитать его нельзя.
+        string message;
+        await using (new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            var id = await h.RunAsync(Send(new { to = "client@site.ru", subject = "Отчёт", files = "отчёт.xlsx" }));
+            var stopped = await h.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
+            Assert.Equal(AttentionKind.StepFailed, stopped.Attention);
+            message = stopped.StatusMessage!;
+            await h.Engine.CancelAsync(id);
+        }
+
+        Assert.Contains("Вложение «отчёт.xlsx» не открылось", message);
+        Assert.Contains("письмо не отправлено", message);
+        Assert.Empty(smtp.Messages);
+        Assert.DoesNotContain(_server.Commands, c => c.Contains("HEADER", StringComparison.OrdinalIgnoreCase));
+
+        // Файл, открытый так, как держит его Excel (чтение и запись, но не исключительно), читается.
+        await using (new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite))
+        {
+            var id = await h.RunAsync(Send(new { to = "client@site.ru", subject = "Отчёт", files = "отчёт.xlsx", saveTo = "sent" }));
+            await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        }
+
+        Assert.Equal("отчёт.xlsx", Parse(Assert.Single(smtp.Messages).Raw).Attachments.Single().ContentDisposition?.FileName);
+    }
+
+    [Fact]
+    public async Task Temporary_login_refusal_is_retried_and_shows_the_server_reply()
+    {
+        await using var smtp = new FakeSmtpServer();
+        await using var h = await CreateAsync(smtp: smtp);
+        smtp.TemporaryAuthFailures = 1;
+
+        var id = await h.RunAsync(Send(new { to = "client@site.ru", subject = "Счёт", saveTo = "sent" }, retries: 1));
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+
+        var first = (await h.StepsAsync(id)).Where(s => s.NodeId == "send").OrderBy(s => s.Attempt).First();
+        Assert.Equal(StepState.Failed, first.State);
+        Assert.Contains("временно не принял вход", first.Error);
+        Assert.Contains("Too many login attempts", first.Error);
+        Assert.Single(smtp.Messages);
+    }
 }

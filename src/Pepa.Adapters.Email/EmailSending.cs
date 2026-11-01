@@ -51,6 +51,10 @@ public sealed partial class EmailService
         {
             throw new EmailNotSentException($"{ex.Message} Письмо не отправлено.", retryable: !ex.Lasting, ex);
         }
+        catch (OperationCanceledException ex) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new EmailNotSentException("Отправка прервана до передачи письма — письмо не отправлено.", retryable: true, ex);
+        }
 
         var progress = new SendProgress();
         try
@@ -62,6 +66,12 @@ public sealed partial class EmailService
             // Сервер ответил отказом (адрес, отправитель, само письмо) — письмо он не принял.
             var temporary = (int)ex.StatusCode is >= 400 and < 500;
             throw new EmailNotSentException(Refusal(ex), retryable: temporary, ex);
+        }
+        catch (OperationCanceledException ex) when (cancellationToken.IsCancellationRequested && !progress.Complete)
+        {
+            // Шаг остановлен (или вышло его время), пока письмо не передано целиком: незаконченное письмо сервер не отправит.
+            throw new EmailNotSentException("Отправка прервана, пока письмо передавалось серверу (не целиком), — письмо не отправлено.",
+                retryable: true, ex);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
@@ -205,9 +215,13 @@ public sealed partial class EmailService
     private static EmailUnavailableException ExplainSmtp(Exception ex, EmailAccount account) => ex switch
     {
         EmailUnavailableException known => known,
+        // Временный отказ (4xx: слишком много входов подряд, сервер занят) — не «неверный пароль»: повтор поможет.
+        AuthenticationException { InnerException: SmtpCommandException command } when (int)command.StatusCode is >= 400 and < 500 =>
+            new EmailUnavailableException($"Сервер отправки временно не принял вход — повторите позже. Ответ сервера: {command.Message.Trim()}", ex),
         AuthenticationException => new EmailUnavailableException(
             "Сервер отправки не принял логин или пароль. Для Яндекса, Mail.ru и Gmail нужен пароль приложения, а в настройках " +
-            "почты — разрешение почтовым программам (для Яндекса — «Портал паролей», для Mail.ru — «Пароли для внешних приложений»).",
+            "почты — разрешение почтовым программам (для Яндекса — «Портал паролей», для Mail.ru — «Пароли для внешних приложений»). " +
+            $"Ответ сервера: {(ex.InnerException as SmtpCommandException)?.Message.Trim() ?? ex.Message.Trim()}",
             ex, lasting: true),
         SslHandshakeException => new EmailUnavailableException(
             $"Не удалось установить защищённое соединение с {account.SmtpServer}:{account.SmtpPort} — проверьте порт и способ защиты.", ex),

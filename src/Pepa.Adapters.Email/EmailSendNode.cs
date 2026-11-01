@@ -59,6 +59,10 @@ public sealed class SendEmailNode(EmailService email, IWorkspace workspace) : IN
         ],
     };
 
+    /// <summary>С вложениями отправка может идти дольше общего тайм-аута действия (большие файлы, медленная связь).</summary>
+    public TimeSpan? ExpectedDuration(JsonObject input) =>
+        string.IsNullOrWhiteSpace(input.GetString("files")) ? null : TimeSpan.FromMinutes(10);
+
     /// <summary>
     /// Номер письма (Message-ID) — до отправки: по нему письмо ищется в «Отправленных», если ответ сервера потерялся. При
     /// повторе шага — номер прошлой попытки: проверка найдёт письмо, какая бы из попыток его ни отправила.
@@ -96,7 +100,23 @@ public sealed class SendEmailNode(EmailService email, IWorkspace workspace) : IN
         var body = new BodyBuilder { TextBody = context.GetString("text") ?? "" };
         foreach (var file in files)
         {
-            await body.Attachments.AddAsync(file, cancellationToken);
+            // Как и таблицы, файл читается, не мешая программе, у которой он открыт (Excel), и целиком до отправки: файл,
+            // который не прочитался, — письмо не отправлено, а не «неизвестно, ушло ли».
+            byte[] content;
+            try
+            {
+                await using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using var copy = new MemoryStream();
+                await stream.CopyToAsync(copy, cancellationToken);
+                content = copy.ToArray();
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return NodeResult.Fail($"Вложение «{workspace.ToRelative(file)}» не открылось ({ex.Message}) — письмо не отправлено.",
+                    retryable: ex is IOException);
+            }
+
+            await body.Attachments.AddAsync(Path.GetFileName(file), new MemoryStream(content), cancellationToken);
         }
 
         var message = new MimeMessage

@@ -1,3 +1,5 @@
+using Microsoft.Extensions.DependencyInjection;
+
 namespace Pepa.Host.Tests;
 
 /// <summary>Секретные переменные не видны в подробностях процесса: ни значения, ни параметры шагов, ни журнал.</summary>
@@ -191,5 +193,13 @@ public sealed class SecretApiTests
         var events = await f.Client.GetStringAsync("/api/events");
         Assert.DoesNotContain("Zx81Qp-Long", events);
         Assert.Contains("••••", events);
+
+        // Самая короткая история (1 день): процесс удаляется — данные доставленного ему события удаляются вместе с ним, а не
+        // остаются без его секретов, которыми скрывались.
+        var store = (Pepa.Storage.Sqlite.SqliteStore)f.Host.Services.GetRequiredService<Pepa.Engine.Persistence.IPepaStore>();
+        await using var retention = new Pepa.Host.Backups.HistoryRetention(store, () => 1, new ManualTime(DateTimeOffset.UtcNow.AddDays(1.5)),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+        Assert.Equal(1, await retention.RunOnceAsync(TestContext.Current.CancellationToken));
+        Assert.DoesNotContain("Zx81Qp-Long", await f.Client.GetStringAsync("/api/events"));
     }
 }

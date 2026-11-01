@@ -59,6 +59,20 @@ internal sealed class TestSite : IDisposable
                            </body></html>
                            """,
                 "/second" => "<!doctype html><html><head><title>Вторая</title></head><body><p id='msg'>Вторая страница</p></body></html>",
+                // Форма внутри веб-компонента с открытым теневым DOM (как у сайтов на Lit, Shoelace).
+                "/shadow" => """
+                           <!doctype html><html><head><title>Компонент</title></head><body>
+                           <login-box></login-box>
+                           <script>
+                             customElements.define('login-box', class extends HTMLElement {
+                               constructor() {
+                                 super();
+                                 this.attachShadow({ mode: 'open' }).innerHTML = '<label>Ключ <input id="token" type="text"></label>';
+                               }
+                             });
+                           </script>
+                           </body></html>
+                           """,
                 "/late" => """
                            <!doctype html><html><head><title>Позже</title></head><body>
                            <script>setTimeout(() => { const b = document.createElement('button'); b.id = 'late'; b.textContent = 'Появилась'; document.body.appendChild(b); }, 1500);</script>

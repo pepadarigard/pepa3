@@ -180,6 +180,39 @@ public sealed class BrowserScenarioTests
         await f.H.Engine.CancelAsync(hidden);
     }
 
+    [Fact]
+    public async Task Snapshot_is_not_saved_when_the_secret_is_in_a_web_component_or_differs_only_by_line_breaks()
+    {
+        TestBrowser.RequireBrowser();
+        await using var f = await BrowserFixture.CreateAsync();
+        ScenarioDefinition Fill(string page, string selector) => new ScenarioBuilder("Секрет в поле")
+            .Variable("token", VariableType.Text, isInput: true, secret: true)
+            .Node("start", "start")
+            .Node("open", "browser.open", BrowserFixture.OpenConfig(f.Site.Url(page)))
+            .Node("fill", "browser.fill", new { selector, text = "{{ vars.token }}" })
+            .Node("click", "browser.click", new { selector = "#missing", waitSeconds = 1 })
+            .Node("end", "end")
+            .Chain("start", "open", "fill", "click", "end")
+            .Build();
+
+        // Поле в теневом DOM веб-компонента.
+        var shadow = await f.H.RunAsync(Fill("/shadow", "#token"), new JsonObject { ["token"] = "Tok-998877-secret" });
+        await f.H.WaitForStatusAsync(shadow, ProcessStatus.NeedsAttention);
+        // Значение из файла с переводом строки: однострочное поле его убирает.
+        var crlf = await f.H.RunAsync(Fill("/form", "#user"), new JsonObject { ["token"] = "Tok-554433-secret\r\n" });
+        await f.H.WaitForStatusAsync(crlf, ProcessStatus.NeedsAttention);
+
+        foreach (var id in new[] { shadow, crlf })
+        {
+            var snapshot = (await f.H.StepsAsync(id)).Single(s => s.State == StepState.Failed).Output!["snapshot"]!;
+            Assert.Null(snapshot["image"]);
+            Assert.Contains("видно секретное значение", snapshot["note"]!.GetValue<string>());
+            await f.H.Engine.CancelAsync(id);
+        }
+
+        Assert.Empty(f.Snapshots.Saved);
+    }
+
     private static ScenarioDefinition ClickScenario(BrowserFixture f, string selector) => new ScenarioBuilder("Нажать")
         .Node("start", "start")
         .Node("open", "browser.open", BrowserFixture.OpenConfig(f.Site.Url("/form")))

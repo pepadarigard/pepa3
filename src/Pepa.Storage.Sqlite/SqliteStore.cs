@@ -104,9 +104,14 @@ public sealed partial class SqliteStore : IPepaStore
     /// нельзя — процесс получил бы пустое событие. Обработанные до <paramref name="deleteBefore"/> удаляются совсем, если
     /// их не получала ни одна подписка. Ждущие решения (конфликт) и ещё не применённые не трогаются никогда.
     /// </summary>
+    /// <param name="unmatchedClearBefore">
+    /// Срок для не подошедших событий, если он другой: их ещё может забрать процесс, который начнёт ждать позже («учитывать
+    /// пришедшие раньше»). Доставленные очищаются по <paramref name="clearBefore"/> — не позже, чем удаляется получивший их
+    /// процесс: по его секретам скрываются данные события.
+    /// </param>
     /// <returns>Сколько событий очищено и сколько удалено.</returns>
-    public async Task<(int Cleared, int Deleted)> PruneEventsAsync(DateTimeOffset clearBefore, DateTimeOffset deleteBefore, int batch = 500,
-        CancellationToken cancellationToken = default)
+    public async Task<(int Cleared, int Deleted)> PruneEventsAsync(DateTimeOffset clearBefore, DateTimeOffset deleteBefore,
+        DateTimeOffset? unmatchedClearBefore = null, int batch = 500, CancellationToken cancellationToken = default)
     {
         const string handled = "('Delivered', 'Unmatched', 'Ignored')";
         // Возраст — от обработки, а не от прихода: событие, долго назначенное приостановленному процессу и вернувшееся на
@@ -115,9 +120,10 @@ public sealed partial class SqliteStore : IPepaStore
             UPDATE events SET payload = NULL, candidates = NULL,
                 state = CASE WHEN state = 'Unmatched' THEN 'Ignored' ELSE state END,
                 note = CASE WHEN note IS NULL OR note = '' THEN $note ELSE note || ' ' || $note END
-            WHERE id IN (SELECT id FROM events WHERE state IN {handled} AND COALESCE(handled_at, received_at) < $before
+            WHERE id IN (SELECT id FROM events WHERE state IN {handled}
+                AND COALESCE(handled_at, received_at) < CASE WHEN state = 'Unmatched' THEN $unmatched ELSE $before END
                 AND (payload IS NOT NULL OR candidates IS NOT NULL OR state = 'Unmatched') LIMIT $batch);
-            """, clearBefore, batch, cancellationToken);
+            """, clearBefore, batch, cancellationToken, unmatchedClearBefore ?? clearBefore);
         var deleted = await RepeatAsync($"""
             DELETE FROM events WHERE id IN (
                 SELECT e.id FROM events e
@@ -129,7 +135,8 @@ public sealed partial class SqliteStore : IPepaStore
     }
 
     /// <summary>Одна команда пачками (под правом записи на каждую пачку), пока она что-то меняет.</summary>
-    private async Task<int> RepeatAsync(string sql, DateTimeOffset before, int batch, CancellationToken cancellationToken)
+    private async Task<int> RepeatAsync(string sql, DateTimeOffset before, int batch, CancellationToken cancellationToken,
+        DateTimeOffset? unmatchedBefore = null)
     {
         var total = 0;
         while (true)
@@ -142,6 +149,7 @@ public sealed partial class SqliteStore : IPepaStore
                 await using var command = connection.CreateCommand();
                 command.CommandText = sql;
                 command.Parameters.AddWithValue("$before", Date(before));
+                command.Parameters.AddWithValue("$unmatched", Date(unmatchedBefore ?? before));
                 command.Parameters.AddWithValue("$batch", batch);
                 command.Parameters.AddWithValue("$note", "Данные события удалены по сроку хранения — сопоставить его снова нельзя.");
                 changed = await command.ExecuteNonQueryAsync(cancellationToken);

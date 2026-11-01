@@ -58,6 +58,9 @@ public sealed class FakeSmtpServer : IAsyncDisposable
 
     public int Logins;
 
+    /// <summary>Сколько ближайших входов отклонить временно («454 — слишком много входов, попробуйте позже»).</summary>
+    public int TemporaryAuthFailures;
+
     /// <summary>Поведение для очередных писем; после — <see cref="SmtpBehavior.Accept"/>.</summary>
     public void Plan(params SmtpBehavior[] behaviors)
     {
@@ -119,7 +122,11 @@ public sealed class FakeSmtpServer : IAsyncDisposable
                         }
 
                         var decoded = Encoding.UTF8.GetString(Convert.FromBase64String(initial ?? "")).Split('\0');
-                        if (decoded.Length == 3 && decoded[1] == Login && decoded[2] == Password)
+                        if (Interlocked.Decrement(ref TemporaryAuthFailures) >= 0)
+                        {
+                            await Write("454 4.7.0 Too many login attempts, please try again later");
+                        }
+                        else if (decoded.Length == 3 && decoded[1] == Login && decoded[2] == Password)
                         {
                             authenticated = true;
                             Interlocked.Increment(ref Logins);

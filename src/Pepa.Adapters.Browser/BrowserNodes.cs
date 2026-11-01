@@ -183,15 +183,35 @@ public static class BrowserNodes
     }
 
     /// <summary>Текст страницы и значения полей (кроме полей паролей — там точки) — в каждой рамке страницы.</summary>
+    /// <remarks>
+    /// Заходит и в открытый теневой DOM веб-компонентов (там его текст — целиком, с запасом). Секрет ищется и в том виде,
+    /// в каком его покажет браузер: без пробелов по краям, без переводов строки (однострочное поле их убирает), с одним
+    /// пробелом вместо нескольких и по строкам многострочного значения. Закрытый теневой DOM со страницы не виден.
+    /// </remarks>
     private const string SecretOnPage = """
         secrets => {
           const parts = [document.body ? document.body.innerText : ''];
-          for (const field of document.querySelectorAll('input, textarea, select')) {
-            if (field.type === 'password' || field.type === 'hidden') continue;
-            parts.push(String(field.value ?? ''));
-          }
+          const visit = root => {
+            for (const field of root.querySelectorAll('input, textarea, select')) {
+              if (field.type === 'password' || field.type === 'hidden') continue;
+              parts.push(String(field.value ?? ''));
+            }
+            for (const element of root.querySelectorAll('*')) {
+              if (element.shadowRoot) {
+                parts.push(element.shadowRoot.textContent ?? '');
+                visit(element.shadowRoot);
+              }
+            }
+          };
+          visit(document);
           const text = parts.join('\n');
-          return secrets.some(secret => text.includes(secret));
+          const flat = text.replace(/\s+/g, ' ');
+          return secrets.some(secret => {
+            const forms = [secret, secret.trim(), secret.replace(/[\r\n]+/g, '').trim(),
+              ...secret.split(/\r\n|\r|\n/).map(line => line.trim()).filter(line => line.length >= 3)];
+            return forms.some(form => form.length > 0 &&
+              (text.includes(form) || flat.includes(form.replace(/\s+/g, ' ').trim())));
+          });
         }
         """;
 

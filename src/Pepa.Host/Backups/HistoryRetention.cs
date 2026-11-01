@@ -19,10 +19,11 @@ public sealed class HistoryRetention(SqliteStore store, Func<int> days, TimeProv
     private const int EventRowDays = 365;
 
     /// <summary>
-    /// Данные события хранятся не меньше этого, какой бы короткой ни была история: ждущий процесс может забрать событие,
-    /// пришедшее до сутки раньше («учитывать пришедшие раньше»).
+    /// Данные не подошедшего события хранятся не меньше этого, какой бы короткой ни была история: процесс, который начнёт
+    /// ждать позже, может забрать событие, пришедшее до суток раньше («учитывать пришедшие раньше»). Доставленные — по сроку
+    /// истории: не дольше получившего их процесса, по секретам которого скрываются их данные.
     /// </summary>
-    private const int MinEventDataDays = 2;
+    private const int MinUnmatchedDataDays = 2;
 
     private readonly CancellationTokenSource _stop = new();
     private Task _loop = Task.CompletedTask;
@@ -45,8 +46,8 @@ public sealed class HistoryRetention(SqliteStore store, Func<int> days, TimeProv
         }
 
         // События: данные — через тот же срок, строки (по ним узнаётся повторно пришедшее) — не раньше чем через год.
-        var (cleared, removed) = await store.PruneEventsAsync(now.AddDays(-Math.Max(keep, MinEventDataDays)),
-            now.AddDays(-Math.Max(keep, EventRowDays)), cancellationToken: cancellationToken);
+        var (cleared, removed) = await store.PruneEventsAsync(now.AddDays(-keep), now.AddDays(-Math.Max(keep, EventRowDays)),
+            now.AddDays(-Math.Max(keep, MinUnmatchedDataDays)), cancellationToken: cancellationToken);
         if (cleared > 0 || removed > 0)
         {
             logger.LogInformation("События старше {Days} дн.: данные удалены у {Cleared}, удалено совсем {Removed}.", keep, cleared, removed);
