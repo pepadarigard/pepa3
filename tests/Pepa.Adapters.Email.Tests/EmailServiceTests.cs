@@ -254,6 +254,51 @@ public sealed class EmailServiceTests : IAsyncDisposable
         Assert.False(await service.CheckAsync(CancellationToken.None));
     }
 
+    [Fact]
+    public async Task Failed_check_reports_blind_and_the_next_good_check_reports_caught_up()
+    {
+        var service = await ConnectedAsync();
+        var blind = 0;
+        var caughtUp = 0;
+        service.Blind += () => blind++;
+        service.CaughtUp += () => caughtUp++;
+
+        // Сервер перестал пускать (как при пропаже связи): письма могут опаздывать, пока проверка снова не пройдёт.
+        var password = _server.Password;
+        _server.Password = "другой";
+        _server.DropConnections();
+        await Assert.ThrowsAsync<EmailUnavailableException>(() => service.CheckAsync(CancellationToken.None));
+        await Assert.ThrowsAsync<EmailUnavailableException>(() => service.CheckAsync(CancellationToken.None));
+        Assert.Equal(1, blind);
+        Assert.Equal(0, caughtUp);
+
+        _server.Deliver(FakeImapServer.Message("noreply@site.ru", "Пока не было связи", "код 3333"));
+        _server.Password = password;
+        await service.CheckAsync(CancellationToken.None);
+        Assert.Equal("Пока не было связи", Assert.Single(_events).Payload!["subject"]!.GetValue<string>());
+        Assert.Equal(1, caughtUp);
+
+        await service.CheckAsync(CancellationToken.None);
+        Assert.Equal(1, caughtUp);
+    }
+
+    [Fact]
+    public async Task After_sleep_the_box_is_checked_over_a_new_connection_and_caught_up_is_reported()
+    {
+        var service = await ConnectedAsync();
+        var caughtUp = 0;
+        service.CaughtUp += () => caughtUp++;
+        var logins = Volatile.Read(ref _server.Logins);
+        _server.Deliver(FakeImapServer.Message("noreply@site.ru", "Во время сна", "код 4444"));
+
+        service.ResumeAfterSleep();
+        await service.CheckAsync(CancellationToken.None);
+
+        Assert.Equal(logins + 1, Volatile.Read(ref _server.Logins));
+        Assert.Equal("Во время сна", Assert.Single(_events).Payload!["subject"]!.GetValue<string>());
+        Assert.Equal(1, caughtUp);
+    }
+
     public async ValueTask DisposeAsync()
     {
         foreach (var service in _services)

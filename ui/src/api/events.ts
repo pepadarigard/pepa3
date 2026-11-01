@@ -33,6 +33,8 @@ export function startEventStream(queryClient: QueryClient, onState: (state: Conn
     } else if (event.type === "events") {
       queryClient.invalidateQueries({ queryKey: ["events"] });
       queryClient.invalidateQueries({ queryKey: ["overview"] });
+    } else if (event.type === "overview") {
+      queryClient.invalidateQueries({ queryKey: ["overview"] });
     } else if (event.type === "resources") {
       queryClient.invalidateQueries({ queryKey: ["resources"] });
     } else if (event.type === "triggers") {

@@ -190,6 +190,10 @@ public sealed class PepaHost : IAsyncDisposable
             TimeProvider.System,
             sp.GetRequiredService<ILogger<ProcessEngine>>()));
         builder.Services.AddSingleton(sp => new ScenarioService(store, sp.GetRequiredService<ProcessEngine>().Validator));
+        // Пока процессы выполняются или ждут, компьютер не засыпает по бездействию (настройка «Не давать компьютеру засыпать»).
+        builder.Services.AddSingleton(sp => new Power.PowerKeeper(
+            async ct => (await store.ListProcessesAsync(new ProcessQuery { Statuses = [ProcessStatus.Running, ProcessStatus.Waiting], Limit = 1 }, ct)).Count > 0,
+            () => settings.Current.KeepAwake, sp.GetRequiredService<ILogger<Power.PowerKeeper>>(), options.KeepAwake));
         builder.Services.AddSingleton(new AssistantKeyStore(store));
         // Помощнику — каталог блоков из того же реестра и два примера сценариев (как образец формата и стиля).
         builder.Services.AddSingleton(sp => new Assistant.ScenarioAssistant(registry, sp.GetRequiredService<ProcessEngine>().Validator,
@@ -230,20 +234,48 @@ public sealed class PepaHost : IAsyncDisposable
         // Процесс завершился — закрыть его браузеры (и профили AdsPower, если так настроено в блоке).
         engine.ProcessFinished += processId => _ = browsers.ReleaseProcessAsync(processId);
 
-        // Пока Telegram после запуска догружает пропущенные сообщения, тайм-ауты ожиданий ответа не наступают.
+        // Пока Telegram после запуска догружает пропущенные сообщения, тайм-ауты ожиданий ответа не наступают. Так же — после
+        // пропажи связи и сна компьютера (D-080): ответ, пришедший вовремя, не должен проиграть тайм-ауту.
         if (telegram.WillCatchUp)
         {
-            engine.SourceCatchingUp(TelegramEvents.Source);
-            telegram.CaughtUp += () => engine.SourceCaughtUp(TelegramEvents.Source);
+            engine.SourceCatchingUp(TelegramEvents.Source, "Telegram");
         }
 
-        // То же для файлов, появившихся в отслеживаемых папках, пока Pepa была закрыта.
-        // Пока почта после запуска забирает письма, пришедшие без Pepa, тайм-ауты ожиданий писем не наступают.
+        telegram.Blind += () => engine.SourceCatchingUp(TelegramEvents.Source, "Telegram");
+        telegram.CaughtUp += () => engine.SourceCaughtUp(TelegramEvents.Source);
+
+        // Пока почта после запуска забирает письма, пришедшие без Pepa (или пока нет связи с сервером), тайм-ауты ожиданий писем не наступают.
         if (email.WillCatchUp)
         {
-            engine.SourceCatchingUp(EmailEvents.Source);
-            email.CaughtUp += () => engine.SourceCaughtUp(EmailEvents.Source);
+            engine.SourceCatchingUp(EmailEvents.Source, "почта");
         }
+
+        email.Blind += () => engine.SourceCatchingUp(EmailEvents.Source, "почта");
+        email.CaughtUp += () => engine.SourceCaughtUp(EmailEvents.Source);
+
+        // Компьютер проснулся: соединения, скорее всего, оборваны — переподключиться сразу, а тайм-ауты ожиданий подождут догрузки.
+        engine.Woke += (sleptFrom, _) =>
+        {
+            if (telegram.WillCatchUp)
+            {
+                engine.SourceCatchingUp(TelegramEvents.Source, "Telegram", sleptFrom);
+                telegram.ResumeAfterSleep();
+            }
+
+            if (email.IsReady)
+            {
+                engine.SourceCatchingUp(EmailEvents.Source, "почта", sleptFrom);
+                email.ResumeAfterSleep();
+            }
+
+            events.Publish("overview");
+        };
+
+        var keeper = app.Services.GetRequiredService<Power.PowerKeeper>();
+        engine.Changed += _ => keeper.Refresh();
+        keeper.Changed += () => events.Publish("overview");
+
+        // То же для файлов, появившихся в отслеживаемых папках, пока Pepa была закрыта.
 
         var watcher = app.Services.GetRequiredService<FolderWatcher>();
         watcher.Configure(settings.Current.FolderWatches);

@@ -529,6 +529,9 @@ async function main() {
 
     step("ИИ-помощник: ключ и черновик блоков");
     await page.goto(`${base}/#/settings`);
+    if (!(await page.getByLabel("Не давать компьютеру засыпать, пока процессы выполняются или ждут").isChecked())) {
+      throw new Error("Запрет сна должен быть включён по умолчанию");
+    }
     await page.getByPlaceholder("sk-ant-…").fill("sk-ant-e2e-0123456789abcdef");
     await page.getByRole("button", { name: "Сохранить ключ" }).click();
     await page.getByText("Подключён · ключ …cdef").waitFor();

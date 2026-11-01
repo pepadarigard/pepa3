@@ -35,7 +35,8 @@ internal static class ApiEndpoints
 
         api.MapGet("/settings", (SettingsService settings) => ToDto(settings));
 
-        api.MapPut("/settings", async (SettingsDto request, SettingsService settings, Adapters.FileSystem.FolderWatcher watcher) =>
+        api.MapPut("/settings", async (SettingsDto request, SettingsService settings, Adapters.FileSystem.FolderWatcher watcher,
+            Power.PowerKeeper keeper) =>
         {
             var current = settings.Current;
             await settings.SaveAsync(new PlatformSettings
@@ -48,10 +49,12 @@ internal static class ApiEndpoints
                 AdsPowerApiKey = request.AdsPowerApiKey ?? current.AdsPowerApiKey,
                 NotifyTelegram = request.NotifyTelegram ?? current.NotifyTelegram,
                 HistoryDays = request.HistoryDays ?? current.HistoryDays,
+                KeepAwake = request.KeepAwake ?? current.KeepAwake,
                 FolderWatches = current.FolderWatches,
             });
             // Рабочая папка могла смениться — слежение за папками начинается в новой заново.
             watcher.Configure(settings.Current.FolderWatches);
+            keeper.Refresh();
             return ToDto(settings);
         });
 
@@ -307,7 +310,8 @@ internal static class ApiEndpoints
             }
         });
 
-        api.MapGet("/overview", async (IPepaStore store, ProcessMapper mapper, CancellationToken ct) =>
+        api.MapGet("/overview", async (IPepaStore store, ProcessMapper mapper, ProcessEngine engine, Power.PowerKeeper keeper,
+            SettingsService settings, CancellationToken ct) =>
         {
             var active = await store.ListProcessesAsync(new ProcessQuery { Statuses = ActiveStatuses, Limit = 500 }, ct);
             var today = DateTimeOffset.Now.Date;
@@ -331,7 +335,8 @@ internal static class ApiEndpoints
                 await mapper.SummariesAsync(recent, ct),
                 conflicts.Count,
                 triggers.Where(t => t.MissedRuns > 0).ToList(),
-                triggers.Where(t => t is { Enabled: true, NextRunAt: not null }).OrderBy(t => t.NextRunAt).Take(5).ToList());
+                triggers.Where(t => t is { Enabled: true, NextRunAt: not null }).OrderBy(t => t.NextRunAt).Take(5).ToList(),
+                new PowerDto(keeper.Supported, settings.Current.KeepAwake, keeper.Active, engine.LastSleep?.From, engine.LastSleep?.To));
         });
 
         // ───────────── Сценарии ─────────────
@@ -1065,7 +1070,7 @@ internal static class ApiEndpoints
         var current = settings.Current;
         return new SettingsDto(current.WorkspaceRoot, current.MaxParallelProcesses, current.StepBudget,
             current.ActionTimeoutSeconds, settings.RestartRequired, current.AdsPowerUrl, null, current.AdsPowerApiKey is not null,
-            current.NotifyTelegram, current.HistoryDays);
+            current.NotifyTelegram, current.HistoryDays, current.KeepAwake);
     }
 
     private static ScenarioDto ToDto(StoredScenario stored, ScenarioService scenarios)

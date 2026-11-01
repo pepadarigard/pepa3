@@ -388,8 +388,23 @@ public sealed partial class ProcessEngine
                 });
         }
 
-        if (subscription.State == SubscriptionState.Active && token.WakeAt is { } wakeAt && wakeAt <= now && TimeoutDue(subscription, wakeAt, now))
+        if (subscription.State == SubscriptionState.Active && token.WakeAt is { } wakeAt && wakeAt <= now)
         {
+            // Источник был слеп (Pepa закрыта, компьютер спал, нет связи) и ещё догружает пропущенное: ответ, пришедший вовремя,
+            // не должен проиграть тайм-ауту (D-033, D-080).
+            if (TimeoutHeld(subscription, wakeAt, now) is { } held)
+            {
+                if (held.Note is { } note && _blindTimeoutNoted.TryAdd(subscription.Id, true))
+                {
+                    await using var write = await _store.BeginWriteAsync();
+                    await write.AddJournalAsync(Journal(process.Id, JournalLevel.Warning, note, step.Id, node.Id));
+                    await write.CommitAsync();
+                    Notify(process.Id);
+                }
+
+                return false;
+            }
+
             // Событие, которое может быть ответом этому ожиданию, ждёт решения пользователя: тайм-аут — после решения, иначе
             // ожидание ушло бы по «Тайм-ауту», а событие потом некому было бы отдать.
             if ((await HeldByConflictsAsync(null, CancellationToken.None)).TryGetValue(subscription.Id, out var conflictId))
@@ -428,40 +443,145 @@ public sealed partial class ProcessEngine
         return false;
     }
 
+    /// <summary>Почему тайм-аут пока не наступает; <see cref="Note"/> — запись в журнал (null — короткая пауза, без записи).</summary>
+    private sealed record HeldTimeout(string? Note);
+
     /// <summary>
-    /// Ожидание, начатое до запуска Pepa, завершается по тайм-ауту не раньше чем через <see cref="EngineOptions.CatchUpGrace"/>
-    /// после запуска и не раньше, чем источник (например, Telegram) сообщит, что догрузил пропущенное, — но не позже
-    /// <see cref="EngineOptions.MaxCatchUpWait"/>: событие, пришедшее вовремя, пока Pepa была закрыта, не должно проиграть тайм-ауту.
+    /// Тайм-аут ожидания откладывается, пока его источник мог пропустить ответ (D-033, D-080):
+    /// <list type="bullet">
+    /// <item>ожидание началось до запуска Pepa или до пробуждения компьютера — первые <see cref="EngineOptions.CatchUpGrace"/>
+    /// после него (источники успевают сообщить, что догружают пропущенное);</item>
+    /// <item>источник догружает пропущенное или нет связи с ним (<see cref="SourceCatchingUp"/>) — до его догрузки, но не дольше
+    /// <see cref="EngineOptions.MaxCatchUpWait"/> после срока (или после того, как источник ослеп, или после пробуждения — что
+    /// позже).</item>
+    /// </list>
+    /// Позднее событие ожидание всё равно не примет: оно должно произойти до срока (<see cref="WithinWaitWindow"/>).
     /// </summary>
-    private bool TimeoutDue(SubscriptionRecord subscription, DateTimeOffset wakeAt, DateTimeOffset now)
+    private HeldTimeout? TimeoutHeld(SubscriptionRecord subscription, DateTimeOffset wakeAt, DateTimeOffset now)
     {
-        if (subscription.CreatedAt >= _startedAt)
+        NoticeClock(now);
+        var resumed = ResumedAt;
+        if (subscription.CreatedAt < resumed && now < resumed + _options.CatchUpGrace)
         {
-            return true;
+            return new HeldTimeout(null);
         }
 
-        if (now < _startedAt + _options.CatchUpGrace)
+        if (!_catchingUp.TryGetValue(subscription.Source, out var blind))
         {
-            return false;
+            return null;
         }
 
-        return !_catchingUp.ContainsKey(subscription.Source) || now >= _startedAt + _options.MaxCatchUpWait;
+        // Догружать источник может только после пробуждения: предел — от срока, от начала слепоты или от пробуждения, что позже.
+        var from = wakeAt > blind.Since ? wakeAt : blind.Since;
+        var limit = (from > resumed ? from : resumed) + _options.MaxCatchUpWait;
+        if (now >= limit)
+        {
+            return null;
+        }
+
+        var reason = !blind.AtStart
+            ? $"с {FormatLocal(blind.Since)} Pepa могла не получать события ({blind.Title}): пропадала связь или компьютер спал"
+            : $"Pepa была закрыта и ещё догружает пропущенное ({blind.Title})";
+        return new HeldTimeout($"Срок ожидания вышел ({FormatLocal(wakeAt)}), но {reason} — ответ мог прийти вовремя. " +
+                               $"Тайм-аут отложен до конца догрузки, но не позже {FormatLocal(limit)}.");
     }
 
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _catchingUp = new(StringComparer.Ordinal);
+    /// <param name="Since">С какого момента источник может не знать о событиях.</param>
+    /// <param name="Title">Как назвать источник в журнале («Telegram», «почта»).</param>
+    /// <param name="AtStart">Помечен до запуска движка: догружает пропущенное, пока Pepa была закрыта.</param>
+    private sealed record BlindSource(DateTimeOffset Since, string Title, bool AtStart);
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, BlindSource> _catchingUp = new(StringComparer.Ordinal);
 
     /// <summary>Ожидания, о которых уже записано «тайм-аут отложен до решения» (чтобы не писать на каждом такте таймера).</summary>
     private readonly System.Collections.Concurrent.ConcurrentDictionary<long, bool> _heldTimeoutNoted = new();
 
+    /// <summary>Ожидания, о которых уже записано «тайм-аут отложен, пока источник не догрузит пропущенное».</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<long, bool> _blindTimeoutNoted = new();
+
     /// <summary>
-    /// Источник после запуска догружает события, пришедшие, пока Pepa была закрыта: тайм-ауты ожиданий его событий,
-    /// начатых до запуска, пока не наступают. Вызывать до <see cref="StartAsync"/>.
+    /// Источник мог пропустить события и догружает их: после запуска Pepa (вызывать до <see cref="StartAsync"/>), после
+    /// пробуждения компьютера, когда пропала связь. Тайм-ауты ожиданий его событий не наступают, пока он не сообщит
+    /// <see cref="SourceCaughtUp"/>, но не дольше <see cref="EngineOptions.MaxCatchUpWait"/> после срока. Повторный вызов
+    /// до догрузки ничего не меняет.
     /// </summary>
-    public void SourceCatchingUp(string source) => _catchingUp[source] = true;
+    /// <param name="title">Название источника для журнала («Telegram», «почта»).</param>
+    /// <param name="since">С какого момента источник мог пропускать события (начало сна); null — сейчас.</param>
+    public void SourceCatchingUp(string source, string? title = null, DateTimeOffset? since = null) =>
+        _catchingUp.TryAdd(source, new BlindSource(since ?? _time.GetUtcNow(), title ?? source, Volatile.Read(ref _state) == 0));
 
     /// <summary>Источник догрузил пропущенное (см. <see cref="SourceCatchingUp"/>).</summary>
     /// <remarks>Тайм-ауты проверяет таймер движка — отдельного сигнала не нужно.</remarks>
     public void SourceCaughtUp(string source) => _catchingUp.TryRemove(source, out _);
+
+    /// <summary>Догружает ли источник пропущенное (для проверок и интерфейса).</summary>
+    public bool IsCatchingUp(string source) => _catchingUp.ContainsKey(source);
+
+    // ───────────── Сон компьютера ─────────────
+
+    private readonly Lock _clockLock = new();
+    private DateTimeOffset _lastClock;
+    private DateTimeOffset _resumedAt;
+
+    /// <summary>Когда Pepa снова начала слушать источники: запуск или последнее пробуждение компьютера.</summary>
+    public DateTimeOffset ResumedAt
+    {
+        get
+        {
+            lock (_clockLock)
+            {
+                return _resumedAt > _startedAt ? _resumedAt : _startedAt;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Компьютер проснулся (или часы переведены вперёд): таймер движка не срабатывал дольше <see cref="EngineOptions.SleepGap"/>.
+    /// Аргументы — последний такт до перерыва и первый после. Вызывается до того, как наступят отложенные сроки: подписчик
+    /// успевает пометить источники (<see cref="SourceCatchingUp"/>) и переподключить их. Обработчик должен быть быстрым.
+    /// </summary>
+    public event Action<DateTimeOffset, DateTimeOffset>? Woke;
+
+    /// <summary>Последний замеченный перерыв в работе (сон компьютера): с какого и до какого времени.</summary>
+    public (DateTimeOffset From, DateTimeOffset To)? LastSleep { get; private set; }
+
+    /// <summary>Сверить часы: большой перерыв с прошлого раза — компьютер спал.</summary>
+    private void NoticeClock(DateTimeOffset now)
+    {
+        if (_options.SleepGap is not { } gap)
+        {
+            return;
+        }
+
+        DateTimeOffset from;
+        lock (_clockLock)
+        {
+            from = _lastClock == default ? _startedAt : _lastClock;
+            if (now > _lastClock)
+            {
+                _lastClock = now;
+            }
+
+            if (from == default || now - from <= gap)
+            {
+                return;
+            }
+
+            _resumedAt = now;
+            LastSleep = (from, now);
+        }
+
+        _logger.LogWarning("Компьютер спал (или часы переведены вперёд): с {From} до {To}. Источники событий догружают пропущенное.",
+            from.ToLocalTime(), now.ToLocalTime());
+        try
+        {
+            Woke?.Invoke(from, now);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Обработчик пробуждения компьютера завершился с ошибкой.");
+        }
+    }
 
     private async Task<bool> TryResolveResourceWaitAsync(ProcessRecord process, ScenarioGraph graph, TokenRecord token,
         NodeDefinition node, NodeTypeDescriptor descriptor, StepRecord step, DateTimeOffset now)

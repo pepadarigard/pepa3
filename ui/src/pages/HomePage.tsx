@@ -1,5 +1,6 @@
-import { AlertTriangle, CalendarClock, CheckCircle2, FolderOpen, Hourglass, Loader2, Play, Plus, RotateCcw, Workflow } from "lucide-react";
+import { AlertTriangle, CalendarClock, CheckCircle2, Coffee, FolderOpen, Hourglass, Loader2, Moon, Play, Plus, RotateCcw, Workflow } from "lucide-react";
 import { useInfo, useOverview, useScenarios } from "../api/hooks";
+import type { PowerState } from "../api/types";
 import { ProcessActions, ProcessStatusBadge, ProcessTable } from "../components/process";
 import { useRunScenario } from "../components/RunDialog";
 import { Button, Callout, Card, Empty, ErrorState, Loading } from "../components/ui";
@@ -77,6 +78,8 @@ export function HomePage() {
         <Stat icon={AlertTriangle} tone="var(--attention)" value={data.counts.needsAttention} label="Требуют решения" onClick={() => navigate({ page: "runs" })} />
         <Stat icon={CheckCircle2} tone="var(--success)" value={data.counts.completedToday} label={`Завершено сегодня${data.counts.failedToday ? ` · с ошибкой ${data.counts.failedToday}` : ""}`} onClick={() => navigate({ page: "history" })} />
       </div>
+
+      {data.power && <PowerNote power={data.power} />}
 
       {data.attention.length > 0 && (
         <Card title={`Требуют решения · ${data.attention.length}`}>
@@ -197,6 +200,27 @@ function Stat({ icon: Icon, tone, value, label, onClick }: { icon: typeof Loader
         <Icon size={14} style={{ color: tone }} /> {label}
       </span>
       <span className="stat-value">{value}</span>
+    </div>
+  );
+}
+
+/** Сон компьютера: не уснёт ли он сам, и когда спал (тогда тайм-ауты ожиданий ждали, пока Telegram и почта догрузят пропущенное). */
+function PowerNote({ power }: { power: PowerState }) {
+  const slept = power.sleptFrom && power.wokeAt ? { from: power.sleptFrom, to: power.wokeAt } : null;
+  if (!power.keepingAwake && !slept) return null;
+  return (
+    <div className="stack small muted" data-testid="power-note" style={{ gap: 4 }}>
+      {power.keepingAwake && (
+        <span className="row" style={{ gap: 6 }}>
+          <Coffee size={14} /> Компьютер не уснёт по бездействию, пока процессы выполняются или ждут (это можно выключить в «Настройках»).
+        </span>
+      )}
+      {slept && (
+        <span className="row" style={{ gap: 6 }}>
+          <Moon size={14} /> Компьютер спал: {formatMoment(slept.from)} — {formatMoment(slept.to)}. После пробуждения Telegram и почта
+          переподключились, а тайм-ауты ожиданий ждали сообщений, пришедших за это время.
+        </span>
+      )}
     </div>
   );
 }

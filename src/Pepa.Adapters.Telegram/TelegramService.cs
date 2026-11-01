@@ -64,7 +64,6 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
     private static int _rpc503;
     private string? _stateWarning;
     private string? _clockWarning;
-    private volatile bool _caughtUpReported;
     private int _reconnectFailures;
     private volatile bool _disposed;
     private int _shuttingDown;
@@ -100,9 +99,16 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
     public TelegramStatus Status => Volatile.Read(ref _status);
 
     /// <summary>
-    /// Первая догрузка после запуска закончена (сообщения, пришедшие, пока Pepa была закрыта, получены). Вызывается один раз.
+    /// Догрузка после подключения закончена: сообщения, пришедшие, пока Pepa была закрыта, компьютер спал или не было связи,
+    /// получены. Вызывается после каждого нового подключения.
     /// </summary>
     public event Action? CaughtUp;
+
+    /// <summary>
+    /// Связь с Telegram пропала (или компьютер проснулся и подключение открывается заново): сообщения могут приходить с
+    /// опозданием, пока не будет <see cref="CaughtUp"/>.
+    /// </summary>
+    public event Action? Blind;
 
     /// <summary>Есть сохранённый вход: после запуска Pepa подключится и догрузит пропущенные сообщения.</summary>
     public bool WillCatchUp => HasSession;
@@ -992,7 +998,7 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
             await Task.Delay(TimeSpan.FromSeconds(10), token);
             while (!token.IsCancellationRequested)
             {
-                if (connection.LoggedIn && !_caughtUpReported)
+                if (connection.LoggedIn && !connection.CaughtUpReported)
                 {
                     await ReportCaughtUpAsync(connection, token);
                 }
@@ -1032,7 +1038,13 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
             return;
         }
 
-        _caughtUpReported = true;
+        connection.CaughtUpReported = true;
+        if (_connection != connection || connection.Life.IsCancellationRequested)
+        {
+            // Подключение уже сменилось: догрузку сообщит новое.
+            return;
+        }
+
         try
         {
             CaughtUp?.Invoke();
@@ -1839,9 +1851,14 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
     private TelegramStatus SetStatus(TelegramState state, string? account, string? message)
     {
         var status = new TelegramStatus(state, account, message);
-        Volatile.Write(ref _status, status);
+        var previous = Interlocked.Exchange(ref _status, status);
         try
         {
+            if (previous.State == TelegramState.Connected && state is not (TelegramState.Connected or TelegramState.NotConfigured))
+            {
+                Blind?.Invoke();
+            }
+
             StatusChanged?.Invoke();
         }
         catch (Exception ex)
@@ -1850,6 +1867,54 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
         }
 
         return status;
+    }
+
+    /// <summary>
+    /// Компьютер проснулся: соединение, скорее всего, оборвано, а библиотека заметит это не сразу. Подключиться заново сейчас
+    /// (как после запуска: пропущенные сообщения догружаются по сохранённому состоянию) — об окончании скажет
+    /// <see cref="CaughtUp"/>. Начатый вход (код, пароль) не трогается.
+    /// </summary>
+    public void ResumeAfterSleep()
+    {
+        if (_disposed || !HasSession)
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await _lock.WaitAsync(_shutdown.Token);
+            }
+            catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException)
+            {
+                return;
+            }
+
+            try
+            {
+                if (_disposed || !HasSession || Status.State is not (TelegramState.Connected or TelegramState.Disconnected or TelegramState.Connecting))
+                {
+                    return;
+                }
+
+                Logger.LogInformation("Компьютер проснулся — подключаюсь к Telegram заново.");
+                _reconnectFailures = 0;
+                if (!await ResumeAsync())
+                {
+                    _reconnectFailures++;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning(ex, "Переподключение к Telegram после сна не удалось.");
+            }
+            finally
+            {
+                _lock.Release();
+            }
+        });
     }
 
     internal static bool IsApiHash(string value) => value.Length == 32 && value.All(char.IsAsciiHexDigit);
@@ -2028,6 +2093,9 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
         public Task Saver { get; set; } = Task.CompletedTask;
         public Task Dialogs { get; set; } = Task.CompletedTask;
         public volatile bool LoggedIn;
+
+        /// <summary>Догрузка после этого подключения закончена и сообщена (<see cref="CaughtUp"/>).</summary>
+        public volatile bool CaughtUpReported;
 
         /// <summary>Вход брошен: на вопросы библиотеки отвечать отказом.</summary>
         public volatile bool Abandoned;

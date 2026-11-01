@@ -36,6 +36,13 @@ public sealed record EngineOptions
     /// </summary>
     public TimeSpan MaxCatchUpWait { get; init; } = TimeSpan.FromMinutes(10);
 
+    /// <summary>
+    /// Таймер движка не срабатывал дольше этого — компьютер спал (или часы перевели вперёд): ожидания, начатые раньше, получают
+    /// ту же поблажку, что после запуска (<see cref="CatchUpGrace"/>), а <see cref="ProcessEngine.Woke"/> даёт переподключить
+    /// источники. null — не замечать (проверки с виртуальными часами, где время прыгает на часы).
+    /// </summary>
+    public TimeSpan? SleepGap { get; init; }
+
     /// <summary>Сколько ждать завершения выполняющихся шагов при закрытии приложения.</summary>
     public TimeSpan ShutdownGracePeriod { get; init; } = TimeSpan.FromSeconds(15);
 }

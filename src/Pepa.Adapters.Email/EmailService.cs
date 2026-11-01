@@ -64,6 +64,7 @@ public sealed partial class EmailService : IAsyncDisposable
     private IMailFolder? _openFolder;
     private EmailStatus _status;
     private bool _catchingUp;
+    private int _reconnect;
     private DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
     private Task? _loop;
 
@@ -101,8 +102,14 @@ public sealed partial class EmailService : IAsyncDisposable
     /// <summary>Состояние сменилось (для «Интеграций»).</summary>
     public event Action? StatusChanged;
 
-    /// <summary>Письма, пришедшие, пока Pepa была закрыта, переданы (или ждать их больше нечего).</summary>
+    /// <summary>
+    /// Письма, пришедшие, пока Pepa была закрыта, компьютер спал или не было связи с сервером, переданы (или ждать их
+    /// больше нечего).
+    /// </summary>
     public event Action? CaughtUp;
+
+    /// <summary>Проверка не удалась: письма могут прийти с опозданием, пока не будет <see cref="CaughtUp"/>.</summary>
+    public event Action? Blind;
 
     public EmailAccount? Account => _stored?.Account;
 
@@ -206,6 +213,13 @@ public sealed partial class EmailService : IAsyncDisposable
             }
 
             var account = stored.Account;
+            if (Interlocked.Exchange(ref _reconnect, 0) == 1)
+            {
+                // Компьютер проснулся: старое соединение, скорее всего, оборвано — не ждать его тайм-аута.
+                Disconnect();
+                _catchingUp = true;
+            }
+
             try
             {
                 if (_client is { IsConnected: true, IsAuthenticated: true } client && _openFolder is { IsOpen: true })
@@ -243,7 +257,14 @@ public sealed partial class EmailService : IAsyncDisposable
                 Disconnect();
                 var problem = ex as EmailUnavailableException ?? Explain(ex, account);
                 Volatile.Write(ref _lasting, problem.Lasting ? problem : null);
+                var blind = !_catchingUp;
+                _catchingUp = true;
                 SetStatus(Status with { State = EmailState.Error, Account = account, Error = problem.Message, LastCheckAt = DateTimeOffset.UtcNow });
+                if (blind)
+                {
+                    Raise(Blind);
+                }
+
                 throw problem;
             }
         }
@@ -379,8 +400,35 @@ public sealed partial class EmailService : IAsyncDisposable
         if (_catchingUp)
         {
             _catchingUp = false;
-            CaughtUp?.Invoke();
+            Raise(CaughtUp);
         }
+    }
+
+    private void Raise(Action? handler)
+    {
+        try
+        {
+            handler?.Invoke();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Ошибка в обработчике состояния почты.");
+        }
+    }
+
+    /// <summary>
+    /// Компьютер проснулся: проверить ящик сейчас через новое соединение (старое, скорее всего, оборвано). Об окончании
+    /// догрузки скажет <see cref="CaughtUp"/>.
+    /// </summary>
+    public void ResumeAfterSleep()
+    {
+        if (!IsReady)
+        {
+            return;
+        }
+
+        Interlocked.Exchange(ref _reconnect, 1);
+        Wake();
     }
 
     /// <summary>

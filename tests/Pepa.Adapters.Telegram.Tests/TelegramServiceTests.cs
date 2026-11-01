@@ -335,6 +335,24 @@ public sealed class TelegramServiceTests : IAsyncLifetime
         await again.ConnectForTestsAsync(Account);
     }
 
+    [Fact]
+    public async Task After_sleep_the_connection_is_opened_again_and_reported_blind_until_caught_up()
+    {
+        await using var service = new TelegramService(_data, _ => Task.CompletedTask) { ServerAddress = "127.0.0.1:1" };
+        await service.ConnectForTestsAsync(Account);
+        var blind = 0;
+        var caughtUp = 0;
+        service.Blind += () => Interlocked.Increment(ref blind);
+        service.CaughtUp += () => Interlocked.Increment(ref caughtUp);
+
+        // Компьютер проснулся: старое соединение не ждём — подключаемся заново (здесь сервер недоступен, повтор позже).
+        service.ResumeAfterSleep();
+        await WaitUntilAsync(() => service.Status.State == TelegramState.Disconnected);
+        Assert.Equal(1, Volatile.Read(ref blind));
+        Assert.Equal(0, Volatile.Read(ref caughtUp));
+        Assert.Contains("Повторю попытку", service.Status.Message);
+    }
+
     private static async Task WaitUntilAsync(Func<bool> condition)
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);

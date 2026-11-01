@@ -61,6 +61,8 @@ public sealed class HostFixture : IAsyncDisposable
         Email = new Adapters.Email.EmailServiceOptions { Interval = TimeSpan.FromMilliseconds(200), OperationTimeout = TimeSpan.FromSeconds(10) },
         // Раннер CI на Windows — администратор, а от администратора расширения не загружаются (это проверяется отдельно).
         Elevated = false,
+        // Запрет сна — не настоящий: проверки не трогают схему питания компьютера, где они идут.
+        KeepAwake = static _ => true,
     };
 
     /// <param name="whileStopped">Что сделать, пока Pepa закрыта (например, заменить базу копией).</param>

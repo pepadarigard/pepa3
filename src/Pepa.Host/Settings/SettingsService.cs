@@ -26,6 +26,9 @@ public sealed record PlatformSettings
     /// <summary>Сообщать в Telegram («Избранное» своего аккаунта), когда процесс ждёт решения.</summary>
     public bool NotifyTelegram { get; init; }
 
+    /// <summary>Не давать компьютеру засыпать по бездействию, пока процессы выполняются или ждут (D-080).</summary>
+    public bool KeepAwake { get; init; } = true;
+
     /// <summary>Сколько дней хранить завершённые процессы в истории; 0 — всегда.</summary>
     public int HistoryDays { get; init; } = 90;
 
@@ -41,6 +44,8 @@ public sealed record PlatformSettings
         MaxParallelProcesses = MaxParallelProcesses,
         DefaultStepBudget = StepBudget,
         DefaultActionTimeout = TimeSpan.FromSeconds(ActionTimeoutSeconds),
+        // Таймер движка срабатывает раз в секунду: перерыв больше двух минут — компьютер спал (или перевели часы).
+        SleepGap = TimeSpan.FromMinutes(2),
     };
 }
 

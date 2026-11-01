@@ -379,6 +379,18 @@ export interface Overview {
   eventConflicts: number;
   missedTriggers: Trigger[];
   upcomingTriggers: Trigger[];
+  power?: PowerState | null;
+}
+
+/** Сон компьютера: запрет сна, пока есть работа, и последний замеченный сон. */
+export interface PowerState {
+  /** Запрет сна возможен (Windows). */
+  supported: boolean;
+  enabled: boolean;
+  /** Компьютер сейчас не уснёт по бездействию: процессы выполняются или ждут. */
+  keepingAwake: boolean;
+  sleptFrom: string | null;
+  wokeAt: string | null;
 }
 
 export interface Info {
@@ -412,6 +424,8 @@ export interface Settings {
   notifyTelegram: boolean;
   /** Сколько дней хранить завершённые процессы; 0 — всегда. */
   historyDays: number;
+  /** Не давать компьютеру засыпать, пока процессы выполняются или ждут. */
+  keepAwake: boolean;
 }
 
 export type TelegramState =

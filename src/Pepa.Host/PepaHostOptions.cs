@@ -67,6 +67,12 @@ public sealed record PepaHostOptions
 
     /// <summary>Как часто проверять отслеживаемые папки и сколько ждать, пока файл допишется. null — обычные значения.</summary>
     public Adapters.FileSystem.FolderWatcherOptions? FolderWatch { get; init; }
+
+    /// <summary>
+    /// Поставить (true) или снять запрет сна компьютера; возвращает, удалось ли. null — запрет Windows (на других системах
+    /// не поддерживается). Для проверок.
+    /// </summary>
+    public Func<bool, bool>? KeepAwake { get; init; }
 }
 
 public static class HostPaths

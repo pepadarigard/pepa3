@@ -530,7 +530,9 @@ public sealed partial class ProcessEngine : IAsyncDisposable
         {
             try
             {
-                foreach (var processId in await _store.GetRunnableProcessIdsAsync(_time.GetUtcNow(), stop))
+                var now = _time.GetUtcNow();
+                NoticeClock(now);
+                foreach (var processId in await _store.GetRunnableProcessIdsAsync(now, stop))
                 {
                     Enqueue(processId);
                 }

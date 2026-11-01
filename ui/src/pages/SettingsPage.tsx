@@ -146,6 +146,15 @@ export function SettingsPage() {
               </span>
             </label>
           </div>
+          <label className="row small" style={{ gap: 8 }}>
+            <input type="checkbox" checked={form.keepAwake} onChange={(e) => setForm({ ...form, keepAwake: e.target.checked })} />
+            Не давать компьютеру засыпать, пока процессы выполняются или ждут
+          </label>
+          <span className="field-help" style={{ marginTop: -6 }}>
+            Только в Windows. Экран гаснет как обычно. Закрытая крышка ноутбука или «Сон» в меню «Пуск» компьютер всё равно усыпят —
+            тогда после пробуждения Pepa сразу переподключит Telegram и почту, а тайм-ауты ожиданий подождут, пока придут сообщения,
+            пропущенные за время сна. Расписание компьютер не будит.
+          </span>
         </div>
       </Card>
 
