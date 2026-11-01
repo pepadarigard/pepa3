@@ -79,6 +79,18 @@ public sealed class DesktopTests
         var missing = await h.RunAsync(One("desktop.click", new { window = "нет такого", name = "OK", waitSeconds = 1 }));
         await FailedAsync(h, missing);
         Assert.Null(await SnapshotAsync(missing));
+
+        // У процесса есть секретные значения — что видно в окне, проверить нельзя: картинки нет.
+        desktop.CaptureFails = false;
+        var secret = await h.RunAsync(new ScenarioBuilder("Окно с секретом")
+            .Variable("password", VariableType.Text, "Pa55-word-77", secret: true)
+            .Node("start", "start").Node("act", "desktop.click", new { window = "Отчёт", name = "Отправить" }).Node("end", "end")
+            .Edge("start", "act").Edge("act", "end").Build());
+        await FailedAsync(h, secret);
+        var withSecret = (await SnapshotAsync(secret))!;
+        Assert.Null(withSecret["image"]);
+        Assert.Contains("секретные значения", withSecret["note"]!.GetValue<string>());
+        Assert.Single(snapshots.Saved);
     }
 
     [Fact]

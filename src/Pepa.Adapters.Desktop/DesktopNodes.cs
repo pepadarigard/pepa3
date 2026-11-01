@@ -246,6 +246,13 @@ public static class DesktopNodes
         }
 
         var snapshot = new JsonObject { ["window"] = window.Info.Title, ["program"] = window.Info.ProcessName };
+        if (context.SecretValues.Count > 0)
+        {
+            // Что видно в окне, проверить нельзя, а картинку не скрыть, как текст: секрет остался бы в истории.
+            snapshot["note"] = "Снимок окна не сохранён: у процесса есть секретные значения — они могли быть видны в окне.";
+            return result with { Snapshot = snapshot };
+        }
+
         try
         {
             var image = await desktop.CaptureAsync(window, cancellationToken).WaitAsync(SnapshotTimeout, cancellationToken);

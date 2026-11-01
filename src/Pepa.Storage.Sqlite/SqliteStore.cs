@@ -97,26 +97,31 @@ public sealed partial class SqliteStore : IPepaStore
     }
 
     /// <summary>
-    /// События не копятся бесконечно (каждое письмо и сообщение Telegram — событие): у обработанных событий (доставлено,
-    /// не подошло, пропущено), пришедших до <paramref name="clearBefore"/>, удаляются данные — строка остаётся, чтобы
-    /// повторно пришедшее событие узнавалось; пришедшие до <paramref name="deleteBefore"/> удаляются совсем, если их не
-    /// получала ни одна подписка. Ждущие решения (конфликт) и ещё не применённые не трогаются никогда.
+    /// События не копятся бесконечно (каждое письмо и сообщение Telegram — событие). У обработанных событий (доставлено,
+    /// не подошло, пропущено), обработанных до <paramref name="clearBefore"/>, удаляются данные: содержимое и список
+    /// подходивших процессов. Строка остаётся — повторно пришедшее событие узнаётся; остаются и секретные значения события:
+    /// по ним скрываются ключ и номер события. Не подошедшее становится пропущенным: без данных сопоставлять его снова
+    /// нельзя — процесс получил бы пустое событие. Обработанные до <paramref name="deleteBefore"/> удаляются совсем, если
+    /// их не получала ни одна подписка. Ждущие решения (конфликт) и ещё не применённые не трогаются никогда.
     /// </summary>
     /// <returns>Сколько событий очищено и сколько удалено.</returns>
     public async Task<(int Cleared, int Deleted)> PruneEventsAsync(DateTimeOffset clearBefore, DateTimeOffset deleteBefore, int batch = 500,
         CancellationToken cancellationToken = default)
     {
         const string handled = "('Delivered', 'Unmatched', 'Ignored')";
+        // Возраст — от обработки, а не от прихода: событие, долго назначенное приостановленному процессу и вернувшееся на
+        // сопоставление, только что стало «не подошло».
         var cleared = await RepeatAsync($"""
-            UPDATE events SET payload = NULL, secrets = NULL, candidates = NULL,
+            UPDATE events SET payload = NULL, candidates = NULL,
+                state = CASE WHEN state = 'Unmatched' THEN 'Ignored' ELSE state END,
                 note = CASE WHEN note IS NULL OR note = '' THEN $note ELSE note || ' ' || $note END
-            WHERE id IN (SELECT id FROM events WHERE state IN {handled} AND received_at < $before
-                AND (payload IS NOT NULL OR secrets IS NOT NULL OR candidates IS NOT NULL) LIMIT $batch);
+            WHERE id IN (SELECT id FROM events WHERE state IN {handled} AND COALESCE(handled_at, received_at) < $before
+                AND (payload IS NOT NULL OR candidates IS NOT NULL OR state = 'Unmatched') LIMIT $batch);
             """, clearBefore, batch, cancellationToken);
         var deleted = await RepeatAsync($"""
             DELETE FROM events WHERE id IN (
                 SELECT e.id FROM events e
-                WHERE e.state IN {handled} AND e.received_at < $before
+                WHERE e.state IN {handled} AND COALESCE(e.handled_at, e.received_at) < $before
                   AND NOT EXISTS (SELECT 1 FROM subscriptions s WHERE s.event_id = e.id)
                 LIMIT $batch);
             """, deleteBefore, batch, cancellationToken);
@@ -138,7 +143,7 @@ public sealed partial class SqliteStore : IPepaStore
                 command.CommandText = sql;
                 command.Parameters.AddWithValue("$before", Date(before));
                 command.Parameters.AddWithValue("$batch", batch);
-                command.Parameters.AddWithValue("$note", "Данные события удалены по сроку хранения.");
+                command.Parameters.AddWithValue("$note", "Данные события удалены по сроку хранения — сопоставить его снова нельзя.");
                 changed = await command.ExecuteNonQueryAsync(cancellationToken);
             }
             finally

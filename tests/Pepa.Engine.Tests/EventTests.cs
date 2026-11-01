@@ -373,6 +373,10 @@ public sealed class EventTests
         var old = (await h.Store.GetEventAsync(unmatched.EventId))!;
         Assert.Null(old.Payload);
         Assert.Contains("по сроку хранения", old.Note);
+        // Без данных событие не сопоставить: процесс получил бы пустое событие. Оно становится пропущенным.
+        Assert.Equal(EventState.Ignored, old.State);
+        await Assert.ThrowsAsync<EngineOperationException>(() => h.Engine.RerouteEventAsync(unmatched.EventId));
+        await Assert.ThrowsAsync<EngineOperationException>(() => h.Engine.ResolveEventAsync(unmatched.EventId, null));
         Assert.Null((await h.Store.GetEventAsync(delivered.EventId))!.Payload);
         Assert.Equal("кому?", (await h.Store.GetEventAsync(conflict.EventId))!.Payload!["text"]!.GetValue<string>());
         // Строка осталась — повторно пришедшее событие узнаётся.
@@ -384,5 +388,41 @@ public sealed class EventTests
         Assert.Null(await h.Store.GetEventAsync(unmatched.EventId));
         Assert.NotNull(await h.Store.GetEventAsync(delivered.EventId));
         Assert.NotNull(await h.Store.GetEventAsync(conflict.EventId));
+    }
+
+    [Fact]
+    public async Task Event_data_age_counts_from_handling_and_its_secrets_stay_to_mask_the_key()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        // Событие с секретным ключом — от процесса, у которого ключ секретный.
+        var sender = await h.CreateScenarioAsync(new ScenarioBuilder("Отправить с секретом")
+            .Variable("token", VariableType.Text, isInput: true, secret: true)
+            .Node("start", "start")
+            .Node("send", "event.send", new { source = "process", eventType = "notice", correlationKey = "{{ vars.token }}", externalId = "k-{{ vars.token }}" })
+            .Node("end", "end")
+            .Chain("start", "send", "end")
+            .Build());
+        var sent = await h.Engine.StartProcessAsync(sender, new JsonObject { ["token"] = "Tok-998877" });
+        await h.WaitForStatusAsync(sent, ProcessStatus.Completed);
+        var secret = (await h.Store.ListEventsAsync(new EventQuery())).Single(e => e.Type == "notice");
+
+        // Событие назначено приостановленному процессу, через 10 дней процесс остановлен — событие только что «не подошло».
+        var scenario = await h.CreateScenarioAsync(WaitReply());
+        var waiting = await StartWaitingAsync(h, scenario, "Z");
+        await h.Engine.PauseAsync(waiting);
+        var held = await h.Engine.PublishEventAsync(Reply("Z", externalId: "z-1", payload: new JsonObject { ["text"] = "ответ" }));
+        await WaitEventStateAsync(h, held.EventId, EventState.Matched);
+        h.Time.Advance(TimeSpan.FromDays(10));
+        await h.Engine.CancelAsync(waiting);
+        await WaitEventStateAsync(h, held.EventId, EventState.Unmatched);
+
+        // Срок — 5 дней: пришло 10 дней назад, но обработано только что — данные остаются; у старого — удаляются.
+        await h.Store.PruneEventsAsync(h.Time.GetUtcNow().AddDays(-5), h.Time.GetUtcNow().AddDays(-365),
+            cancellationToken: TestContext.Current.CancellationToken);
+        var returned = (await h.Store.GetEventAsync(held.EventId))!;
+        Assert.Equal((EventState.Unmatched, "ответ"), (returned.State, returned.Payload!["text"]!.GetValue<string>()));
+        var cleared = (await h.Store.GetEventAsync(secret.Id))!;
+        Assert.Equal(EventState.Ignored, cleared.State);
+        Assert.Contains("Tok-998877", cleared.Secrets!);
     }
 }

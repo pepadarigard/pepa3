@@ -201,6 +201,7 @@ public sealed partial class ProcessEngine
             Memory = process.Memory?[node.Id]?.DeepClone() as JsonObject,
             Graph = graph,
             EnteredFrom = token.FromNodeId,
+            SecretValues = [.. RawSecretValues(process, graph.Definition).Where(v => v.Length >= MinSecretLength)],
         };
 
         if (descriptor.Effect == NodeEffect.None)

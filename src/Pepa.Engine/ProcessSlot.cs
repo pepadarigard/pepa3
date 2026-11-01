@@ -61,8 +61,9 @@ internal sealed class ProcessSlot(Action? onWake = null)
     /// </summary>
     public bool TryEnterToRun()
     {
-        // Сначала просьба, потом попытка: владелец, освобождающий право после неудачной попытки, её уже увидит.
-        Volatile.Write(ref _wake, 1);
+        // Сначала просьба, потом попытка: владелец, освобождающий право после неудачной попытки, её уже увидит. Полный
+        // барьер, а не Volatile.Write: иначе процессор может прочитать «занято» раньше, чем просьба станет видна владельцу.
+        Interlocked.Exchange(ref _wake, 1);
         if (!_gate.Wait(0))
         {
             return false;

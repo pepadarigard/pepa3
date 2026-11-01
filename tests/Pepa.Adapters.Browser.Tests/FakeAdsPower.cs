@@ -158,34 +158,35 @@ internal sealed class FakeAdsPower : IDisposable
             }
         }
 
-        var port = TestSite.FreePort();
-        var dir = Path.Combine(Path.GetTempPath(), "pepa-fake-adspower", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(dir);
-        var start = new ProcessStartInfo(BrowserPath)
+        // Порт выбирает сам браузер (0) и пишет его в DevToolsActivePort: заранее найденный свободный порт успевал занять
+        // другой параллельный тест. Ждём с запасом: под нагрузкой (полный прогон, CI) браузер запускается долго.
+        for (var attempt = 1; attempt <= 2; attempt++)
         {
-            UseShellExecute = false,
-            RedirectStandardError = true,
-            RedirectStandardOutput = true,
-        };
-        foreach (var arg in new[]
-                 {
-                     $"--remote-debugging-port={port}", $"--user-data-dir={dir}", "--headless=new", "--no-first-run",
-                     "--no-default-browser-check", "--no-sandbox", "about:blank",
-                 })
-        {
-            start.ArgumentList.Add(arg);
-        }
-
-        var process = Process.Start(start)!;
-        process.BeginErrorReadLine();
-        process.BeginOutputReadLine();
-        using var http = new HttpClient();
-        for (var i = 0; i < 100; i++)
-        {
-            try
+            var dir = Path.Combine(Path.GetTempPath(), "pepa-fake-adspower", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            var start = new ProcessStartInfo(BrowserPath)
             {
-                var version = await http.GetFromJsonAsync<JsonObject>($"http://127.0.0.1:{port}/json/version");
-                if (version?["webSocketDebuggerUrl"]?.GetValue<string>() is { } ws)
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+            };
+            foreach (var arg in new[]
+                     {
+                         "--remote-debugging-port=0", $"--user-data-dir={dir}", "--headless=new", "--no-first-run",
+                         "--no-default-browser-check", "--no-sandbox", "about:blank",
+                     })
+            {
+                start.ArgumentList.Add(arg);
+            }
+
+            var process = Process.Start(start)!;
+            process.BeginErrorReadLine();
+            process.BeginOutputReadLine();
+            var portFile = Path.Combine(dir, "DevToolsActivePort");
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+            while (DateTime.UtcNow < deadline && !process.HasExited)
+            {
+                if (ReadEndpoint(portFile) is { } ws)
                 {
                     lock (_lock)
                     {
@@ -195,17 +196,37 @@ internal sealed class FakeAdsPower : IDisposable
 
                     return ws;
                 }
-            }
-            catch (HttpRequestException)
-            {
-                // ещё запускается
+
+                await Task.Delay(100);
             }
 
-            await Task.Delay(100);
+            try
+            {
+                process.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException)
+            {
+                // Уже завершился.
+            }
         }
 
-        process.Kill(entireProcessTree: true);
         throw new InvalidOperationException("Браузер профиля не запустился.");
+    }
+
+    /// <summary>Адрес DevTools из файла браузера (порт и путь) или null, пока файл не записан целиком.</summary>
+    private static string? ReadEndpoint(string portFile)
+    {
+        try
+        {
+            return File.Exists(portFile) && File.ReadAllLines(portFile) is [var port, var path, ..] &&
+                   int.TryParse(port, out var number) && number > 0 && path.StartsWith("/devtools/browser/", StringComparison.Ordinal)
+                ? $"ws://127.0.0.1:{number}{path}"
+                : null;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
     }
 
     private void Stop(string profile)

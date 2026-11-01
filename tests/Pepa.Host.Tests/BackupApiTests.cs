@@ -158,5 +158,47 @@ public sealed class BackupApiTests
         Assert.Equal(0, await retention.RunOnceAsync(TestContext.Current.CancellationToken));
     }
 
+    [Fact]
+    public async Task Old_event_data_is_cleared_but_a_secret_key_stays_hidden_and_the_event_cannot_be_rerouted()
+    {
+        await using var f = await HostFixture.StartAsync(seedSamples: false);
+        var (_, created) = await f.SendAsync(HttpMethod.Post, "/api/scenarios", new
+        {
+            name = "Событие с секретом",
+            variables = new object[] { new { name = "token", type = "text", isInput = true, secret = true } },
+            nodes = new object[]
+            {
+                new { id = "start", type = "start", position = new { x = 0, y = 0 }, config = new { } },
+                new
+                {
+                    id = "send", type = "event.send", position = new { x = 200, y = 0 },
+                    config = new { source = "process", eventType = "notice", correlationKey = "{{ vars.token }}", externalId = "k-{{ vars.token }}" },
+                },
+                new { id = "end", type = "end", position = new { x = 400, y = 0 }, config = new { } },
+            },
+            edges = new object[]
+            {
+                new { id = "e1", source = "start", sourcePort = "out", target = "send" },
+                new { id = "e2", source = "send", sourcePort = "out", target = "end" },
+            },
+        });
+        var (_, run) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{created!["id"]!.GetValue<string>()}/run",
+            new { inputs = new { token = "Tok-SECRET-998877" } });
+        await f.WaitForProcessAsync(run!["processId"]!.GetValue<string>(), p => HostFixture.Status(p) == "completed");
+        var before = await f.Client.GetStringAsync("/api/events", TestContext.Current.CancellationToken);
+        Assert.DoesNotContain("Tok-SECRET-998877", before);
+
+        var store = (SqliteStore)f.Host.Services.GetRequiredService<Pepa.Engine.Persistence.IPepaStore>();
+        await using var retention = new HistoryRetention(store, () => 90, new ManualTime(DateTimeOffset.UtcNow.AddDays(91)), NullLogger.Instance);
+        await retention.RunOnceAsync(TestContext.Current.CancellationToken);
+
+        var after = await f.Client.GetStringAsync("/api/events", TestContext.Current.CancellationToken);
+        Assert.DoesNotContain("Tok-SECRET-998877", after);
+        var cleared = (await f.GetAsync("/api/events")).AsArray().Single(e => e!["type"]!.GetValue<string>() == "notice")!;
+        Assert.Equal("ignored", cleared["state"]!.GetValue<string>());
+        var (status, _) = await f.SendAsync(HttpMethod.Post, $"/api/events/{cleared["id"]!.GetValue<long>()}/reroute");
+        Assert.NotEqual(200, status);
+    }
+
     private static JsonNode Event(JsonNode events, long id) => events.AsArray().Single(e => e!["id"]!.GetValue<long>() == id)!;
 }

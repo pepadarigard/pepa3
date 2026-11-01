@@ -159,6 +159,13 @@ public static class BrowserNodes
         try
         {
             snapshot["title"] = await page.TitleAsync().WaitAsync(SnapshotTimeout, cancellationToken);
+            if (context.SecretValues.Count > 0 && await SecretVisibleAsync(page, context.SecretValues, cancellationToken))
+            {
+                // Картинку не скрыть, как текст: секрет на ней остался бы виден в истории.
+                snapshot["note"] = "Снимок не сохранён: на странице видно секретное значение (например, пароль в обычном поле).";
+                return result with { Snapshot = snapshot };
+            }
+
             var image = await page.ScreenshotAsync(new PageScreenshotOptions
             {
                 Type = ScreenshotType.Jpeg, Quality = 70, Timeout = (float)SnapshotTimeout.TotalMilliseconds,
@@ -173,6 +180,40 @@ public static class BrowserNodes
         }
 
         return result with { Snapshot = snapshot };
+    }
+
+    /// <summary>Текст страницы и значения полей (кроме полей паролей — там точки) — в каждой рамке страницы.</summary>
+    private const string SecretOnPage = """
+        secrets => {
+          const parts = [document.body ? document.body.innerText : ''];
+          for (const field of document.querySelectorAll('input, textarea, select')) {
+            if (field.type === 'password' || field.type === 'hidden') continue;
+            parts.push(String(field.value ?? ''));
+          }
+          const text = parts.join('\n');
+          return secrets.some(secret => text.includes(secret));
+        }
+        """;
+
+    /// <summary>Видно ли на странице секретное значение процесса. Не удалось проверить рамку — считается, что видно.</summary>
+    private static async Task<bool> SecretVisibleAsync(IPage page, IReadOnlyList<string> secrets, CancellationToken cancellationToken)
+    {
+        foreach (var frame in page.Frames)
+        {
+            try
+            {
+                if (await frame.EvaluateAsync<bool>(SecretOnPage, secrets).WaitAsync(SnapshotTimeout, cancellationToken))
+                {
+                    return true;
+                }
+            }
+            catch (Exception ex) when (ex is PlaywrightException or TimeoutException)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static bool IsStrictViolation(PlaywrightException ex) =>

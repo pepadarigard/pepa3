@@ -147,6 +147,39 @@ public sealed class BrowserScenarioTests
         Time = TimeProvider.System,
     };
 
+    [Fact]
+    public async Task Snapshot_is_not_saved_when_a_secret_value_is_visible_on_the_page()
+    {
+        TestBrowser.RequireBrowser();
+        await using var f = await BrowserFixture.CreateAsync();
+        ScenarioDefinition Typed(bool typeSecret) => new ScenarioBuilder("Секрет на странице")
+            .Variable("token", VariableType.Text, isInput: true, secret: true)
+            .Node("start", "start")
+            .Node("open", "browser.open", BrowserFixture.OpenConfig(f.Site.Url("/form")))
+            .Node("fill", "browser.fill", new { selector = "#user", text = typeSecret ? "{{ vars.token }}" : "Пепа" })
+            .Node("click", "browser.click", new { selector = "#missing", waitSeconds = 1 })
+            .Node("end", "end")
+            .Chain("start", "open", "fill", "click", "end")
+            .Build();
+
+        // Секрет введён в обычное поле — на картинке он был бы виден: картинки нет, адрес и заголовок есть.
+        var shown = await f.H.RunAsync(Typed(typeSecret: true), new JsonObject { ["token"] = "Tok-998877-secret" });
+        await f.H.WaitForStatusAsync(shown, ProcessStatus.NeedsAttention);
+        var snapshot = (await f.H.StepsAsync(shown)).Single(s => s.State == StepState.Failed).Output!["snapshot"]!;
+        Assert.Null(snapshot["image"]);
+        Assert.Contains("видно секретное значение", snapshot["note"]!.GetValue<string>());
+        Assert.Equal("Форма", snapshot["title"]!.GetValue<string>());
+        Assert.Empty(f.Snapshots.Saved);
+        await f.H.Engine.CancelAsync(shown);
+
+        // У процесса есть секрет, но на странице его нет — снимок сохраняется.
+        var hidden = await f.H.RunAsync(Typed(typeSecret: false), new JsonObject { ["token"] = "Tok-998877-secret" });
+        await f.H.WaitForStatusAsync(hidden, ProcessStatus.NeedsAttention);
+        Assert.NotNull((await f.H.StepsAsync(hidden)).Single(s => s.State == StepState.Failed).Output!["snapshot"]!["image"]);
+        Assert.Single(f.Snapshots.Saved);
+        await f.H.Engine.CancelAsync(hidden);
+    }
+
     private static ScenarioDefinition ClickScenario(BrowserFixture f, string selector) => new ScenarioBuilder("Нажать")
         .Node("start", "start")
         .Node("open", "browser.open", BrowserFixture.OpenConfig(f.Site.Url("/form")))

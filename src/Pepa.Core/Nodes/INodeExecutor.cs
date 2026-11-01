@@ -80,6 +80,12 @@ public sealed record NodeExecutionContext
     /// <summary>Из какого блока процесс пришёл в этот; null — начало процесса.</summary>
     public string? EnteredFrom { get; init; }
 
+    /// <summary>
+    /// Значения, секретные для процесса (пароли и т.п.; параметры шага и так содержат настоящие значения). Блоку — чтобы не
+    /// показать их там, где движок их не скроет, например на снимке экрана.
+    /// </summary>
+    public IReadOnlyList<string> SecretValues { get; init; } = [];
+
     public string? GetString(string name) => Input.GetString(name);
 
     public string RequireString(string name) =>
