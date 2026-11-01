@@ -287,8 +287,30 @@ public sealed class WaitTelegramNode(ITelegramGateway telegram) : INodeExecutor
             },
             new FieldDescriptor
             {
-                Name = "contains", Label = "Текст содержит", Kind = FieldKind.Template, Placeholder = "код",
-                Help = "Необязательно. Без учёта регистра.",
+                Name = "contains", Label = "Текст", Kind = FieldKind.Template, Placeholder = "готово",
+                Help = "Необязательно. Без учёта регистра и разницы «е» и «ё»; как сравнивать — ниже.",
+            },
+            new FieldDescriptor
+            {
+                Name = "match", Label = "Как сравнивать текст", Kind = FieldKind.Select, Default = "word",
+                Options =
+                [
+                    new("exact", "Сообщение — ровно это"), new("word", "Есть слово или фраза целиком"),
+                    new("contains", "Содержит (даже внутри слова)"),
+                ],
+                Help = "«Ровно это» — для ответов-команд («готово», «да»): «ещё не готово» не подойдёт (знаки и смайлы по краям не мешают). " +
+                       "«Слово целиком» — «код» найдётся в «Ваш код: 1234», но не в «кодовое», а «готово» найдётся и в «не готово».",
+            },
+            new FieldDescriptor
+            {
+                Name = "replyTo", Label = "Ответ на сообщение", Kind = FieldKind.Template, Placeholder = "{{ vars.sent.messageId }}",
+                Help = "Необязательно. Номер вашего сообщения (из «Отправить сообщение» → «Сохранить отправленное в»): подойдёт только " +
+                       "ответ на него (в Telegram — «Ответить»). Так ответы одного человека на разные сообщения достаются разным процессам.",
+            },
+            new FieldDescriptor
+            {
+                Name = "from", Label = "От кого (в группе)", Kind = FieldKind.Template, Placeholder = "@manager",
+                Help = "Необязательно. В группе — @имя пользователя или ключ (user:123), чьё сообщение ждёте. В личном чате не нужно.",
             },
             new FieldDescriptor
             {
@@ -339,11 +361,30 @@ public sealed class WaitTelegramNode(ITelegramGateway telegram) : INodeExecutor
             key = peer.Key;
         }
 
-        string? match = null;
-        if (context.GetString("contains") is { Length: > 0 } contains)
+        var conditions = new List<string>();
+        if (Value(context, "contains") is { } contains)
         {
-            match = $"String(event.payload.text ?? \"\").toLowerCase().includes({JsonSerializer.Serialize(contains.ToLowerInvariant())})";
+            conditions.Add(TextCondition(contains, context.GetString("match") ?? "word"));
         }
+
+        if (Value(context, "replyTo") is { } replyTo)
+        {
+            if (!long.TryParse(replyTo, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var replyId) ||
+                replyId <= 0)
+            {
+                throw new NodeInputException($"«{replyTo}» — не номер сообщения (поле «Ответ на сообщение»).");
+            }
+
+            conditions.Add($"Number(event.payload.replyTo) === {replyId}");
+        }
+
+        if (Value(context, "from") is { } from)
+        {
+            var username = JsonSerializer.Serialize(from.TrimStart('@').ToLowerInvariant());
+            conditions.Add($"(f => !!f && (String(f.username ?? '').toLowerCase() === {username} || f.key === {JsonSerializer.Serialize(from)}))(event.payload.from)");
+        }
+
+        var match = conditions.Count > 0 ? string.Join(" && ", conditions) : null;
 
         var timeout = context.GetNumber("timeoutSeconds") is { } seconds and > 0
             ? context.Time.GetUtcNow() + TimeSpan.FromSeconds(seconds)
@@ -357,5 +398,70 @@ public sealed class WaitTelegramNode(ITelegramGateway telegram) : INodeExecutor
             LookbackSeconds = (int)(context.GetNumber("lookbackSeconds") ?? 30),
             SaveTo = context.GetString("saveTo") is { Length: > 0 } saveTo ? saveTo : null,
         }, timeout);
+    }
+
+    /// <summary>Буква, цифра или «_» — часть слова (как и в JavaScript-условии ниже).</summary>
+    private const string IsWordJs = "c => c !== undefined && (c.toLowerCase() !== c.toUpperCase() || (c >= '0' && c <= '9') || c === '_')";
+
+    private const string NormalizedTextJs = "String(event.payload.text ?? '').toLowerCase().replace(/ё/g, 'е')";
+
+    /// <summary>
+    /// Условие на текст сообщения. Сравнение без учёта регистра и «е»/«ё». «Ровно это» — весь текст без знаков и смайлов по
+    /// краям; «слово целиком» — вхождение, по краям которого не буква и не цифра; «содержит» — любое вхождение.
+    /// </summary>
+    internal static string TextCondition(string text, string mode)
+    {
+        var expected = Normalize(text);
+        if (expected.Length == 0)
+        {
+            throw new NodeInputException($"В тексте «{text}» нет ни букв, ни цифр — сравнивать не с чем.");
+        }
+
+        var value = JsonSerializer.Serialize(expected);
+        return mode switch
+        {
+            "exact" => $"((t, w) => {{ const isWord = {IsWordJs}; let a = 0, b = t.length; while (a < b && !isWord(t[a])) a++; " +
+                       $"while (b > a && !isWord(t[b - 1])) b--; return t.slice(a, b) === w; }})({NormalizedTextJs}, {value})",
+            "contains" => $"{NormalizedTextJs}.includes({value})",
+            "word" => $"((t, w) => {{ const isWord = {IsWordJs}; for (let i = t.indexOf(w); i >= 0; i = t.indexOf(w, i + 1)) " +
+                      $"{{ if (!isWord(t[i - 1]) && !isWord(t[i + w.length])) return true; }} return false; }})({NormalizedTextJs}, {value})",
+            _ => throw new NodeInputException($"«{mode}» — не вариант поля «Как сравнивать текст»."),
+        };
+    }
+
+    /// <summary>Как сравниваются тексты: строчные, «ё» — «е», без знаков и смайлов по краям.</summary>
+    private static string Normalize(string text)
+    {
+        var lower = text.ToLowerInvariant().Replace('ё', 'е');
+        static bool IsWord(char c) => char.ToLowerInvariant(c) != char.ToUpperInvariant(c) || c is >= '0' and <= '9' or '_';
+        var start = 0;
+        var end = lower.Length;
+        while (start < end && !IsWord(lower[start]))
+        {
+            start++;
+        }
+
+        while (end > start && !IsWord(lower[end - 1]))
+        {
+            end--;
+        }
+
+        return lower[start..end];
+    }
+
+    /// <summary>
+    /// Значение условия; null — условия нет. Заданное в схеме, но получившееся пустым (переменная не заполнена), — ошибка:
+    /// иначе процесс ждал бы любое сообщение и забрал бы чужое.
+    /// </summary>
+    private static string? Value(NodeExecutionContext context, string field)
+    {
+        var configured = context.Node.Config.GetString(field);
+        var value = context.GetString(field)?.Trim();
+        if (!string.IsNullOrWhiteSpace(configured) && string.IsNullOrEmpty(value))
+        {
+            throw new NodeInputException($"Условие «{field}» ({configured}) получилось пустым — иначе подошло бы любое сообщение. Проверьте переменные.");
+        }
+
+        return string.IsNullOrEmpty(value) ? null : value;
     }
 }

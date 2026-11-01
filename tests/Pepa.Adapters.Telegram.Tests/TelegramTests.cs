@@ -72,6 +72,72 @@ public sealed class TelegramTests
         Assert.Equal("Ответ: Да, готов", done.StatusMessage);
     }
 
+    private static ScenarioDefinition WaitOnly(object wait) => new ScenarioBuilder("Ждать ответ")
+        .Variable("reply", VariableType.Any)
+        .Node("start", "start")
+        .Node("wait", "telegram.wait", wait)
+        .Node("end", "end", new { message = "Ответ: {{ vars.reply.payload.text }}" })
+        .Edge("start", "wait").Edge("wait", "end", Ports.Event)
+        .Build();
+
+    [Fact]
+    public async Task Exact_reply_does_not_take_a_negation_and_a_whole_word_is_not_part_of_another()
+    {
+        var (h, _) = await SetupAsync();
+        await using var __ = h;
+        var exact = await h.RunAsync(WaitOnly(new { chat = "@ivan", contains = "готово", match = "exact", saveTo = "reply" }));
+        var word = await h.RunAsync(WaitOnly(new { chat = "@shop_bot", contains = "Код", saveTo = "reply" }));
+        await h.WaitForStatusAsync(exact, ProcessStatus.Waiting);
+        await h.WaitForStatusAsync(word, ProcessStatus.Waiting);
+
+        await ReceiveAsync(h, FakeTelegram.Incoming(Ivan, "Ещё не готово, подожди", 1));
+        await ReceiveAsync(h, FakeTelegram.Incoming(Bot, "Кодовое слово: 7", 2));
+        await h.IdleAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(ProcessStatus.Waiting, (await h.ProcessAsync(exact)).Status);
+        Assert.Equal(ProcessStatus.Waiting, (await h.ProcessAsync(word)).Status);
+
+        // Регистр, «ё»/«е», знаки и смайлы по краям не мешают.
+        await ReceiveAsync(h, FakeTelegram.Incoming(Ivan, "Готово! 👍", 3));
+        await ReceiveAsync(h, FakeTelegram.Incoming(Bot, "Ваш КОД: 4512", 4));
+        Assert.Equal("Ответ: Готово! 👍", (await h.WaitForStatusAsync(exact, ProcessStatus.Completed)).StatusMessage);
+        Assert.Equal("Ответ: Ваш КОД: 4512", (await h.WaitForStatusAsync(word, ProcessStatus.Completed)).StatusMessage);
+    }
+
+    [Fact]
+    public async Task Replies_to_different_messages_go_to_their_own_processes_without_a_conflict()
+    {
+        var (h, _) = await SetupAsync();
+        await using var __ = h;
+        ScenarioDefinition Ask(string order) => new ScenarioBuilder($"Заказ {order}")
+            .Variable("sent", VariableType.Any).Variable("reply", VariableType.Any)
+            .Node("start", "start")
+            .Node("send", "telegram.send", new { chat = "@ivan", text = $"Заказ {order} готов?", saveTo = "sent" })
+            .Node("wait", "telegram.wait", new { chat = "@ivan", replyTo = "{{ vars.sent.messageId }}", saveTo = "reply" })
+            .Node("end", "end", new { message = "Ответ: {{ vars.reply.payload.text }}" })
+            .Chain("start", "send", "wait").Edge("wait", "end", Ports.Event)
+            .Build();
+        var first = await h.RunAsync(Ask("A"));
+        await h.WaitForStatusAsync(first, ProcessStatus.Waiting);
+        var second = await h.RunAsync(Ask("B"));
+        await h.WaitForStatusAsync(second, ProcessStatus.Waiting);
+        int SentId(ProcessRecord p) => p.Variables["sent"]!["messageId"]!.GetValue<int>();
+        var firstId = SentId(await h.ProcessAsync(first));
+        var secondId = SentId(await h.ProcessAsync(second));
+
+        // Обычное сообщение без «Ответить» не подходит никому; ответы — каждому своему.
+        await ReceiveAsync(h, FakeTelegram.Incoming(Ivan, "Сейчас посмотрю", 900));
+        await ReceiveAsync(h, FakeTelegram.Incoming(Ivan, "B — да", 901) with { ReplyToMessageId = secondId });
+        await ReceiveAsync(h, FakeTelegram.Incoming(Ivan, "A — нет", 902) with { ReplyToMessageId = firstId });
+        Assert.Equal("Ответ: A — нет", (await h.WaitForStatusAsync(first, ProcessStatus.Completed)).StatusMessage);
+        Assert.Equal("Ответ: B — да", (await h.WaitForStatusAsync(second, ProcessStatus.Completed)).StatusMessage);
+        Assert.Empty(await h.Store.ListEventsAsync(new EventQuery { States = [EventState.Conflict] }));
+
+        // Номер задан в схеме, но не вычислился — ошибка, а не «любой ответ».
+        var broken = await h.RunAsync(WaitOnly(new { chat = "@ivan", replyTo = "{{ vars.reply }}", saveTo = "reply" }));
+        Assert.Contains("получилось пустым", (await h.WaitForStatusAsync(broken, ProcessStatus.NeedsAttention)).StatusMessage);
+        await h.Engine.CancelAsync(broken);
+    }
+
     [Fact]
     public async Task Text_filter_skips_other_messages_from_the_same_chat()
     {

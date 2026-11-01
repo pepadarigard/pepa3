@@ -332,12 +332,16 @@ public static class SampleScenarios
                 Description = "Кому написать: @username или номер телефона из контактов",
             },
             new VariableDefinition { Name = "question", Type = VariableType.Text, Default = "Можно продолжать? Ответьте «да».", IsInput = true, Description = "Текст вопроса" },
+            new VariableDefinition { Name = "sent", Type = VariableType.Any, Description = "Отправленное сообщение (номер — для «Ответ на сообщение»)" },
             new VariableDefinition { Name = "reply", Type = VariableType.Any, Description = "Полученный ответ" },
         ],
         Nodes =
         [
             N("start", "start", 0, 120),
-            N("send", "telegram.send", 260, 120, new JsonObject { ["chat"] = "{{ vars.chat }}", ["text"] = "{{ vars.question }}" }, "Спросить"),
+            N("send", "telegram.send", 260, 120, new JsonObject
+            {
+                ["chat"] = "{{ vars.chat }}", ["text"] = "{{ vars.question }}", ["saveTo"] = "sent",
+            }, "Спросить"),
             N("wait", "telegram.wait", 540, 120, new JsonObject
             {
                 ["chat"] = "{{ vars.chat }}",
@@ -383,6 +387,7 @@ public static class SampleScenarios
             {
                 ["chat"] = "{{ vars.chat }}",
                 ["contains"] = "готово",
+                ["match"] = "exact",
                 ["timeoutSeconds"] = 1800,
                 ["saveTo"] = "reply",
             }, "Ждать «готово»"),
