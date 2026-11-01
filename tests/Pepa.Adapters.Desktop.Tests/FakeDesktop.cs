@@ -91,6 +91,7 @@ internal sealed class FakeDesktop : IDesktop
     public Task<IReadOnlyList<DesktopElement>> FindElementsAsync(DesktopWindow window, ElementQuery query, CancellationToken cancellationToken)
     {
         var fake = (FakeWindow)window;
+        Interlocked.Increment(ref fake.Searches);
         // Тест может добавить элемент в окно, пока движок его ищет.
         lock (fake.Elements)
         {
@@ -294,6 +295,9 @@ internal sealed class FakeWindow(WindowInfo info) : DesktopWindow
     public List<FakeElement> Elements { get; } = [];
     public bool Open { get; set; } = true;
     public bool RefusesToClose { get; set; }
+
+    /// <summary>Сколько раз в окне искали элементы (блок уже нашёл это окно).</summary>
+    public int Searches;
 
     /// <summary>Выведено на передний план (после «активировать»).</summary>
     public bool Foreground { get; set; }

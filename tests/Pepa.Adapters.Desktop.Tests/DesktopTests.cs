@@ -410,8 +410,15 @@ public sealed class DesktopTests
         // Окно было и закрылось — элемент исчез вместе с ним, и об этом сказано прямо.
         var window = d.AddWindow("Копирование");
         window.Add("Отмена");
-        var id = await h.RunAsync(One("desktop.waitFor", new { window = "Копирование", name = "Отмена", state = "disappear", waitSeconds = 10 }));
-        await Task.Delay(500, TestContext.Current.CancellationToken);
+        var id = await h.RunAsync(One("desktop.waitFor", new { window = "Копирование", name = "Отмена", state = "disappear", waitSeconds = 30 }));
+        // Закрыть окно — только когда блок его уже нашёл (под нагрузкой шаг начинается не сразу).
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+        while (Volatile.Read(ref window.Searches) == 0)
+        {
+            Assert.True(DateTime.UtcNow < deadline, "Блок не начал искать элемент в окне.");
+            await Task.Delay(10, TestContext.Current.CancellationToken);
+        }
+
         d.Close(window);
         await h.WaitForStatusAsync(id, ProcessStatus.Completed);
         Assert.Contains(await h.Store.GetJournalAsync(id), j => j.Message.Contains("закрылось", StringComparison.Ordinal));
