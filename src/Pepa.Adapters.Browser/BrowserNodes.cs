@@ -512,11 +512,21 @@ public sealed class OpenAdsPowerNode(BrowserSessions sessions) : INodeExecutor
             {
                 Name = "closeOnFinish", Label = "Закрыть профиль, когда процесс завершится", Kind = FieldKind.Boolean, Default = true,
             },
+            new FieldDescriptor
+            {
+                Name = "ifOpen", Label = "Если профиль уже открыт не Pepa", Kind = FieldKind.Select, Default = "stop",
+                Options = [new("stop", "Остановиться (не трогать чужое окно)"), new("tab", "Работать в новой вкладке, не закрывать в конце")],
+                Help = "Профиль, открытый вами вручную (или другой программой), Pepa не захватывает: по умолчанию шаг останавливается. " +
+                       "Профили, которые открыла сама Pepa (в том числе оставленные открытыми прошлым процессом), используются как обычно.",
+            },
             BrowserNodes.SessionField,
         ],
     };
 
     private static string ProfileId(JsonObject input) => input.GetString("profileId")?.Trim() ?? "";
+
+    /// <summary>Запуск профиля бывает долгим (прокси, загрузка расширений): общего тайм-аута действия мало.</summary>
+    public TimeSpan? ExpectedDuration(JsonObject input) => TimeSpan.FromMinutes(5);
 
     public ResourceRequirement? RequiredResource(JsonObject input) => ProfileId(input) is { Length: > 0 } id
         ? new ResourceRequirement(BrowserSessions.AdsPowerResourceKey(id), $"Профиль AdsPower {id}")
@@ -534,11 +544,21 @@ public sealed class OpenAdsPowerNode(BrowserSessions sessions) : INodeExecutor
         try
         {
             session = await sessions.OpenAdsPowerAsync(context.ProcessId, BrowserNodes.SessionName(context), profileId,
-                context.GetBoolean("newTab"), context.GetBoolean("closeOnFinish", true), cancellationToken);
+                context.GetBoolean("newTab"), context.GetBoolean("closeOnFinish", true), cancellationToken,
+                context.GetString("ifOpen") == "tab" ? AdsPowerOpenedElsewhere.NewTab : AdsPowerOpenedElsewhere.Stop);
+        }
+        catch (AdsPowerException ex) when (ex.TimedOut)
+        {
+            // Профиль мог начать открываться: Pepa проверит, открыт ли он, а не будет открывать снова.
+            return new NodeResult.Unknown($"{ex.Message} Профиль {profileId} мог начать открываться.");
         }
         catch (AdsPowerException ex)
         {
             return NodeResult.Fail(ex.Message);
+        }
+        catch (AdsPowerOpenedElsewhereException ex)
+        {
+            return NodeResult.Fail(ex.Message, retryable: false);
         }
         catch (BrowserStartException ex)
         {
@@ -549,18 +569,38 @@ public sealed class OpenAdsPowerNode(BrowserSessions sessions) : INodeExecutor
             cancellationToken);
     }
 
+    /// <remarks>
+    /// Шаг с адресом выполнен, только если открыта и страница: иначе «не выполнено» — шаг выполнится снова, а открытый профиль
+    /// не запускается второй раз (Pepa подключится к нему и откроет адрес).
+    /// </remarks>
     public async ValueTask<VerificationResult> VerifyAsync(NodeExecutionContext context, CancellationToken cancellationToken)
     {
         try
         {
             var state = await sessions.AdsPower.GetStateAsync(ProfileId(context.Input), cancellationToken);
-            return state.Active
-                ? VerificationResult.Done("профиль открыт в AdsPower")
-                : VerificationResult.NotDone("профиль в AdsPower не открыт");
+            if (!state.Active)
+            {
+                return VerificationResult.NotDone("профиль в AdsPower не открыт");
+            }
+
+            if (context.GetString("url") is not { Length: > 0 } url || string.IsNullOrWhiteSpace(url))
+            {
+                return VerificationResult.Done("профиль открыт в AdsPower");
+            }
+
+            var expected = BrowserNodes.NormalizeUrl(url);
+            var session = await sessions.GetAsync(context.ProcessId, BrowserNodes.SessionName(context), cancellationToken);
+            return session.Context.Pages.Any(p => !p.IsClosed && BrowserNodes.NormalizeUrl(p.Url).StartsWith(expected, StringComparison.OrdinalIgnoreCase))
+                ? VerificationResult.Done("профиль открыт, страница открыта")
+                : VerificationResult.NotDone("профиль открыт, но страница не открыта — шаг откроет её, не запуская профиль снова");
         }
         catch (AdsPowerException ex)
         {
             return VerificationResult.Inconclusive($"Не удалось спросить AdsPower: {ex.Message}");
+        }
+        catch (Exception ex) when (ex is BrowserSessionLostException or BrowserStartException or PlaywrightException)
+        {
+            return VerificationResult.Inconclusive($"профиль открыт, но подключиться к нему не удалось: {ex.Message}");
         }
     }
 }

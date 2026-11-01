@@ -91,7 +91,7 @@ public sealed class BrowserRecorder(BrowserSessions sessions) : IAsyncDisposable
                 session = start.Browser == RecorderBrowser.AdsPower
                     ? await sessions.OpenAdsPowerAsync(SessionOwner, SessionName,
                         string.IsNullOrWhiteSpace(start.ProfileId) ? throw new RecorderException("Укажите профиль AdsPower.") : start.ProfileId.Trim(),
-                        newTab: true, closeOnFinish: false, cancellationToken)
+                        newTab: true, closeOnFinish: false, cancellationToken, AdsPowerOpenedElsewhere.NewTab)
                     : await sessions.OpenLocalAsync(SessionOwner, SessionName, new LocalBrowserOptions
                     {
                         Channel = start.Channel,
@@ -104,6 +104,10 @@ public sealed class BrowserRecorder(BrowserSessions sessions) : IAsyncDisposable
                 throw new RecorderException(ex.Message);
             }
             catch (AdsPowerException ex)
+            {
+                throw new RecorderException(ex.Message);
+            }
+            catch (AdsPowerOpenedElsewhereException ex)
             {
                 throw new RecorderException(ex.Message);
             }

@@ -46,6 +46,9 @@ internal sealed class FakeAdsPower : IDisposable
     /// <summary>Пользователь закрыл профиль сам.</summary>
     public void CloseExternally(string profileId) => Stop(profileId);
 
+    /// <summary>Владелец открыл профиль сам, в AdsPower (не через Pepa).</summary>
+    public Task OpenByOwnerAsync(string profileId) => StartAsync(profileId);
+
     private async Task LoopAsync()
     {
         while (!_stop.IsCancellationRequested)

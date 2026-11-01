@@ -50,6 +50,63 @@ public sealed class AdsPowerTests
         Assert.Null((await f.H.Store.ListResourcesAsync()).Single(r => r.Key == "adspower:k1").HolderProcessId);
     }
 
+    private static ScenarioDefinition FillInProfile(BrowserFixture f, string user, object open) => new ScenarioBuilder($"Профиль: {user}")
+        .Node("start", "start")
+        .Node("open", "adspower.open", open)
+        .Node("fill", "browser.fill", new { selector = "#user", text = user })
+        .Node("click", "browser.click", new { selector = "#go", expect = "#done" })
+        .Node("end", "end")
+        .Chain("start", "open", "fill", "click", "end")
+        .Build();
+
+    [Fact]
+    public async Task Profile_opened_outside_Pepa_is_not_taken_over_unless_asked()
+    {
+        TestBrowser.RequireCdpBrowser();
+        await using var f = await BrowserFixture.CreateAsync(withAdsPower: true);
+        await f.Ads!.OpenByOwnerAsync("k1");
+
+        var stopped = await f.H.RunAsync(UseProfile(f, "k1", "чужое окно"));
+        var process = await f.H.WaitForStatusAsync(stopped, ProcessStatus.NeedsAttention);
+        Assert.Contains("открыла его не Pepa", process.StatusMessage);
+        await f.H.Engine.CancelAsync(stopped);
+        Assert.True(f.Ads.IsOpen("k1"));
+        Assert.Equal(0, f.Site.Submits);
+
+        // «Работать в новой вкладке»: своя вкладка, профиль владельца в конце остаётся открытым.
+        var tab = await f.H.RunAsync(FillInProfile(f, "своя вкладка", new { profileId = "k1", url = f.Site.Url("/form"), ifOpen = "tab" }));
+        await f.H.WaitForStatusAsync(tab, ProcessStatus.Completed);
+        Assert.Equal(1, f.Site.Submits);
+        Assert.True(f.Ads.IsOpen("k1"));
+        Assert.DoesNotContain("POST /api/v2/browser-profile/stop", f.Ads.Requests);
+        Assert.Equal(1, f.Ads.Starts);
+    }
+
+    [Fact]
+    public async Task Profile_left_open_by_Pepa_is_used_by_the_next_process_after_a_restart()
+    {
+        TestBrowser.RequireCdpBrowser();
+        await using var f = await BrowserFixture.CreateAsync(withAdsPower: true);
+        var first = await f.H.RunAsync(FillInProfile(f, "первый", new { profileId = "k1", url = f.Site.Url("/form"), closeOnFinish = false }));
+        await f.H.WaitForStatusAsync(first, ProcessStatus.Completed);
+        Assert.True(f.Ads!.IsOpen("k1"));
+
+        // Pepa перезапущена — она всё равно помнит, что этот профиль открыла она.
+        await f.RestartAsync();
+        var second = await f.H.RunAsync(FillInProfile(f, "второй", new { profileId = "k1", url = f.Site.Url("/form") }));
+        await f.H.WaitForStatusAsync(second, ProcessStatus.Completed);
+        Assert.Equal(2, f.Site.Submits);
+        Assert.Equal(1, f.Ads.Starts);
+
+        // Второй процесс закрывает профиль, когда завершается (это идёт сразу после завершения, не в нём).
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+        while (f.Ads.IsOpen("k1"))
+        {
+            Assert.True(DateTime.UtcNow < deadline, "Профиль не закрылся после завершения процесса.");
+            await Task.Delay(50, TestContext.Current.CancellationToken);
+        }
+    }
+
     [Fact]
     public async Task Second_process_with_same_profile_waits_for_the_first()
     {

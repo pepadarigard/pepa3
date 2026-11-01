@@ -186,6 +186,19 @@ public sealed record BrowserSessionInfo
     public bool CloseOnFinish { get; init; } = true;
 }
 
+/// <summary>Что делать, если профиль AdsPower уже открыт не Pepa (например, владельцем вручную).</summary>
+public enum AdsPowerOpenedElsewhere
+{
+    /// <summary>Не трогать чужое окно: шаг не выполняется.</summary>
+    Stop,
+
+    /// <summary>Работать в своей новой вкладке и не закрывать профиль в конце.</summary>
+    NewTab,
+}
+
+/// <summary>Профиль AdsPower открыт не Pepa — работать в нём, не спросив, нельзя. Ничего не выполнялось.</summary>
+public sealed class AdsPowerOpenedElsewhereException(string message) : Exception(message);
+
 /// <summary>Сессия потеряна: браузер закрыт или Pepa перезапускалась. Действие при этом не выполнялось.</summary>
 public sealed class BrowserSessionLostException(string message) : Exception(message);
 
@@ -227,6 +240,10 @@ public sealed class BrowserSessions : IAsyncDisposable
     private readonly SemaphoreSlim _lock = new(1, 1);
     private readonly string _registryPath;
     private Dictionary<string, BrowserSessionInfo> _registry;
+
+    /// <summary>Профили AdsPower, которые запустила Pepa и ещё не закрыла (на диске: переживают перезапуск Pepa).</summary>
+    private readonly string _startedPath;
+    private readonly HashSet<string> _started;
     private IPlaywright? _playwright;
 
     public BrowserSessions(BrowserModuleOptions options, AdsPowerClient adsPower, ILogger? logger = null)
@@ -236,6 +253,8 @@ public sealed class BrowserSessions : IAsyncDisposable
         _logger = logger ?? NullLogger.Instance;
         _registryPath = Path.Combine(options.DataDirectory, "browser-sessions.json");
         _registry = LoadRegistry(_registryPath);
+        _startedPath = Path.Combine(options.DataDirectory, "adspower-started.json");
+        _started = LoadStarted(_startedPath);
     }
 
     public AdsPowerClient AdsPower => _adsPower;
@@ -310,8 +329,14 @@ public sealed class BrowserSessions : IAsyncDisposable
     }
 
     /// <summary>Открыть профиль AdsPower (или подключиться к уже открытому) и подключить к нему Playwright.</summary>
+    /// <remarks>
+    /// Профиль, открытый не Pepa (владельцем вручную), не захватывается молча: его вкладку Pepa не берёт и профиль в конце не
+    /// закрывает — по <paramref name="openedElsewhere"/> шаг останавливается или работает в своей новой вкладке. Сессия
+    /// записывается до запуска профиля: если запуск затянулся или Pepa упала, профиль всё равно закроется, когда процесс
+    /// завершится.
+    /// </remarks>
     public async Task<BrowserSession> OpenAdsPowerAsync(string processId, string name, string profileId, bool newTab, bool closeOnFinish,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, AdsPowerOpenedElsewhere openedElsewhere = AdsPowerOpenedElsewhere.Stop)
     {
         await _lock.WaitAsync(cancellationToken);
         try
@@ -322,9 +347,18 @@ public sealed class BrowserSessions : IAsyncDisposable
             }
 
             var state = await _adsPower.GetStateAsync(profileId, cancellationToken);
-            if (!state.Active || state.WsEndpoint is null)
+            if (state.Active && !IsPepaProfile(profileId))
             {
-                state = await _adsPower.StartAsync(profileId, cancellationToken);
+                if (openedElsewhere == AdsPowerOpenedElsewhere.Stop)
+                {
+                    throw new AdsPowerOpenedElsewhereException(
+                        $"Профиль AdsPower {profileId} уже открыт, и открыла его не Pepa (возможно, вы вручную). Pepa не работает в чужом " +
+                        "окне: закройте профиль в AdsPower и выполните шаг ещё раз — или выберите у блока «Если профиль уже открыт не Pepa» → " +
+                        "«Работать в новой вкладке».");
+                }
+
+                newTab = true;
+                closeOnFinish = false;
             }
 
             var info = new BrowserSessionInfo
@@ -333,6 +367,22 @@ public sealed class BrowserSessions : IAsyncDisposable
                 ResourceKey = AdsPowerResourceKey(profileId), CloseOnFinish = closeOnFinish,
             };
             SaveRegistry(info);
+            if (!state.Active || state.WsEndpoint is null)
+            {
+                MarkStarted(profileId);
+                try
+                {
+                    state = await _adsPower.StartAsync(profileId, cancellationToken);
+                }
+                catch (AdsPowerException ex) when (!ex.TimedOut)
+                {
+                    // Точно не открылся — ни сессии, ни отметки.
+                    UnmarkStarted(profileId);
+                    RemoveRegistry(processId, name);
+                    throw;
+                }
+            }
+
             var session = await ConnectAsync(info, state.WsEndpoint!, newTab);
             _sessions[(processId, name)] = session;
             return session;
@@ -341,6 +391,62 @@ public sealed class BrowserSessions : IAsyncDisposable
         {
             _lock.Release();
         }
+    }
+
+    /// <summary>Профиль открыла Pepa: запустила сама (и ещё не закрыла) или он записан за процессом Pepa.</summary>
+    private bool IsPepaProfile(string profileId)
+    {
+        lock (_registry)
+        {
+            return _started.Contains(profileId) || _registry.Values.Any(i => i.ProfileId == profileId);
+        }
+    }
+
+    private void MarkStarted(string profileId)
+    {
+        lock (_registry)
+        {
+            if (_started.Add(profileId))
+            {
+                WriteStarted();
+            }
+        }
+    }
+
+    private void UnmarkStarted(string profileId)
+    {
+        lock (_registry)
+        {
+            if (_started.Remove(profileId))
+            {
+                WriteStarted();
+            }
+        }
+    }
+
+    private void WriteStarted()
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(_startedPath)!);
+        var temp = _startedPath + ".tmp";
+        File.WriteAllText(temp, JsonSerializer.Serialize(_started.Order(StringComparer.Ordinal).ToList(), RegistryJson));
+        File.Move(temp, _startedPath, overwrite: true);
+    }
+
+    private static HashSet<string> LoadStarted(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                return new HashSet<string>(JsonSerializer.Deserialize<List<string>>(File.ReadAllText(path), RegistryJson) ?? [], StringComparer.Ordinal);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
+        {
+            // Повреждённый список — профили, оставленные открытыми, будут считаться открытыми не Pepa (осторожно).
+        }
+
+        return new HashSet<string>(StringComparer.Ordinal);
     }
 
     public static string AdsPowerResourceKey(string profileId) => $"adspower:{profileId}";
@@ -436,6 +542,7 @@ public sealed class BrowserSessions : IAsyncDisposable
             if (info is { Kind: BrowserKind.AdsPower, ProfileId: { } profileId } && stopProfile)
             {
                 await _adsPower.StopAsync(profileId, cancellationToken);
+                UnmarkStarted(profileId);
             }
 
             RemoveRegistry(processId, name);

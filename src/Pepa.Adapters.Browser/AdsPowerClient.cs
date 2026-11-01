@@ -13,8 +13,11 @@ public sealed record AdsPowerProfile(string Id, string? Number, string Name, str
 public sealed record AdsPowerBrowserState(bool Active, string? WsEndpoint);
 
 /// <summary>Ошибка Local API AdsPower с понятным текстом.</summary>
-public sealed class AdsPowerException(string message, bool notRunning = false) : Exception(message)
+public sealed class AdsPowerException(string message, bool notRunning = false, bool timedOut = false) : Exception(message)
 {
+    /// <summary>AdsPower не ответил вовремя: запрос мог выполниться (например, профиль начал открываться).</summary>
+    public bool TimedOut { get; } = timedOut;
+
     /// <summary>Приложение AdsPower не запущено или Local API выключен — запрос точно не выполнен.</summary>
     public bool NotRunning { get; } = notRunning;
 }
@@ -151,6 +154,10 @@ public sealed class AdsPowerClient : IDisposable
             try
             {
                 response = await _http.SendAsync(request, cancellationToken);
+            }
+            catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new AdsPowerException($"AdsPower не ответил за {(int)_http.Timeout.TotalSeconds} с.", timedOut: true);
             }
             catch (HttpRequestException ex)
             {
