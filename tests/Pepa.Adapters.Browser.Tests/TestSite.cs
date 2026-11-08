@@ -97,6 +97,23 @@ internal sealed class TestSite : IDisposable
                            </script>
                            </body></html>
                            """,
+                // Вход: по введённому значению сайт показывает один из исходов (или ничего, или два сразу).
+                "/login" => """
+                           <!doctype html><html><head><title>Вход</title></head><body>
+                           <input id="user"><button id="enter" onclick="enter()">Войти</button><div id="out"></div>
+                           <script>
+                             function enter() {
+                               const v = document.getElementById('user').value;
+                               setTimeout(() => {
+                                 const out = document.getElementById('out');
+                                 if (v === 'ok' || v === 'both') { const d = document.createElement('div'); d.id = 'dashboard'; d.textContent = 'Кабинет'; out.appendChild(d); }
+                                 if (v === 'bad' || v === 'both') { const p = document.createElement('p'); p.textContent = 'Неверный ПАРОЛЬ, попробуйте ещё раз'; out.appendChild(p); }
+                                 if (v === 'code') { history.pushState({}, '', '/login/verify'); }
+                               }, 400);
+                             }
+                           </script>
+                           </body></html>
+                           """,
                 "/late" => """
                            <!doctype html><html><head><title>Позже</title></head><body>
                            <script>setTimeout(() => { const b = document.createElement('button'); b.id = 'late'; b.textContent = 'Появилась'; document.body.appendChild(b); }, 1500);</script>

@@ -21,6 +21,7 @@ public static class BrowserNodes
         .Register(new FillNode(sessions))
         .Register(new PressNode(sessions))
         .Register(new WaitForElementNode(sessions))
+        .Register(new WaitAnyNode(sessions))
         .Register(new SelectOptionNode(sessions))
         .Register(new CheckNode(sessions))
         .Register(new UploadFileNode(sessions, workspace))

@@ -561,8 +561,12 @@ public sealed partial class ProcessEngine
             graph.Next(node.Id, port) is null)
         {
             result = NodeResult.Fail(
-                (routed.Message is { Length: > 0 } reason ? reason + " " : "") + $"Выход «{optional.Label}» не подключён.",
-                retryable: false);
+                (routed.Message is { Length: > 0 } reason ? reason + " " : "") + $"Выход «{OutputLabel(optional, node)}» не подключён.",
+                retryable: false) with
+            {
+                // Снимок, который блок сделал для этого исхода («ничего не появилось»), остаётся у остановки.
+                Snapshot = routed.Snapshot,
+            };
         }
 
         // Прошлая попытка этого шага могла выполниться (итог был неизвестен — пользователь выбрал «Повторить», — или блок
@@ -1009,6 +1013,10 @@ public sealed partial class ProcessEngine
     }
 
     /// <summary>Результат шага со снимком экрана при ошибке (адрес и заголовок — без значений секретов).</summary>
+    /// <summary>Подпись выхода: текст варианта из настроек блока (PortDescriptor.LabelField), иначе обычная.</summary>
+    private static string OutputLabel(PortDescriptor port, NodeDefinition node) =>
+        port.LabelField is { } field && node.Config.GetString(field) is { } text && !string.IsNullOrWhiteSpace(text) ? text.Trim() : port.Label;
+
     private static JsonObject? WithSnapshot(JsonObject? output, JsonObject? snapshot, IReadOnlyList<string> secrets)
     {
         if (snapshot is null)
