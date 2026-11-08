@@ -68,7 +68,7 @@ public sealed class JintExpressionEvaluator(ExpressionLimits? limits = null) : I
     {
         var engine = CreateEngine(scope);
         var value = Run(engine, expression);
-        return ToJson(engine, value, expression);
+        return Guard(expression, () => ToJson(engine, value, expression));
     }
 
     public bool EvaluateCondition(string expression, ExpressionScope scope)
@@ -81,7 +81,7 @@ public sealed class JintExpressionEvaluator(ExpressionLimits? limits = null) : I
         }
 
         throw new ExpressionException(
-            $"Условие «{expression}» должно давать «да» или «нет» (true/false), а получилось: {Describe(engine, value)}. " +
+            $"Условие «{expression}» должно давать «да» или «нет» (true/false), а получилось: {Guard(expression, () => Describe(engine, value))}. " +
             "Добавьте сравнение, например: vars.count > 0");
     }
 
@@ -103,7 +103,8 @@ public sealed class JintExpressionEvaluator(ExpressionLimits? limits = null) : I
                     builder.Append(literal.Text);
                     break;
                 case TemplateParser.Expression expression:
-                    builder.Append(Stringify(engine, Run(engine, expression.Code)));
+                    var result = Run(engine, expression.Code);
+                    builder.Append(Guard(expression.Code, () => Stringify(engine, result)));
                     break;
             }
         }
@@ -132,7 +133,8 @@ public sealed class JintExpressionEvaluator(ExpressionLimits? limits = null) : I
                     afterLeading = false;
                     break;
                 case TemplateParser.Expression expression:
-                    var value = Stringify(engine, Run(engine, expression.Code));
+                    var result = Run(engine, expression.Code);
+                    var value = Guard(expression.Code, () => Stringify(engine, result));
                     var shown = $"«{{{{ {expression.Code} }}}}»";
                     if (string.IsNullOrWhiteSpace(builder.ToString()))
                     {
@@ -276,6 +278,26 @@ public sealed class JintExpressionEvaluator(ExpressionLimits? limits = null) : I
         catch (Exception ex)
         {
             throw new ExpressionException($"Ошибка в выражении «{expression}»: {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>
+    /// Перевод результата в текст или JSON тоже может упасть (BigInt, символ, объект со ссылкой на себя): это ошибка выражения,
+    /// а не сбой — вызывающий получает <see cref="ExpressionException"/>, как и при ошибке в самом выражении.
+    /// </summary>
+    private static T Guard<T>(string expression, Func<T> convert)
+    {
+        try
+        {
+            return convert();
+        }
+        catch (ExpressionException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            throw new ExpressionException($"Результат выражения «{expression}» нельзя показать текстом: {ex.Message}", ex);
         }
     }
 

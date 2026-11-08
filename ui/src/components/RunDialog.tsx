@@ -143,7 +143,7 @@ function RunDialog({ name, inputs, previous, onRun, onCancel }: {
               onChange={(e) => setValues({ ...values, [variable.name]: e.target.value })}
             />
           )}
-          {variable.lookup === "adspower-profiles" && !variable.secret && (
+          {variable.lookup === "adspower-profiles" && !variable.secret && (variable.type === "text" || variable.type === "any") && (
             <AdsPowerPicker onPick={(id) => setValues({ ...values, [variable.name]: id })} />
           )}
           {variable.description && <span className="field-help">{variable.description}</span>}
@@ -159,8 +159,20 @@ function initialText(v: VariableDefinition, previous?: Json): string | boolean {
   const value = previous !== undefined ? previous : v.default;
   if (v.type === "boolean") return value === true;
   if (value === null || value === undefined) return "";
-  if (v.type === "text" || v.type === "number" || (v.type === "any" && typeof value === "string")) return String(value);
+  if (v.type === "text" || v.type === "number") return String(value);
+  // У «любого» текст показывается как есть, только если его нельзя принять за число, да/нет или JSON — иначе с кавычками,
+  // чтобы при запуске он остался текстом («12345», «true»).
+  if (v.type === "any" && typeof value === "string" && value !== "" && value.trim() === value && !parsesAsJson(value)) return value;
   return JSON.stringify(value, null, 2);
+}
+
+function parsesAsJson(text: string): boolean {
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function parseInput(v: VariableDefinition, raw: string | boolean | undefined): { value: Json } | { error: string } {

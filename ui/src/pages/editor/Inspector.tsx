@@ -252,7 +252,11 @@ export function ScenarioInspector({ meta, issues, onChange }: { meta: Meta; issu
               <input className="input mono" style={{ flex: 1 }} value={variable.name} aria-label="Имя переменной"
                 onChange={(e) => updateVariable(index, { name: e.target.value.replace(/\s+/g, "_") }, "name")} />
               <select className="select" style={{ width: 110 }} value={variable.type}
-                onChange={(e) => updateVariable(index, { type: e.target.value as VariableType, default: null }, "type")}>
+                onChange={(e) => {
+                  const type = e.target.value as VariableType;
+                  // Выбор профиля AdsPower — только для текста: у числа или да/нет он дал бы неверное значение.
+                  updateVariable(index, { type, default: null, ...(type === "text" || type === "any" ? {} : { lookup: null }) }, "type");
+                }}>
                 {variableTypes.map((t) => <option key={t} value={t}>{ru.variableTypes[t]}</option>)}
               </select>
               <Button size="small" variant="ghost" iconOnly icon={Trash2} title="Удалить переменную"

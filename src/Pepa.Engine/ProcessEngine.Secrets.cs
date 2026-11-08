@@ -100,11 +100,15 @@ public sealed partial class ProcessEngine
     {
         var trimmed = secret.Trim();
         var escaped = Uri.EscapeDataString(secret);
+        // encodeURIComponent в выражениях не кодирует ! ' ( ) * — в отличие от .NET.
+        var component = escaped.Replace("%21", "!", StringComparison.Ordinal).Replace("%27", "'", StringComparison.Ordinal)
+            .Replace("%28", "(", StringComparison.Ordinal).Replace("%29", ")", StringComparison.Ordinal).Replace("%2A", "*", StringComparison.Ordinal);
         return new[]
             {
                 secret, JsonEncodedText.Encode(secret).Value, JsonEncodedText.Encode(secret, RelaxedEncoder).Value, JsonStringify(secret),
                 trimmed, JsonEncodedText.Encode(trimmed).Value, JsonStringify(trimmed),
                 escaped, escaped.Replace("%20", "+", StringComparison.Ordinal),
+                component, component.Replace("%20", "+", StringComparison.Ordinal),
             }
             .Where(form => form.Length >= MinSecretLength).Distinct(StringComparer.Ordinal);
     }

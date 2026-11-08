@@ -77,6 +77,13 @@ public sealed partial class ScenarioValidator(NodeRegistry registry, IExpression
         {
             Error("scenario.runTitle", $"Название запуска: {titleError}");
         }
+        else if (!string.IsNullOrWhiteSpace(scenario.RunTitle) &&
+                 scenario.Variables.FirstOrDefault(v => v.Secret && UsesVariable(scenario.RunTitle, v.Name)) is { } secret)
+        {
+            Warning("scenario.runTitle.secret",
+                $"Название запуска использует секретную переменную «{secret.Name}»: её значение скрывается, а изменённое (часть, " +
+                "без знаков, другими буквами) — нет и будет видно в списках и уведомлениях.");
+        }
 
         // Блоки
         var nodes = new Dictionary<string, NodeDefinition>(StringComparer.Ordinal);
@@ -226,6 +233,13 @@ public sealed partial class ScenarioValidator(NodeRegistry registry, IExpression
         new ParallelCheck(descriptors, nodes, validEdges, Name, (code, message, node) => Error(code, message, node)).Run();
         return new ValidationReport(issues);
     }
+
+    /// <summary>Упоминается ли переменная в шаблоне или выражении: vars.имя, vars?.имя, vars["имя"].</summary>
+    private static bool UsesVariable(string text, string name) =>
+        System.Text.RegularExpressions.Regex.IsMatch(text,
+            @"\bvars\s*(?:\?\.|\.)\s*" + System.Text.RegularExpressions.Regex.Escape(name) + @"(?![\p{L}\p{N}_$])|\bvars\s*(?:\?\.)?\[\s*(['""`])" +
+            System.Text.RegularExpressions.Regex.Escape(name) + @"\1\s*\]",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
 
     public static string DisplayName(NodeDefinition node, NodeTypeDescriptor? descriptor) =>
         $"«{(string.IsNullOrWhiteSpace(node.Label) ? descriptor?.Title ?? node.Type : node.Label)}»";

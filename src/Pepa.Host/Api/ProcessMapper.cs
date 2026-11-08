@@ -136,7 +136,7 @@ internal sealed class ProcessMapper(ProcessEngine engine, IPepaStore store)
         (subscription.CorrelationKey is { Length: > 0 } key ? $" с ключом «{key}»" : "");
 
     public static ProcessRefDto Ref(ProcessRecord process) =>
-        new(process.Id, ShortId(process.Id), process.ScenarioName, process.Status, process.Title);
+        new(process.Id, ShortId(process.Id), process.ScenarioName, process.Status, ProcessEngine.DisplayTitle(process));
 
     public static string ShortId(string id) => id.Length > 6 ? id[^6..] : id;
 

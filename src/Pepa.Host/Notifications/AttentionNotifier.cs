@@ -512,7 +512,7 @@ public sealed class AttentionNotifier : IAsyncDisposable
 
     /// <summary>«Сценарий» · название запуска (#номер): по названию видно, какой аккаунт или профиль остановился (D-081).</summary>
     private static string Name(ProcessRecord p) =>
-        $"«{p.ScenarioName}»{(p.Title is { Length: > 0 } title ? $" · {Cut(title, 80)}" : "")} (#{Short(p.Id)})";
+        $"«{p.ScenarioName}»{(ProcessEngine.DisplayTitle(p) is { Length: > 0 } title ? $" · {Cut(title, 80)}" : "")} (#{Short(p.Id)})";
 
     private static string Cut(string text, int max) => text.Length > max ? text[..max] + "…" : text;
 

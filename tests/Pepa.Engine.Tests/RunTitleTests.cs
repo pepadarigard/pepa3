@@ -129,4 +129,81 @@ public sealed class RunTitleTests
         var report = validator.Validate(Account().Build() with { RunTitle = "{{ vars.login " });
         Assert.Contains(report.Issues, i => i.Code == "scenario.runTitle");
     }
+    private static async Task<ProcessRecord> ChildOfAsync(EngineHarness h, string secret, string inputs)
+    {
+        var childId = await h.CreateScenarioAsync(new ScenarioBuilder("Дочерний")
+            .Variable("token", VariableType.Text, "", isInput: true)
+            .Variable("profile", VariableType.Text, "", isInput: true)
+            .Node("start", "start")
+            .Node("end", "end")
+            .Chain("start", "end")
+            .Build());
+        var parent = await h.RunAsync(new ScenarioBuilder("Родитель")
+            .Variable("key", VariableType.Text, secret, secret: true)
+            .Node("start", "start")
+            .Node("call", "scenario.call", new { scenario = childId, inputs })
+            .Node("end", "end")
+            .Edge("start", "call").Edge("call", "end", Ports.Done)
+            .Build());
+        await h.WaitForStatusAsync(parent, ProcessStatus.Completed);
+        return Assert.Single(await h.Store.GetChildProcessesAsync(parent));
+    }
+
+    [Fact]
+    public async Task Multiline_secret_is_hidden_before_lines_are_joined()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var child = await ChildOfAsync(h, "secretline-AAAA\nsecretline-BBBB", "({ token: vars.key, profile: \"p1\" })");
+        Assert.DoesNotContain("secretline", child.Title);
+        Assert.Equal("•••• · p1", child.Title);
+    }
+
+    [Fact]
+    public async Task Secret_passed_through_encodeURIComponent_is_recognised()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var child = await ChildOfAsync(h, "p@ss w0rd!", "({ token: 'https://x.test/?k=' + encodeURIComponent(vars.key), profile: \"p1\" })");
+        Assert.DoesNotContain("w0rd", child.Title);
+        Assert.False(child.Inputs!.ContainsKey("token"));
+    }
+
+    [Fact]
+    public async Task Template_whose_result_cannot_be_shown_does_not_stop_the_run()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        foreach (var template in new[] { "{{ BigInt(1) }}", "{{ Symbol('x') }}", "{{ (() => { const o = {}; o.o = o; return o; })() }}" })
+        {
+            var id = await h.RunAsync(Account().Build() with { RunTitle = template });
+            var process = await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+            Assert.Null(process.Title);
+            Assert.Contains(await h.Store.GetJournalAsync(id), j => j.Message.StartsWith("Название запуска не вычислилось", StringComparison.Ordinal));
+        }
+    }
+
+    [Fact]
+    public async Task Title_shown_later_hides_a_value_that_became_secret_after_the_start()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var id = await h.RunAsync(new ScenarioBuilder("Учётка")
+            .Variable("login", VariableType.Text, "anna.k@mail.ru", isInput: true)
+            .Variable("creds", VariableType.Any, null, secret: true)
+            .Node("start", "start")
+            .Node("set", "variable.set", new { variable = "creds", value = "({ login: vars.login, password: 'Qw9z-pass' })" })
+            .Node("end", "end")
+            .Chain("start", "set", "end")
+            .Build());
+        var process = await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Equal("anna.k@mail.ru", process.Title);
+        Assert.Equal(ProcessEngine.SecretMask, ProcessEngine.DisplayTitle(process));
+    }
+
+    [Fact]
+    public void Validator_warns_when_the_title_uses_a_secret_variable()
+    {
+        var registry = new Core.Nodes.NodeRegistry().RegisterLogicNodes();
+        var validator = new Core.Validation.ScenarioValidator(registry, new Core.Expressions.JintExpressionEvaluator());
+        var report = validator.Validate(Account().Build() with { RunTitle = "{{ vars[\"password\"].slice(0, 4) }}" });
+        Assert.True(report.IsValid);
+        Assert.Contains(report.Issues, i => i.Code == "scenario.runTitle.secret" && i.Message.Contains("«password»", StringComparison.Ordinal));
+    }
 }

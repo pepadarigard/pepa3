@@ -1059,15 +1059,19 @@ public sealed partial class ProcessEngine
     /// </summary>
     internal (string? Title, string? Problem) RunTitle(ProcessRecord process, ScenarioDefinition definition)
     {
+        // Секреты скрываются в тексте как он есть — до склейки пробелов и переносов и до обрезки: многострочный секрет
+        // после склейки уже не узнать.
+        var secrets = SecretValues(process, definition);
         string raw;
         if (!string.IsNullOrWhiteSpace(definition.RunTitle))
         {
             try
             {
-                raw = _expressions.RenderTemplate(definition.RunTitle, new ExpressionScope(process.Variables));
+                raw = Redact(_expressions.RenderTemplate(definition.RunTitle, new ExpressionScope(process.Variables)), secrets)!;
             }
-            catch (ExpressionException ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
+                // Любая ошибка шаблона (в том числе не выражения) не мешает запуску: названия нет, причина — в журнале.
                 return (null, $"Название запуска не вычислилось: {ex.Message}");
             }
         }
@@ -1075,14 +1079,14 @@ public sealed partial class ProcessEngine
         {
             raw = string.Join(" · ", definition.Variables
                 .Where(v => v.IsInput && !v.Secret)
-                .Select(v => ScalarText(process.Variables[v.Name]))
+                .Select(v => ScalarText(process.Variables[v.Name]) is { Length: > 0 } text ? Redact(text, secrets) : null)
                 .Where(text => text is { Length: > 0 })
                 .Select(text => text!.Length > 60 ? text[..59] + "…" : text)
                 .Take(2));
         }
 
         var title = string.Join(' ', raw.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
-        title = Redact(title, SecretValues(process, definition))!;
+        title = Redact(title, secrets)!;
         if (title.Length > MaxRunTitleLength)
         {
             title = title[..(MaxRunTitleLength - 1)] + "…";
@@ -1108,14 +1112,13 @@ public sealed partial class ProcessEngine
     /// </summary>
     private static JsonObject? RunInputs(ProcessRecord process, ScenarioDefinition definition)
     {
-        var secrets = RawSecretValues(process, definition).Where(v => v.Length >= MinSecretLength).ToList();
+        // Тем же правилом, что и при скрытии (все записи секрета: JSON, адрес, без пробелов по краям).
+        var secrets = SecretValues(process, definition);
         var inputs = new JsonObject();
         foreach (var variable in definition.Variables.Where(v => v.IsInput && !v.Secret))
         {
             var value = process.Variables[variable.Name];
-            var text = value?.ToJsonString() ?? "";
-            if (secrets.Any(secret => text.Contains(secret, StringComparison.Ordinal) ||
-                                      text.Contains(JsonEncodedText.Encode(secret).Value, StringComparison.Ordinal)))
+            if (value is not null && secrets.Count > 0 && Redact(value, secrets)?.ToJsonString() != value.ToJsonString())
             {
                 continue;
             }
@@ -1124,6 +1127,35 @@ public sealed partial class ProcessEngine
         }
 
         return inputs.Count == 0 ? null : inputs;
+    }
+
+    [System.Text.RegularExpressions.GeneratedRegex("\"secret\"\\s*:\\s*true", System.Text.RegularExpressions.RegexOptions.CultureInvariant)]
+    private static partial System.Text.RegularExpressions.Regex SecretVariableInJson();
+
+    /// <summary>
+    /// Название запуска для показа: скрыты и секреты, узнанные уже после запуска (значение, позже попавшее в секретную
+    /// переменную). Сценарий разбирается, только когда у процесса есть что скрывать.
+    /// </summary>
+    public static string? DisplayTitle(ProcessRecord process)
+    {
+        if (process.Title is not { Length: > 0 } title)
+        {
+            return null;
+        }
+
+        if (process.Secrets is null && !SecretVariableInJson().IsMatch(process.DefinitionJson))
+        {
+            return title;
+        }
+
+        try
+        {
+            return Redact(title, SecretValues(process, PepaJson.Deserialize<ScenarioDefinition>(process.DefinitionJson)));
+        }
+        catch (Exception ex) when (ex is System.Text.Json.JsonException or NotSupportedException)
+        {
+            return SecretMask;
+        }
     }
 
     internal static JsonObject EventJson(EventRecord record) => new()
