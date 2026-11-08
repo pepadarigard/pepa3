@@ -912,7 +912,16 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
 
     private async Task OnUpdateAsync(Connection connection, Update update)
     {
-        if (update is not UpdateNewMessage { message: Message message } || message.flags.HasFlag(Message.Flags.out_))
+        // Новое сообщение — или видимое изменение входящего (бот правит «⏳ Проверяю…» на «✅ Код»). Изменение без даты
+        // изменения или скрытое (реакции, просмотры, служебные правки) — не событие.
+        var (message, edited) = update switch
+        {
+            UpdateNewMessage { message: Message created } => (created, false),
+            UpdateEditMessage { message: Message changed } when changed.flags.HasFlag(Message.Flags.has_edit_date) &&
+                                                               !changed.flags.HasFlag(Message.Flags.edit_hide) => (changed, true),
+            _ => ((Message?)null, false),
+        };
+        if (message is null || message.flags.HasFlag(Message.Flags.out_))
         {
             return;
         }
@@ -931,6 +940,7 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
             ReplyToMessageId = message.reply_to is MessageReplyHeader { reply_to_msg_id: var replyTo } && replyTo != 0 ? replyTo : null,
             Buttons = ButtonsOf(message.reply_markup),
             Media = MediaOf(message.media),
+            EditedAt = edited ? new DateTimeOffset(DateTime.SpecifyKind(message.edit_date, DateTimeKind.Utc)) : null,
         };
 
         var delay = TimeSpan.FromSeconds(1);

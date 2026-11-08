@@ -314,6 +314,12 @@ public sealed class WaitTelegramNode(ITelegramGateway telegram) : INodeExecutor
             },
             new FieldDescriptor
             {
+                Name = "edits", Label = "Изменённые сообщения тоже", Kind = FieldKind.Boolean, Default = false,
+                Help = "Бот может сначала прислать «⏳ Проверяю…», а потом изменить это сообщение на «✅ Код 1234». Включите — и изменение " +
+                       "сообщения тоже подойдёт (если подходит текст и остальные условия). Время изменения — как время прихода.",
+            },
+            new FieldDescriptor
+            {
                 Name = "timeoutSeconds", Label = "Ждать не дольше, секунд", Kind = FieldKind.Seconds, Min = 0, Max = 31_536_000,
                 Placeholder = "без ограничения",
             },
@@ -384,6 +390,13 @@ public sealed class WaitTelegramNode(ITelegramGateway telegram) : INodeExecutor
             conditions.Add($"(f => !!f && (String(f.username ?? '').toLowerCase() === {username} || f.key === {JsonSerializer.Serialize(from)}))(event.payload.from)");
         }
 
+        // С изменёнными — подписка на оба вида событий Telegram (новое и изменённое сообщение), но не на другие.
+        var edits = context.GetBoolean("edits");
+        if (edits)
+        {
+            conditions.Insert(0, $"(event.type === '{TelegramEvents.MessageType}' || event.type === '{TelegramEvents.EditedType}')");
+        }
+
         var match = conditions.Count > 0 ? string.Join(" && ", conditions) : null;
 
         var timeout = context.GetNumber("timeoutSeconds") is { } seconds and > 0
@@ -392,7 +405,7 @@ public sealed class WaitTelegramNode(ITelegramGateway telegram) : INodeExecutor
         return new NodeResult.WaitForEvent(new EventSubscriptionSpec
         {
             Source = TelegramEvents.Source,
-            EventType = TelegramEvents.MessageType,
+            EventType = edits ? null : TelegramEvents.MessageType,
             CorrelationKey = key,
             MatchExpression = match,
             LookbackSeconds = (int)(context.GetNumber("lookbackSeconds") ?? 30),

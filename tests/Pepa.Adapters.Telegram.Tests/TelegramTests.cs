@@ -104,6 +104,34 @@ public sealed class TelegramTests
     }
 
     [Fact]
+    public async Task Edited_message_is_taken_only_by_a_wait_that_asks_for_edits()
+    {
+        var (h, _) = await SetupAsync();
+        await using var __ = h;
+        var plain = await h.RunAsync(WaitOnly(new { chat = "@shop_bot", contains = "Код", saveTo = "reply" }));
+        var edits = await h.RunAsync(WaitOnly(new { chat = "@shop_bot", contains = "Код", edits = true, saveTo = "reply" }));
+        await h.WaitForStatusAsync(plain, ProcessStatus.Waiting);
+        await h.WaitForStatusAsync(edits, ProcessStatus.Waiting);
+
+        // Бот прислал «⏳ Проверяю…» (не подходит никому), а потом изменил его на код.
+        var sentAt = DateTimeOffset.UtcNow;
+        await ReceiveAsync(h, FakeTelegram.Incoming(Bot, "⏳ Проверяю…", 7, sentAt));
+        var edited = FakeTelegram.Incoming(Bot, "✅ Код 1234", 7, sentAt) with { EditedAt = sentAt.AddSeconds(3) };
+        var input = TelegramEvents.ToEvent(edited);
+        Assert.Equal(TelegramEvents.EditedType, input.Type);
+        Assert.Equal("0:user:2002:7:edit:" + sentAt.AddSeconds(3).ToUnixTimeSeconds(), input.ExternalId);
+        Assert.True(input.Payload!["edited"]!.GetValue<bool>());
+        await h.Engine.PublishEventAsync(input);
+
+        Assert.Equal("Ответ: ✅ Код 1234", (await h.WaitForStatusAsync(edits, ProcessStatus.Completed)).StatusMessage);
+        await h.IdleAsync(TimeSpan.FromSeconds(2));
+        // Ожидание без «Изменённые сообщения тоже» изменение не берёт — ждёт новое сообщение.
+        Assert.Equal(ProcessStatus.Waiting, (await h.ProcessAsync(plain)).Status);
+        await ReceiveAsync(h, FakeTelegram.Incoming(Bot, "Ваш код: 9876", 8));
+        Assert.Equal("Ответ: Ваш код: 9876", (await h.WaitForStatusAsync(plain, ProcessStatus.Completed)).StatusMessage);
+    }
+
+    [Fact]
     public async Task Replies_to_different_messages_go_to_their_own_processes_without_a_conflict()
     {
         var (h, _) = await SetupAsync();

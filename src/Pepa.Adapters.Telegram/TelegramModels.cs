@@ -41,6 +41,9 @@ public sealed record TelegramIncomingMessage
 
     /// <summary>Вложение (фото, документ, голосовое…), если есть.</summary>
     public TelegramMedia? Media { get; init; }
+
+    /// <summary>Сообщение изменили (бот правит «⏳ Проверяю…» на «✅ Код»): когда, по часам Telegram. null — новое сообщение.</summary>
+    public DateTimeOffset? EditedAt { get; init; }
 }
 
 public enum TelegramButtonKind
@@ -166,18 +169,28 @@ public static class TelegramEvents
     public const string Source = "telegram";
     public const string MessageType = "message";
 
+    /// <summary>
+    /// Изменённое сообщение (D-077): отдельный вид события — ожидания и автозапуски «сообщение» его не берут; «Ждать сообщение»
+    /// берёт, только если включено «Изменённые сообщения тоже».
+    /// </summary>
+    public const string EditedType = "edited";
+
     public static EventInput ToEvent(TelegramIncomingMessage message) => new()
     {
         Source = Source,
-        Type = MessageType,
-        ExternalId = $"{message.AccountId}:{message.Chat.Key}:{message.MessageId}",
+        Type = message.EditedAt is null ? MessageType : EditedType,
+        // Каждое изменение — своё событие (по времени изменения); то же изменение, пришедшее снова, — повтор.
+        ExternalId = $"{message.AccountId}:{message.Chat.Key}:{message.MessageId}" +
+                     (message.EditedAt is { } edited ? $":edit:{edited.ToUnixTimeSeconds()}" : ""),
         CorrelationKey = message.Chat.Key,
-        OccurredAt = message.Date + message.ClockOffset,
+        OccurredAt = (message.EditedAt ?? message.Date) + message.ClockOffset,
         Payload = new JsonObject
         {
             ["text"] = message.Text,
             ["messageId"] = message.MessageId,
             ["date"] = message.Date.ToString("O"),
+            ["edited"] = message.EditedAt is not null,
+            ["editedAt"] = message.EditedAt?.ToString("O"),
             ["replyTo"] = message.ReplyToMessageId,
             ["chat"] = PeerJson(message.Chat),
             ["from"] = message.From is null ? null : PeerJson(message.From),

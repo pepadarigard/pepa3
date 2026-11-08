@@ -164,6 +164,50 @@ public sealed class TelegramServiceTests : IAsyncLifetime
         return Task.Run(() => (Task)handler.Invoke(manager, [updates, false])!);
     }
 
+    /// <summary>Подать изменение сообщения (бот поправил своё сообщение).</summary>
+    private static Task InjectEditAsync(WTelegram.UpdateManager manager, int pts, int messageId, string text, DateTime? editedAt, bool hidden = false)
+    {
+        var message = new Message { id = messageId, peer_id = new PeerUser { user_id = 42 }, message = text, date = DateTime.UtcNow.AddMinutes(-1) };
+        if (editedAt is { } at)
+        {
+            message.edit_date = at;
+            message.flags |= Message.Flags.has_edit_date;
+        }
+
+        if (hidden)
+        {
+            message.flags |= Message.Flags.edit_hide;
+        }
+
+        var updates = new Updates
+        {
+            updates = [new UpdateEditMessage { pts = pts, pts_count = 1, message = message }],
+            users = [], chats = [], date = DateTime.UtcNow,
+        };
+        var handler = typeof(WTelegram.UpdateManager).GetMethod("OnUpdates", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        return Task.Run(() => (Task)handler.Invoke(manager, [updates, false])!);
+    }
+
+    [Fact]
+    public async Task Visible_edit_of_an_incoming_message_is_an_edited_event_and_a_hidden_one_is_not()
+    {
+        var events = new ConcurrentQueue<EventInput>();
+        var service = new TelegramService(_data, e => { events.Enqueue(e); return Task.CompletedTask; }) { ServerAddress = "127.0.0.1:1" };
+        var manager = await service.ConnectForTestsAsync(Account);
+
+        var editedAt = DateTime.SpecifyKind(DateTime.UtcNow.AddSeconds(-5), DateTimeKind.Utc);
+        await InjectEditAsync(manager, 1, 100, "без даты изменения (реакция)", null).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await InjectEditAsync(manager, 2, 100, "скрытая правка", editedAt, hidden: true).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await InjectEditAsync(manager, 3, 100, "✅ Код 1234", editedAt).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        var edit = Assert.Single(events);
+        Assert.Equal(TelegramEvents.EditedType, edit.Type);
+        Assert.Equal("✅ Код 1234", edit.Payload!["text"]!.GetValue<string>());
+        Assert.Equal($"0:user:42:100:edit:{new DateTimeOffset(editedAt).ToUnixTimeSeconds()}", edit.ExternalId);
+        Assert.Equal(new DateTimeOffset(editedAt).ToUnixTimeSeconds(), edit.OccurredAt!.Value.ToUnixTimeSeconds());
+        await service.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+    }
+
     private int SavedPts() => JsonNode.Parse(File.ReadAllText(StatePath))!["0"]!["pts"]!.GetValue<int>();
 
     private void WriteState(int pts) =>
