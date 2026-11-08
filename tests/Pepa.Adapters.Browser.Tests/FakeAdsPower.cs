@@ -35,6 +35,9 @@ internal sealed class FakeAdsPower : IDisposable
     public List<string> Requests { get; } = [];
     public int Starts { get; private set; }
 
+    /// <summary>Отказ AdsPower при открытии профиля: профиль → текст ответа («code»: -1).</summary>
+    public Dictionary<string, string> StartErrors { get; } = new();
+
     public bool IsOpen(string profileId)
     {
         lock (_lock)
@@ -151,6 +154,11 @@ internal sealed class FakeAdsPower : IDisposable
                 return Ok(null);
             case "/api/v2/browser-profile/start" or "/api/v1/browser/start":
             {
+                if (StartErrors.TryGetValue(profile!, out var refusal))
+                {
+                    return new JsonObject { ["code"] = -1, ["msg"] = refusal, ["data"] = new JsonObject() };
+                }
+
                 var ws = await StartAsync(profile!);
                 return Ok(new JsonObject { ["ws"] = new JsonObject { ["puppeteer"] = ws, ["selenium"] = "127.0.0.1:1" }, ["debug_port"] = "1" });
             }

@@ -20,6 +20,12 @@ public sealed class AdsPowerException(string message, bool notRunning = false, b
 
     /// <summary>Приложение AdsPower не запущено или Local API выключен — запрос точно не выполнен.</summary>
     public bool NotRunning { get; } = notRunning;
+
+    /// <summary>
+    /// Повтор по настройкам блока может помочь (AdsPower занят, ограничил частоту, прокси временно недоступен). Нет — нужен
+    /// человек: профиля нет, AdsPower не вошёл в аккаунт, ключ API неверный.
+    /// </summary>
+    public bool Retryable { get; init; } = true;
 }
 
 /// <summary>
@@ -54,8 +60,8 @@ public sealed class AdsPowerClient : IDisposable
     public async Task<AdsPowerBrowserState> StartAsync(string profileId, CancellationToken cancellationToken)
     {
         var body = await SendWithFallbackAsync(
-            () => SendAsync(HttpMethod.Post, "/api/v2/browser-profile/start", new JsonObject { ["profile_id"] = profileId }, cancellationToken),
-            () => SendAsync(HttpMethod.Get, $"/api/v1/browser/start?user_id={Uri.EscapeDataString(profileId)}", null, cancellationToken));
+            () => SendAsync(HttpMethod.Post, "/api/v2/browser-profile/start", new JsonObject { ["profile_id"] = profileId }, cancellationToken, profileId),
+            () => SendAsync(HttpMethod.Get, $"/api/v1/browser/start?user_id={Uri.EscapeDataString(profileId)}", null, cancellationToken, profileId));
         var ws = WsOf(body["data"] as JsonObject);
         if (ws is null)
         {
@@ -69,8 +75,8 @@ public sealed class AdsPowerClient : IDisposable
     public async Task<AdsPowerBrowserState> GetStateAsync(string profileId, CancellationToken cancellationToken)
     {
         var body = await SendWithFallbackAsync(
-            () => SendAsync(HttpMethod.Get, $"/api/v2/browser-profile/active?profile_id={Uri.EscapeDataString(profileId)}", null, cancellationToken),
-            () => SendAsync(HttpMethod.Get, $"/api/v1/browser/active?user_id={Uri.EscapeDataString(profileId)}", null, cancellationToken));
+            () => SendAsync(HttpMethod.Get, $"/api/v2/browser-profile/active?profile_id={Uri.EscapeDataString(profileId)}", null, cancellationToken, profileId),
+            () => SendAsync(HttpMethod.Get, $"/api/v1/browser/active?user_id={Uri.EscapeDataString(profileId)}", null, cancellationToken, profileId));
         var data = body["data"] as JsonObject;
         var status = data?.GetString("status");
         var active = string.Equals(status, "Active", StringComparison.OrdinalIgnoreCase);
@@ -80,8 +86,8 @@ public sealed class AdsPowerClient : IDisposable
     public async Task StopAsync(string profileId, CancellationToken cancellationToken)
     {
         await SendWithFallbackAsync(
-            () => SendAsync(HttpMethod.Post, "/api/v2/browser-profile/stop", new JsonObject { ["profile_id"] = profileId }, cancellationToken),
-            () => SendAsync(HttpMethod.Get, $"/api/v1/browser/stop?user_id={Uri.EscapeDataString(profileId)}", null, cancellationToken));
+            () => SendAsync(HttpMethod.Post, "/api/v2/browser-profile/stop", new JsonObject { ["profile_id"] = profileId }, cancellationToken, profileId),
+            () => SendAsync(HttpMethod.Get, $"/api/v1/browser/stop?user_id={Uri.EscapeDataString(profileId)}", null, cancellationToken, profileId));
     }
 
     public async Task<IReadOnlyList<AdsPowerProfile>> ListProfilesAsync(int page, int limit, CancellationToken cancellationToken)
@@ -126,7 +132,8 @@ public sealed class AdsPowerClient : IDisposable
 
     private sealed class EndpointMissingException : Exception;
 
-    private async Task<JsonObject> SendAsync(HttpMethod method, string path, JsonObject? body, CancellationToken cancellationToken)
+    private async Task<JsonObject> SendAsync(HttpMethod method, string path, JsonObject? body, CancellationToken cancellationToken,
+        string? profileId = null)
     {
         var settings = _settings();
         await _gate.WaitAsync(cancellationToken);
@@ -192,9 +199,9 @@ public sealed class AdsPowerClient : IDisposable
                 if (json["code"]?.ToString() is { } code && code != "0")
                 {
                     var message = json.GetString("msg") ?? "без описания";
-                    throw new AdsPowerException(response.StatusCode == HttpStatusCode.Unauthorized || message.Contains("api key", StringComparison.OrdinalIgnoreCase)
-                        ? $"AdsPower отклонил запрос: {message}. Проверьте ключ API в настройках Pepa."
-                        : $"AdsPower: {message}");
+                    throw response.StatusCode == HttpStatusCode.Unauthorized
+                        ? new AdsPowerException($"AdsPower отклонил запрос: {message}. Проверьте ключ API в настройках Pepa.") { Retryable = false }
+                        : Explain(message, profileId);
                 }
 
                 return json;
@@ -210,6 +217,73 @@ public sealed class AdsPowerClient : IDisposable
     {
         _http.Dispose();
         _gate.Dispose();
+    }
+
+    /// <summary>
+    /// Отказ Local API — понятными словами, что делать. Ответ AdsPower остаётся в тексте как есть (его формулировки
+    /// меняются от версии к версии и бывают на английском или китайском), поэтому он узнаётся по ключевым словам; не
+    /// узнан — показывается как есть. Отказ значит, что AdsPower запрос не выполнил.
+    /// </summary>
+    internal static AdsPowerException Explain(string message, string? profileId)
+    {
+        var said = $"(AdsPower: «{message}»)";
+        var profile = profileId is { Length: > 0 } ? $"профиль {profileId}" : "профиль";
+        bool Has(params string[] words) => words.Any(w => message.Contains(w, StringComparison.OrdinalIgnoreCase));
+
+        if (Has("api key", "api-key", "apikey", "unauthorized"))
+        {
+            return new AdsPowerException($"AdsPower отклонил запрос: неверный или отсутствующий ключ API {said}. Проверьте ключ API в " +
+                                         "настройках Pepa (раздел «Браузер и AdsPower»).") { Retryable = false };
+        }
+
+        if (Has("kernel", "内核"))
+        {
+            return new AdsPowerException($"AdsPower скачивает или обновляет браузер (ядро), нужный профилю {said}. Подождите, пока " +
+                                         "он закончит, и выполните шаг ещё раз.");
+        }
+
+        if (Has("proxy", "代理"))
+        {
+            return new AdsPowerException($"AdsPower не открыл {profile}: прокси профиля не прошёл проверку {said}. Проверьте прокси в " +
+                                         "настройках профиля в AdsPower (адрес, логин и пароль, срок действия) — или он временно недоступен.");
+        }
+
+        if (Has("too many", "frequen", "rate limit", "per second", "频繁"))
+        {
+            return new AdsPowerException($"AdsPower ограничил частоту запросов {said}. Pepa делает паузы между своими запросами; если " +
+                                         "к AdsPower обращается ещё одна программа, уменьшите её частоту или увеличьте паузу.");
+        }
+
+        if (Has("log in", "login", "logged", "sign in", "登录"))
+        {
+            return new AdsPowerException($"AdsPower не вошёл в аккаунт {said}. Откройте AdsPower и войдите в аккаунт.") { Retryable = false };
+        }
+
+        if (Has("not exist", "does not exist", "not found", "no such", "invalid user", "invalid profile", "user_id is invalid",
+                "profile_id is invalid", "不存在"))
+        {
+            return new AdsPowerException($"AdsPower не нашёл {profile} {said}. Проверьте ID профиля в блоке: профиль могли удалить, или " +
+                                         "он в группе, к которой у этого аккаунта AdsPower нет доступа.") { Retryable = false };
+        }
+
+        if (Has("limit", "exceed", "maximum", "上限"))
+        {
+            return new AdsPowerException($"AdsPower не открывает больше профилей одновременно {said} — предел тарифа или настроек. " +
+                                         "Закройте другие профили или дождитесь, пока процессы их закроют.");
+        }
+
+        if (Has("used by", "in use", "occupied", "another device", "使用中"))
+        {
+            return new AdsPowerException($"AdsPower не открыл {profile}: он сейчас открыт у другого участника команды или на другом " +
+                                         $"компьютере {said}. Дождитесь, пока его закроют, и выполните шаг ещё раз.");
+        }
+
+        if (Has("opening", "starting", "closing", "in progress", "being", "正在"))
+        {
+            return new AdsPowerException($"AdsPower ещё открывает или закрывает {profile} {said}. Подождите и выполните шаг ещё раз.");
+        }
+
+        return new AdsPowerException($"AdsPower отказал: «{message}». Запрос не выполнен.");
     }
 }
 

@@ -205,6 +205,47 @@ public sealed class AdsPowerTests
         Assert.Equal(1, f.Ads.Starts);
     }
 
+    [Theory]
+    [InlineData("user account does not exist", "не нашёл профиль k9", false)]
+    [InlineData("Profile does not exist", "не нашёл профиль k9", false)]
+    [InlineData("Too many request per second, please check", "ограничил частоту запросов", true)]
+    [InlineData("The proxy check failed, please check the proxy", "прокси профиля не прошёл проверку", true)]
+    [InlineData("Please login first", "не вошёл в аккаунт", false)]
+    [InlineData("Exceeding the maximum number of open browsers", "больше профилей одновременно", true)]
+    [InlineData("Browser kernel is downloading", "скачивает или обновляет браузер", true)]
+    [InlineData("The profile is being used by another member", "у другого участника команды", true)]
+    [InlineData("api key is invalid", "Проверьте ключ API", false)]
+    [InlineData("что-то новое", "AdsPower отказал: «что-то новое»", true)]
+    public void AdsPower_refusals_are_explained_and_keep_the_original_text(string answer, string expected, bool retryable)
+    {
+        var error = AdsPowerClient.Explain(answer, "k9");
+        Assert.Contains(expected, error.Message);
+        Assert.Contains(answer, error.Message);
+        Assert.Equal(retryable, error.Retryable);
+    }
+
+    [Fact]
+    public async Task Missing_profile_stops_the_step_with_an_explanation_and_without_retries()
+    {
+        TestBrowser.RequireCdpBrowser();
+        await using var f = await BrowserFixture.CreateAsync(withAdsPower: true);
+        f.Ads!.StartErrors["k1"] = "user account does not exist";
+        var scenario = UseProfile(f, "k1", "нет профиля");
+        scenario = scenario with
+        {
+            Nodes = [.. scenario.Nodes.Select(n => n.Id == "open" ? n with { Settings = n.Settings with { RetryCount = 3, RetryDelaySeconds = 0 } } : n)],
+        };
+        var id = await f.H.RunAsync(scenario);
+
+        var process = await f.H.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
+        Assert.Equal(AttentionKind.StepFailed, process.Attention);
+        Assert.Contains("AdsPower не нашёл профиль k1", process.StatusMessage);
+        Assert.Contains("user account does not exist", process.StatusMessage);
+        // Повтор не поможет — нужен человек: попытка одна.
+        Assert.Single(await f.H.StepsAsync(id), s => s.NodeId == "open" && s.State == StepState.Failed);
+        Assert.Equal(0, f.Ads.Starts);
+    }
+
     [Fact]
     public async Task AdsPower_not_running_gives_clear_reason()
     {

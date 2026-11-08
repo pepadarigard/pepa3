@@ -115,7 +115,7 @@ public static class BrowserNodes
         }
         catch (AdsPowerException ads)
         {
-            return NodeResult.Fail(ads.Message, retryable: true);
+            return NodeResult.Fail(ads.Message, retryable: ads.Retryable);
         }
 
         // Окно, которое сайт показал между шагами (по таймеру, при загрузке): этот шаг не выполняется — страница уже не та,
@@ -563,7 +563,7 @@ public sealed class OpenAdsPowerNode(BrowserSessions sessions) : INodeExecutor
         }
         catch (AdsPowerException ex)
         {
-            return NodeResult.Fail(ex.Message);
+            return NodeResult.Fail(ex.Message, retryable: ex.Retryable);
         }
         catch (AdsPowerOpenedElsewhereException ex)
         {
