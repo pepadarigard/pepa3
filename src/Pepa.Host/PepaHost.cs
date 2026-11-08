@@ -229,6 +229,7 @@ public sealed class PepaHost : IAsyncDisposable
         var notifier = app.Services.GetRequiredService<Notifications.AttentionNotifier>();
         engine.Changed += change => notifier.OnProcessChanged(change.ProcessId);
         engine.ConflictRaised += notifier.OnConflict;
+        engine.TriggerFailed += notifier.OnTriggerFailed;
         engine.EventsChanged += () => events.Publish("events");
         engine.TriggersChanged += () => events.Publish("triggers");
         // Процесс завершился — закрыть его браузеры (и профили AdsPower, если так настроено в блоке).

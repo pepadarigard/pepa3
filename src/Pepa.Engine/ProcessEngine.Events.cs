@@ -183,7 +183,7 @@ public sealed partial class ProcessEngine
 
                 var allowTriggers = mode == RouteMode.Manual ||
                                     (record.Id > _eventsBeforeStart && (record.OccurredAt is null || record.OccurredAt >= _startedAt));
-                var started = allowTriggers ? await StartByEventTriggersAsync(record, cancellationToken) : [];
+                var (started, failures) = allowTriggers ? await StartByEventTriggersAsync(record, cancellationToken) : ([], []);
                 var now = _time.GetUtcNow();
                 var final = started.Count > 0
                     ? record with
@@ -196,7 +196,10 @@ public sealed partial class ProcessEngine
                     : record with
                     {
                         State = EventState.Unmatched,
-                        Note = allowTriggers
+                        Note = failures.Count > 0
+                            ? $"Подошло правило автозапуска, но процесс не запустился — {string.Join("; ", failures)}. Исправьте сценарий " +
+                              "или автозапуск и нажмите «Сопоставить снова»."
+                            : allowTriggers
                             ? "Нет ожидающих процессов с подходящими правилами. Ничего не запускалось."
                             : "Произошло или принято до запуска Pepa: ожидающих его процессов нет, а запуск по триггерам для " +
                               "таких событий сам не выполняется. Чтобы обработать событие, нажмите «Сопоставить снова».",

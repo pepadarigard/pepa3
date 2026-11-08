@@ -37,7 +37,8 @@ public sealed class AttentionNotifier : IAsyncDisposable
     private readonly ILogger _logger;
     private readonly TimeSpan _batchDelay;
     private readonly Channel<string> _changes = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
-    private readonly Channel<EventRecord> _conflicts = Channel.CreateUnbounded<EventRecord>(new UnboundedChannelOptions { SingleReader = true });
+    /// <summary>Конфликты событий (<see cref="EventRecord"/>) и сбои автозапуска (<see cref="TriggerFailure"/>) — по одному сообщению на пачку.</summary>
+    private readonly Channel<object> _notices = Channel.CreateUnbounded<object>(new UnboundedChannelOptions { SingleReader = true });
     private readonly Dictionary<string, Known> _notified = new(StringComparer.Ordinal);
 
     /// <summary>О чём уже сообщено: остановка (её состояние) и вопросы (номера — повтор того же текста тоже новый вопрос).</summary>
@@ -92,7 +93,7 @@ public sealed class AttentionNotifier : IAsyncDisposable
         }
 
         _background.Add(Task.Run(() => LoopAsync(_stop.Token)));
-        _background.Add(Task.Run(() => ConflictLoopAsync(_stop.Token)));
+        _background.Add(Task.Run(() => NoticeLoopAsync(_stop.Token)));
         if (recovery is not null && StartupMessage(recovery) is { } message)
         {
             _background.Add(Task.Run(() => SendWhenConnectedAsync(message, _stop.Token)));
@@ -106,24 +107,39 @@ public sealed class AttentionNotifier : IAsyncDisposable
     /// Событие ушло в конфликт: никому не отдано, пока вы не решите (процессы-кандидаты при этом не уходят по тайм-ауту —
     /// без решения они стоят). Одно сообщение на конфликт; данные события в него не попадают.
     /// </summary>
-    public void OnConflict(EventRecord conflict) => _conflicts.Writer.TryWrite(conflict);
+    public void OnConflict(EventRecord conflict) => _notices.Writer.TryWrite(conflict);
 
-    private async Task ConflictLoopAsync(CancellationToken stop)
+    /// <summary>Автозапуск не запустил процесс: без уведомления это видно только в диалоге автозапуска.</summary>
+    public void OnTriggerFailed(TriggerFailure failure) => _notices.Writer.TryWrite(failure);
+
+    private async Task NoticeLoopAsync(CancellationToken stop)
     {
         try
         {
-            while (await _conflicts.Reader.WaitToReadAsync(stop))
+            while (await _notices.Reader.WaitToReadAsync(stop))
             {
                 await Task.Delay(_batchDelay, stop);
-                var raised = new List<EventRecord>();
-                while (_conflicts.Reader.TryRead(out var conflict))
+                var conflicts = new List<EventRecord>();
+                var failures = new List<TriggerFailure>();
+                while (_notices.Reader.TryRead(out var notice))
                 {
-                    raised.Add(conflict);
+                    if (notice is EventRecord conflict)
+                    {
+                        conflicts.Add(conflict);
+                    }
+                    else if (notice is TriggerFailure failure)
+                    {
+                        failures.Add(failure);
+                    }
                 }
 
                 try
                 {
-                    var text = ConflictMessage(raised);
+                    var text = string.Join("\n\n", new[]
+                    {
+                        conflicts.Count > 0 ? ConflictMessage(conflicts) : null,
+                        failures.Count > 0 ? TriggerFailureMessage(failures) : null,
+                    }.Where(part => part is not null));
                     try
                     {
                         _desktop?.RequestAttention(text);
@@ -137,7 +153,7 @@ public sealed class AttentionNotifier : IAsyncDisposable
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    _logger.LogWarning(ex, "Уведомление о конфликте события не отправлено.");
+                    _logger.LogWarning(ex, "Уведомление о конфликте события или сбое автозапуска не отправлено.");
                 }
             }
         }
@@ -146,8 +162,28 @@ public sealed class AttentionNotifier : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Уведомления о конфликтах событий остановлены из-за ошибки.");
+            _logger.LogError(ex, "Уведомления о конфликтах событий и сбоях автозапуска остановлены из-за ошибки.");
         }
+    }
+
+    internal static string TriggerFailureMessage(IReadOnlyList<TriggerFailure> failures)
+    {
+        var text = new StringBuilder();
+        text.AppendLine(failures.Count == 1
+            ? "Pepa: автозапуск не сработал — процесс не запущен."
+            : $"Pepa: автозапуски не сработали — {failures.Count}, процессы не запущены.");
+        foreach (var failure in failures.Take(MaxListed))
+        {
+            text.AppendLine($"• «{failure.ScenarioName}», автозапуск {Cut(failure.TriggerName, 120)}: {Cut(failure.Error, 400)}");
+        }
+
+        if (failures.Count > MaxListed)
+        {
+            text.AppendLine($"…и ещё {failures.Count - MaxListed}.");
+        }
+
+        text.Append("Исправьте сценарий или автозапуск в Pepa («Сценарии» → «…» → «Автозапуск…»).");
+        return text.ToString();
     }
 
     internal static string ConflictMessage(IReadOnlyList<EventRecord> conflicts)

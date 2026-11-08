@@ -336,7 +336,8 @@ internal static class ApiEndpoints
                 conflicts.Count,
                 triggers.Where(t => t.MissedRuns > 0).ToList(),
                 triggers.Where(t => t is { Enabled: true, NextRunAt: not null }).OrderBy(t => t.NextRunAt).Take(5).ToList(),
-                new PowerDto(keeper.Supported, settings.Current.KeepAwake, keeper.Active, engine.LastSleep?.From, engine.LastSleep?.To));
+                new PowerDto(keeper.Supported, settings.Current.KeepAwake, keeper.Active, engine.LastSleep?.From, engine.LastSleep?.To),
+                triggers.Where(t => t is { Enabled: true, LastError: not null }).ToList());
         });
 
         // ───────────── Сценарии ─────────────

@@ -177,6 +177,64 @@ public sealed class TriggerTests
     }
 
     [Fact]
+    public async Task Schedule_that_cannot_start_reports_the_failure_once_until_the_error_changes()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var failures = new System.Collections.Concurrent.ConcurrentQueue<TriggerFailure>();
+        h.Engine.TriggerFailed += failures.Enqueue;
+        var scenario = await h.CreateScenarioAsync(Simple("tick"));
+        var trigger = await h.Engine.SaveTriggerAsync(Every(scenario, 30));
+        // Сценарий стал черновиком с ошибками — автозапуск не может запустить процесс.
+        var stored = (await h.Store.GetScenarioAsync(scenario))!;
+        await h.Scenarios.UpdateAsync(scenario, new ScenarioBuilder("По расписанию").Node("end", "end").Build(), stored.Version);
+
+        await WaitUntilAsync(async () => (await h.Store.GetTriggerAsync(trigger.Id))!.LastError is not null, h, TimeSpan.FromSeconds(10));
+        var failure = Assert.Single(failures);
+        Assert.Equal(trigger.Id, failure.TriggerId);
+        Assert.Equal("Каждые N минут", failure.TriggerName);
+        Assert.Equal("По расписанию", failure.ScenarioName);
+        Assert.Contains("ошибки", failure.Error);
+
+        // Следующий запуск с той же ошибкой — не новость.
+        var lastRun = (await h.Store.GetTriggerAsync(trigger.Id))!.LastRunAt;
+        await WaitUntilAsync(async () => (await h.Store.GetTriggerAsync(trigger.Id))!.LastRunAt > lastRun, h, TimeSpan.FromSeconds(10));
+        Assert.Single(failures);
+        Assert.Empty(await ProcessesAsync(h, scenario));
+    }
+
+    [Fact]
+    public async Task Event_that_matched_a_failing_autostart_says_so_instead_of_nothing_matched()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var failures = new System.Collections.Concurrent.ConcurrentQueue<TriggerFailure>();
+        h.Engine.TriggerFailed += failures.Enqueue;
+        var scenario = await h.CreateScenarioAsync(Simple("order"));
+        await h.Engine.SaveTriggerAsync(new TriggerRecord
+        {
+            Id = "",
+            ScenarioId = scenario,
+            Kind = TriggerKind.Event,
+            Name = "Новый заказ",
+            Config = new JsonObject { ["source"] = "http", ["eventType"] = "order" },
+            Inputs = new JsonObject { ["orderId"] = "event.payload.missing.id" },
+            CreatedAt = default,
+            UpdatedAt = default,
+        });
+
+        var published = await h.Engine.PublishEventAsync(new EventInput
+        {
+            Source = "http", Type = "order", ExternalId = "o-9", Payload = new JsonObject { ["id"] = 9 },
+        });
+        await WaitUntilAsync(async () => (await h.Store.GetEventAsync(published.EventId))!.State == EventState.Unmatched, h);
+        var record = (await h.Store.GetEventAsync(published.EventId))!;
+        Assert.StartsWith("Подошло правило автозапуска, но процесс не запустился — «Новый заказ»:", record.Note);
+        Assert.Contains("«Сопоставить снова»", record.Note);
+        var failure = Assert.Single(failures);
+        Assert.Equal(TriggerKind.Event, failure.Kind);
+        Assert.Empty(await ProcessesAsync(h, scenario));
+    }
+
+    [Fact]
     public async Task Waiting_process_takes_event_before_triggers()
     {
         await using var h = await EngineHarness.CreateAsync();

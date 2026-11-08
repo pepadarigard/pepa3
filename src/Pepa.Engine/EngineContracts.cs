@@ -1,4 +1,5 @@
 using Pepa.Core.Validation;
+using Pepa.Engine.Persistence;
 
 namespace Pepa.Engine;
 
@@ -46,6 +47,9 @@ public sealed record EngineOptions
     /// <summary>Сколько ждать завершения выполняющихся шагов при закрытии приложения.</summary>
     public TimeSpan ShutdownGracePeriod { get; init; } = TimeSpan.FromSeconds(15);
 }
+
+/// <summary>Автозапуск не смог запустить процесс: какой, для какого сценария и почему (без секретов события).</summary>
+public sealed record TriggerFailure(string TriggerId, string TriggerName, string ScenarioName, TriggerKind Kind, string Error);
 
 /// <summary>Решение пользователя для приостановленного или требующего внимания процесса.</summary>
 public enum ResumeAction

@@ -198,6 +198,14 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
       queryClient.setQueryData(["scenario", scenario.id], saved);
       void queryClient.invalidateQueries({ queryKey: ["scenarios"] });
       feedback.toast(saved.validation.isValid ? "Сохранено" : "Сохранено как черновик — в сценарии есть ошибки", saved.validation.isValid ? "success" : "info");
+      if (!saved.validation.isValid) {
+        // Автозапуск сценария с ошибками не запустит процесс — сказать сразу, а не когда наступит время запуска.
+        void api.triggers(scenario.id).then((triggers) => {
+          if (triggers.some((t) => t.enabled)) {
+            feedback.toast("У сценария включён автозапуск, но пока в сценарии ошибки, автозапуск процесс не запустит.", "error");
+          }
+        }, () => undefined);
+      }
       return saved;
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {

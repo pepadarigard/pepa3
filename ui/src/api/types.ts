@@ -389,6 +389,8 @@ export interface Overview {
   missedTriggers: Trigger[];
   upcomingTriggers: Trigger[];
   power?: PowerState | null;
+  /** Включённые автозапуски, последний запуск которых не удался. */
+  failedTriggers?: Trigger[] | null;
 }
 
 /** Сон компьютера: запрет сна, пока есть работа, и последний замеченный сон. */

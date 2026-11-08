@@ -77,6 +77,7 @@ public sealed partial class ProcessEngine
         }
 
         ProcessRecord? started = null;
+        TriggerRecord? failed = null;
         await using (var write = await _store.BeginWriteAsync(cancellationToken))
         {
             var current = await write.GetTriggerAsync(seen.Id);
@@ -108,6 +109,7 @@ public sealed partial class ProcessEngine
             else if (prepared is null)
             {
                 updated = updated with { LastError = error, LastRunAt = now };
+                failed = current.LastError == error ? null : updated;
             }
             else
             {
@@ -133,10 +135,51 @@ public sealed partial class ProcessEngine
         }
 
         TriggersChanged?.Invoke();
+        if (failed is not null)
+        {
+            await RaiseTriggerFailedAsync(failed, failed.LastError!);
+        }
     }
 
     /// <summary>Изменились триггеры или их состояние.</summary>
     public event Action? TriggersChanged;
+
+    /// <summary>
+    /// Автозапуск не смог запустить процесс (сценарий с ошибками, удалён, неверные входные данные). Сообщается, когда ошибка
+    /// появилась или сменилась, — не на каждом запуске с той же ошибкой.
+    /// </summary>
+    public event Action<TriggerFailure>? TriggerFailed;
+
+    private async Task RaiseTriggerFailedAsync(TriggerRecord trigger, string error)
+    {
+        string scenario;
+        try
+        {
+            scenario = (await _store.GetScenarioAsync(trigger.ScenarioId))?.Name ?? "удалённый сценарий";
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Не удалось прочитать сценарий автозапуска {Trigger}.", trigger.Id);
+            scenario = "сценарий";
+        }
+
+        _logger.LogWarning("Автозапуск «{Trigger}» сценария «{Scenario}» не сработал: {Error}", TriggerTitle(trigger), scenario, error);
+        try
+        {
+            TriggerFailed?.Invoke(new TriggerFailure(trigger.Id, TriggerTitle(trigger), scenario, trigger.Kind, error));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Обработчик сбоя автозапуска завершился с ошибкой.");
+        }
+    }
+
+    /// <summary>Как назвать автозапуск человеку: его имя или что он делает.</summary>
+    internal static string TriggerTitle(TriggerRecord trigger) => trigger.Name is { Length: > 0 } name
+        ? name
+        : trigger.Kind == TriggerKind.Schedule
+            ? $"по расписанию: {ScheduleCalculator.Describe(trigger.Config)}"
+            : $"по событию «{trigger.Config.GetString("source")}»";
 
     /// <summary>Для расписаний, чей срок прошёл, пока Pepa была закрыта: учесть пропуск и назначить следующий запуск.</summary>
     private async Task<int> RecordMissedSchedulesAsync(CancellationToken cancellationToken)
@@ -174,15 +217,22 @@ public sealed partial class ProcessEngine
         return missedTotal;
     }
 
-    /// <summary>Запуск процессов триггерами по событию, которое никто не ждал. Вызывается под замком сопоставления.</summary>
-    private async Task<List<string>> StartByEventTriggersAsync(EventRecord record, CancellationToken cancellationToken)
+    /// <summary>
+    /// Запуск процессов триггерами по событию, которое никто не ждал. Вызывается под замком сопоставления. Failures — автозапуски,
+    /// которым событие подошло, но процесс не запустился (««имя»: причина», без секретов события).
+    /// </summary>
+    private async Task<(List<string> Started, List<string> Failures)> StartByEventTriggersAsync(EventRecord record, CancellationToken cancellationToken)
     {
         var started = new List<string>();
+        var failures = new List<string>();
         // Ответ на вопрос (даже не доставленный) — только своему вопросу, никаких запусков по нему.
         if (IsQuestionSource(record.Source))
         {
-            return started;
+            return (started, failures);
         }
+
+        var secrets = Expand(record.Secrets);
+        var failed = new List<TriggerRecord>();
 
         var triggers = (await _store.ListTriggersAsync(null, cancellationToken))
             .Where(t => t is { Kind: TriggerKind.Event, Enabled: true });
@@ -223,7 +273,8 @@ public sealed partial class ProcessEngine
             }
             catch (Exception ex) when (ex is ExpressionException or EngineOperationException or ScenarioInvalidException)
             {
-                error = ex.Message;
+                // Текст ошибки может содержать данные события — их секреты скрыты.
+                error = Redact(ex.Message, secrets);
             }
 
             ProcessRecord? created = null;
@@ -239,6 +290,11 @@ public sealed partial class ProcessEngine
                 if (prepared is null)
                 {
                     await write.SaveTriggerAsync(current with { LastError = error, UpdatedAt = now });
+                    failures.Add($"«{TriggerTitle(current)}»: {error}");
+                    if (current.LastError != error)
+                    {
+                        failed.Add(current with { LastError = error });
+                    }
                 }
                 else
                 {
@@ -263,7 +319,12 @@ public sealed partial class ProcessEngine
         }
 
         TriggersChanged?.Invoke();
-        return started;
+        foreach (var trigger in failed)
+        {
+            await RaiseTriggerFailedAsync(trigger, trigger.LastError!);
+        }
+
+        return (started, failures);
     }
 
     // ───────────────────────────── Управление триггерами ─────────────────────────────

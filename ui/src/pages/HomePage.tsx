@@ -61,6 +61,18 @@ export function HomePage() {
         </Callout>
       )}
 
+      {(data.failedTriggers?.length ?? 0) > 0 && (
+        <Card title={<h2 className="row"><CalendarClock size={17} style={{ color: "var(--danger)" }} /> Автозапуск не сработал</h2>}>
+          <div className="stack" style={{ padding: 14 }} data-testid="failed-triggers">
+            <p className="small muted" style={{ margin: 0 }}>
+              Пора было запустить сценарий, но процесс не запустился — причина под каждым автозапуском. Исправьте сценарий или
+              автозапуск: следующий запуск пройдёт как обычно.
+            </p>
+            {data.failedTriggers!.map((t) => <TriggerRow key={t.id} trigger={t} showScenario />)}
+          </div>
+        </Card>
+      )}
+
       {data.missedTriggers.length > 0 && (
         <Card title={<h2 className="row"><CalendarClock size={17} style={{ color: "var(--attention)" }} /> Пропущенные запуски по расписанию</h2>}>
           <div className="stack" style={{ padding: 14 }}>

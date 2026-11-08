@@ -224,7 +224,9 @@ public sealed record OverviewDto(
     int EventConflicts,
     IReadOnlyList<TriggerDto> MissedTriggers,
     IReadOnlyList<TriggerDto> UpcomingTriggers,
-    PowerDto? Power = null);
+    PowerDto? Power = null,
+    /// <summary>Включённые автозапуски, последний запуск которых не удался.</summary>
+    IReadOnlyList<TriggerDto>? FailedTriggers = null);
 
 /// <param name="Supported">Запрет сна возможен (Windows).</param>
 /// <param name="KeepingAwake">Компьютер сейчас не уснёт по бездействию: процессы выполняются или ждут.</param>

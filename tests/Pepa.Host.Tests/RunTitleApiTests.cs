@@ -54,3 +54,47 @@ public sealed class RunTitleApiTests
         await f.SendAsync(HttpMethod.Post, $"/api/processes/{id}/cancel");
     }
 }
+
+/// <summary>Сбой автозапуска виден на «Главной» и в пояснении события.</summary>
+public sealed class FailedTriggerApiTests
+{
+    [Fact]
+    public async Task Home_lists_an_autostart_that_failed_and_the_event_says_why()
+    {
+        await using var f = await HostFixture.StartAsync(seedSamples: false);
+        var (_, scenario) = await f.SendAsync(HttpMethod.Post, "/api/scenarios", new
+        {
+            name = "Заказ",
+            variables = new object[] { new { name = "order", type = "text", isInput = true } },
+            nodes = new object[] { new { id = "start", type = "start" }, new { id = "end", type = "end" } },
+            edges = new object[] { new { id = "a", source = "start", sourcePort = "out", target = "end" } },
+        });
+        var (status, _) = await f.SendAsync(HttpMethod.Post, "/api/triggers", new
+        {
+            scenarioId = scenario!["id"]!.GetValue<string>(),
+            kind = "event",
+            enabled = true,
+            name = "Новый заказ",
+            config = new { source = "shop", eventType = "order" },
+            inputs = new { order = "event.payload.missing.id" },
+        });
+        Assert.Equal(200, status);
+        Assert.Empty((await f.GetAsync("/api/overview"))["failedTriggers"]!.AsArray());
+
+        var (_, published) = await f.SendAsync(HttpMethod.Post, "/api/events", new { source = "shop", type = "order", payload = new { id = 5 } });
+        var eventId = published!["eventId"]!.GetValue<long>();
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
+        while ((await f.GetAsync("/api/overview"))["failedTriggers"]!.AsArray().Count == 0)
+        {
+            Assert.True(DateTime.UtcNow < deadline, "сбой автозапуска не появился на «Главной»");
+            await Task.Delay(50, TestContext.Current.CancellationToken);
+        }
+
+        var failed = (await f.GetAsync("/api/overview"))["failedTriggers"]!.AsArray().Single()!;
+        Assert.Equal("Новый заказ", failed["name"]!.GetValue<string>());
+        Assert.False(string.IsNullOrEmpty(failed["lastError"]!.GetValue<string>()));
+        var events = await f.GetAsync("/api/events?view=all");
+        var note = events.AsArray().Single(e => e!["id"]!.GetValue<long>() == eventId)!["note"]!.GetValue<string>();
+        Assert.StartsWith("Подошло правило автозапуска", note);
+    }
+}

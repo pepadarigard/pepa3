@@ -78,6 +78,22 @@ public sealed class AttentionNotifierTests
     }
 
     [Fact]
+    public async Task Failed_autostart_is_reported_with_the_scenario_and_the_reason()
+    {
+        var telegram = new SavedMessages();
+        var alerts = new Alerts();
+        await using var notifier = new AttentionNotifier((_, _) => Task.FromResult<ProcessRecord?>(null), telegram, () => true,
+            alerts, NullLogger.Instance, TimeSpan.FromMilliseconds(30));
+        notifier.Start([], recovery: null);
+        notifier.OnTriggerFailed(new TriggerFailure("t1", "Каждый час", "Отчёт", TriggerKind.Schedule, "Сценарий содержит ошибки (2)."));
+        await Eventually(() => telegram.Messages.Count == 1);
+        var message = telegram.Messages.Single();
+        Assert.Contains("автозапуск не сработал", message);
+        Assert.Contains("«Отчёт», автозапуск Каждый час: Сценарий содержит ошибки (2).", message);
+        Assert.Equal(1, alerts.Count);
+    }
+
+    [Fact]
     public async Task Message_names_the_run_so_the_account_is_known_without_opening_pepa()
     {
         var processes = new ConcurrentDictionary<string, ProcessRecord>();
