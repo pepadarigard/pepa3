@@ -353,6 +353,26 @@ public sealed class TelegramServiceTests : IAsyncLifetime
         Assert.Contains("Повторю попытку", service.Status.Message);
     }
 
+    [Fact]
+    public async Task Logout_releases_waits_instead_of_marking_telegram_blind()
+    {
+        await using var service = new TelegramService(_data, _ => Task.CompletedTask)
+        {
+            ServerAddress = "127.0.0.1:1", ConnectTimeout = TimeSpan.FromSeconds(5),
+        };
+        await service.ConnectForTestsAsync(Account);
+        var blind = 0;
+        var caughtUp = 0;
+        service.Blind += () => Interlocked.Increment(ref blind);
+        service.CaughtUp += () => Interlocked.Increment(ref caughtUp);
+
+        // Без входа ждать от Telegram нечего: тайм-ауты ожиданий не должны откладываться ещё на 10 минут.
+        await service.LogoutAsync().WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        Assert.Equal(TelegramState.NotConfigured, service.Status.State);
+        Assert.Equal(0, Volatile.Read(ref blind));
+        Assert.True(Volatile.Read(ref caughtUp) >= 1);
+    }
+
     private static async Task WaitUntilAsync(Func<bool> condition)
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);

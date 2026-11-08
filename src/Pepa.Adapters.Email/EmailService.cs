@@ -215,9 +215,14 @@ public sealed partial class EmailService : IAsyncDisposable
             var account = stored.Account;
             if (Interlocked.Exchange(ref _reconnect, 0) == 1)
             {
-                // Компьютер проснулся: старое соединение, скорее всего, оборвано — не ждать его тайм-аута.
+                // Компьютер проснулся: старое соединение, скорее всего, оборвано — не ждать его тайм-аута. Пометка «догружает»
+                // в движке могла быть снята проверкой, шедшей в момент пробуждения, — поставить её снова.
                 Disconnect();
-                _catchingUp = true;
+                if (!_catchingUp)
+                {
+                    _catchingUp = true;
+                    Raise(Blind);
+                }
             }
 
             try

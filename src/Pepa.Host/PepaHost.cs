@@ -283,7 +283,7 @@ public sealed class PepaHost : IAsyncDisposable
         watcher.Changed += () => events.Publish("watches");
         if (watcher.WillCatchUp)
         {
-            engine.SourceCatchingUp(FileEvents.Source);
+            engine.SourceCatchingUp(FileEvents.Source, "папки");
             watcher.CaughtUp += () => engine.SourceCaughtUp(FileEvents.Source);
         }
 

@@ -160,4 +160,62 @@ public sealed class SleepTests
         Assert.Equal("Ответа нет", failed.StatusMessage);
         Assert.True(failed.FinishedAt < wokeAt + h.Options.CatchUpGrace, $"тайм-аут в {failed.FinishedAt:O}, пробуждение в {wokeAt:O}");
     }
+    [Fact]
+    public async Task Waiting_for_a_called_scenario_gets_no_grace_after_waking_up()
+    {
+        await using var h = await EngineHarness.CreateAsync(WithSleep());
+        var child = await h.CreateScenarioAsync(new ScenarioBuilder("Долгий")
+            .Node("start", "start")
+            .Node("w", "event.wait", new { source = "manual", eventType = "never" })
+            .Node("end", "end")
+            .Edge("start", "w").Edge("w", "end", Ports.Event)
+            .Build());
+        var parent = await h.RunAsync(new ScenarioBuilder("Вызывает")
+            .Node("start", "start")
+            .Node("call", "scenario.call", new { scenario = child, timeoutSeconds = 600 })
+            .Node("done", "end")
+            .Node("slow", "end", new { outcome = "failure", message = "Слишком долго" })
+            .Edge("start", "call").Edge("call", "done", Ports.Done).Edge("call", "slow", Ports.Timeout)
+            .Build());
+        await h.WaitForStatusAsync(parent, ProcessStatus.Waiting);
+
+        // Срок вызова истёк во сне: вызванный сценарий не должен работать после пробуждения ещё минуту.
+        h.Time.Advance(TimeSpan.FromMinutes(30));
+        var wokeAt = h.Time.GetUtcNow();
+        var failed = await h.WaitForStatusAsync(parent, ProcessStatus.Failed, advance: TimeSpan.FromMilliseconds(100));
+        Assert.Equal("Слишком долго", failed.StatusMessage);
+        Assert.True(failed.FinishedAt < wokeAt + h.Options.CatchUpGrace, $"тайм-аут в {failed.FinishedAt:O}, пробуждение в {wokeAt:O}");
+    }
+
+    [Fact]
+    public async Task Source_that_never_caught_up_after_start_does_not_delay_later_waits()
+    {
+        await using var h = await EngineHarness.CreateAsync(WithSleep());
+        await h.RestartAsync(beforeStart: engine => engine.SourceCatchingUp(Source, "чат"));
+        // Прошло больше MaxCatchUpWait после запуска, а источник так и не догрузил (например, нужен вход).
+        await h.IdleAsync(h.Options.MaxCatchUpWait + TimeSpan.FromMinutes(1), ticks: 40);
+
+        var id = await h.RunAsync(WaitReply(timeoutSeconds: 10));
+        await h.WaitForStatusAsync(id, ProcessStatus.Waiting);
+        var startedAt = h.Time.GetUtcNow();
+        var failed = await h.WaitForStatusAsync(id, ProcessStatus.Failed, advance: TimeSpan.FromMilliseconds(100));
+        Assert.True(failed.FinishedAt < startedAt + TimeSpan.FromMinutes(1), $"тайм-аут в {failed.FinishedAt:O}, ожидание с {startedAt:O}");
+        Assert.DoesNotContain(await h.Store.GetJournalAsync(id), j => j.Message.Contains("Тайм-аут отложен", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Clock_set_back_after_a_jump_ahead_does_not_hold_timeouts_and_sleep_is_noticed_again()
+    {
+        await using var h = await EngineHarness.CreateAsync(WithSleep());
+        var now = h.Time.GetUtcNow();
+        // Часы ошибочно перевели на сутки вперёд (как сон), затем вернули.
+        h.Engine.NoticeClock(now + TimeSpan.FromDays(1));
+        h.Engine.NoticeClock(now + TimeSpan.FromSeconds(1));
+        Assert.True(h.Engine.ResumedAt <= now + TimeSpan.FromSeconds(1));
+
+        var woke = 0;
+        h.Engine.Woke += (_, _) => Interlocked.Increment(ref woke);
+        h.Engine.NoticeClock(now + TimeSpan.FromMinutes(30));
+        Assert.Equal(1, woke);
+    }
 }

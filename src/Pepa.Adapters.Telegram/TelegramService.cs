@@ -100,7 +100,7 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
 
     /// <summary>
     /// Догрузка после подключения закончена: сообщения, пришедшие, пока Pepa была закрыта, компьютер спал или не было связи,
-    /// получены. Вызывается после каждого нового подключения.
+    /// получены. Вызывается после каждого нового подключения, а также когда догружать нечего (нужен вход, Telegram отключён).
     /// </summary>
     public event Action? CaughtUp;
 
@@ -845,6 +845,8 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
             return Task.CompletedTask;
         }
 
+        // Сначала пометить подключение потерянным: его догрузка, если ещё не сообщена, уже не правда.
+        connection.Lost = true;
         SetStatus(TelegramState.Disconnected, Status.Account, "Связь с Telegram потеряна. Повторю подключение.");
         RequestReconnect();
         return Task.CompletedTask;
@@ -1039,15 +1041,20 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
         }
 
         connection.CaughtUpReported = true;
-        if (_connection != connection || connection.Life.IsCancellationRequested)
+        if (_connection != connection || connection.Life.IsCancellationRequested || connection.Lost || Status.State != TelegramState.Connected)
         {
-            // Подключение уже сменилось: догрузку сообщит новое.
+            // Подключение уже сменилось или потеряно: догрузку сообщит следующее.
             return;
         }
 
         try
         {
             CaughtUp?.Invoke();
+            if (connection.Lost || Status.State != TelegramState.Connected)
+            {
+                // Связь пропала, пока сообщали о догрузке: пометка «нет связи» должна остаться.
+                Blind?.Invoke();
+            }
         }
         catch (Exception ex)
         {
@@ -1854,7 +1861,12 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
         var previous = Interlocked.Exchange(ref _status, status);
         try
         {
-            if (previous.State == TelegramState.Connected && state is not (TelegramState.Connected or TelegramState.NotConfigured))
+            if (state is TelegramState.LoginRequired or TelegramState.NotConfigured)
+            {
+                // Нужен вход (или Telegram отключён): догружать нечего, пока пользователь не войдёт, — тайм-ауты не ждут.
+                CaughtUp?.Invoke();
+            }
+            else if (previous.State == TelegramState.Connected && state is TelegramState.Disconnected or TelegramState.Connecting)
             {
                 Blind?.Invoke();
             }
@@ -2096,6 +2108,9 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
 
         /// <summary>Догрузка после этого подключения закончена и сообщена (<see cref="CaughtUp"/>).</summary>
         public volatile bool CaughtUpReported;
+
+        /// <summary>Связь этого подключения потеряна (библиотека не смогла переподключиться сама).</summary>
+        public volatile bool Lost;
 
         /// <summary>Вход брошен: на вопросы библиотеки отвечать отказом.</summary>
         public volatile bool Abandoned;

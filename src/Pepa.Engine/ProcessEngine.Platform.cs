@@ -463,6 +463,14 @@ public sealed partial class ProcessEngine
     {
         NoticeClock(now);
         var resumed = ResumedAt;
+        // Ожидание вызванного сценария или ответа на вопрос не откладывается: их события возникают в самой Pepa, догружать
+        // нечего, а вызванный сценарий работает и после срока — лишняя минута дала бы ему действовать дальше, хотя событие о
+        // его завершении после срока всё равно не подошло бы.
+        if (subscription.Source is EventSources.Platform or EventSources.Question)
+        {
+            return null;
+        }
+
         if (subscription.CreatedAt < resumed && now < resumed + _options.CatchUpGrace)
         {
             return new HeldTimeout(null);
@@ -473,8 +481,11 @@ public sealed partial class ProcessEngine
             return null;
         }
 
-        // Догружать источник может только после пробуждения: предел — от срока, от начала слепоты или от пробуждения, что позже.
-        var from = wakeAt > blind.Since ? wakeAt : blind.Since;
+        // Догрузка после запуска держит тайм-ауты не дольше MaxCatchUpWait после запуска (или пробуждения): источник, который
+        // так и не догрузил (нет связи весь день, нужен вход), не должен откладывать каждый следующий тайм-аут. Слепота во
+        // время работы — не дольше MaxCatchUpWait после срока, начала слепоты или пробуждения, что позже: догружать источник
+        // может только после пробуждения.
+        var from = blind.AtStart ? resumed : wakeAt > blind.Since ? wakeAt : blind.Since;
         var limit = (from > resumed ? from : resumed) + _options.MaxCatchUpWait;
         if (now >= limit)
         {
@@ -509,8 +520,12 @@ public sealed partial class ProcessEngine
     /// </summary>
     /// <param name="title">Название источника для журнала («Telegram», «почта»).</param>
     /// <param name="since">С какого момента источник мог пропускать события (начало сна); null — сейчас.</param>
-    public void SourceCatchingUp(string source, string? title = null, DateTimeOffset? since = null) =>
-        _catchingUp.TryAdd(source, new BlindSource(since ?? _time.GetUtcNow(), title ?? source, Volatile.Read(ref _state) == 0));
+    public void SourceCatchingUp(string source, string? title = null, DateTimeOffset? since = null)
+    {
+        var marked = new BlindSource(since ?? _time.GetUtcNow(), title ?? source, Volatile.Read(ref _state) == 0);
+        // Пометка «догружает после запуска» уступает новой слепоте (пропала связь, компьютер спал): у той свой предел.
+        _catchingUp.AddOrUpdate(source, marked, (_, existing) => existing.AtStart && !marked.AtStart ? marked : existing);
+    }
 
     /// <summary>Источник догрузил пропущенное (см. <see cref="SourceCatchingUp"/>).</summary>
     /// <remarks>Тайм-ауты проверяет таймер движка — отдельного сигнала не нужно.</remarks>
@@ -545,10 +560,18 @@ public sealed partial class ProcessEngine
     public event Action<DateTimeOffset, DateTimeOffset>? Woke;
 
     /// <summary>Последний замеченный перерыв в работе (сон компьютера): с какого и до какого времени.</summary>
-    public (DateTimeOffset From, DateTimeOffset To)? LastSleep { get; private set; }
+    public (DateTimeOffset From, DateTimeOffset To)? LastSleep => Volatile.Read(ref _lastSleep) is { } sleep ? (sleep.From, sleep.To) : null;
+
+    /// <summary>Ссылка, а не кортеж: читается целиком, без замка.</summary>
+    private sealed record Sleep(DateTimeOffset From, DateTimeOffset To);
+
+    private Sleep? _lastSleep;
+
+    /// <summary>Насколько часы могут «отступить» без того, чтобы считать это переводом назад (такты из разных потоков).</summary>
+    private static readonly TimeSpan BackwardClockTolerance = TimeSpan.FromSeconds(5);
 
     /// <summary>Сверить часы: большой перерыв с прошлого раза — компьютер спал.</summary>
-    private void NoticeClock(DateTimeOffset now)
+    internal void NoticeClock(DateTimeOffset now)
     {
         if (_options.SleepGap is not { } gap)
         {
@@ -559,6 +582,19 @@ public sealed partial class ProcessEngine
         lock (_clockLock)
         {
             from = _lastClock == default ? _startedAt : _lastClock;
+            if (now < from - BackwardClockTolerance)
+            {
+                // Часы перевели назад (например, после ошибочного перевода вперёд): «пробуждение» и последний такт не могут
+                // быть в будущем — иначе поблажка держала бы все ожидания, а настоящий сон не замечался бы.
+                _lastClock = now;
+                if (_resumedAt > now)
+                {
+                    _resumedAt = now;
+                }
+
+                return;
+            }
+
             if (now > _lastClock)
             {
                 _lastClock = now;
@@ -570,7 +606,7 @@ public sealed partial class ProcessEngine
             }
 
             _resumedAt = now;
-            LastSleep = (from, now);
+            Volatile.Write(ref _lastSleep, new Sleep(from, now));
         }
 
         _logger.LogWarning("Компьютер спал (или часы переведены вперёд): с {From} до {To}. Источники событий догружают пропущенное.",
