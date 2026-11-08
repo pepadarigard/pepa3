@@ -42,7 +42,8 @@ public sealed record RunRequest(JsonObject? Inputs, bool? StepMode = null);
 
 public sealed record RunResponse(string ProcessId);
 
-public sealed record ResumeRequest(ResumeAction Action);
+/// <param name="Variables">Для «Исправить и повторить»: новые значения изменённых переменных.</param>
+public sealed record ResumeRequest(ResumeAction Action, JsonObject? Variables = null);
 
 public sealed record MessageDto(string Message);
 

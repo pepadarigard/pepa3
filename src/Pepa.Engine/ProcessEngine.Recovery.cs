@@ -1,7 +1,9 @@
+using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging;
 using Pepa.Core;
 using Pepa.Core.Model;
 using Pepa.Core.Nodes;
+using Pepa.Core.Validation;
 using Pepa.Engine.Persistence;
 
 namespace Pepa.Engine;
@@ -300,8 +302,11 @@ public sealed partial class ProcessEngine
             $"Пользователь отметил шаг {Label(node, executor.Descriptor)} невыполненным.");
     }
 
-    private async Task<ControlResult> RetryCoreAsync(ProcessRecord process, IReadOnlyList<TokenRecord> tokens)
+    private async Task<ControlResult> RetryCoreAsync(ProcessRecord process, IReadOnlyList<TokenRecord> tokens, JsonObject? changes = null)
     {
+        // Исправления переменных — до повтора, в той же записи: шаг возьмёт новые значения.
+        var (changed, changeNotes) = changes is null ? (process, []) : ApplyChanges(process, changes);
+        process = changed;
         var step = process.AttentionStepId is { } stepId ? await _store.GetStepAsync(stepId) : null;
         // Повторяется шаг той ветви, что остановилась (у процесса с параллельными ветвями их несколько).
         var token = AttentionToken(process, tokens, step?.TokenId)
@@ -329,13 +334,77 @@ public sealed partial class ProcessEngine
                 WaitingStepId = null, WaitRef = null,
             });
             await write.UpdateProcessAsync(updated);
+            foreach (var note in changeNotes)
+            {
+                await write.AddJournalAsync(Journal(process.Id, JournalLevel.Warning, note, step?.Id, token.NodeId));
+            }
+
             await write.AddJournalAsync(Journal(process.Id, JournalLevel.Warning, message, step?.Id, token.NodeId));
             await write.CommitAsync();
         }
 
         AfterCommit(updated);
         await ApplyEffectsAsync(effects);
-        return new ControlResult(message);
+        return new ControlResult(changeNotes.Count > 0 ? $"Переменные исправлены ({changeNotes.Count}). {message}" : message);
+    }
+
+    /// <summary>
+    /// Новые значения переменных процесса (D-085): только объявленные в сценарии и своего типа. В журнал — что было и что
+    /// стало; секретная переменная — только «изменена», её прежнее значение запоминается как секрет процесса, а в тексте
+    /// любого значения скрываются уже известные секреты.
+    /// </summary>
+    private (ProcessRecord Process, List<string> Notes) ApplyChanges(ProcessRecord process, JsonObject changes)
+    {
+        var definition = ExecutionGraph(process).Definition;
+        var secrets = SecretValues(process, definition);
+        var variables = (JsonObject)process.Variables.DeepClone();
+        var notes = new List<string>();
+        var replaced = new List<string>();
+        foreach (var (name, value) in changes)
+        {
+            var declared = definition.Variables.FirstOrDefault(v => v.Name == name)
+                           ?? throw new EngineOperationException($"Переменная «{name}» не объявлена в сценарии.");
+            if (!ScenarioValidator.MatchesType(value, declared.Type))
+            {
+                throw new EngineOperationException($"Значение переменной «{name}» должно иметь тип «{TypeTitle(declared.Type)}».");
+            }
+
+            var before = variables[name];
+            if (JsonNode.DeepEquals(before, value))
+            {
+                continue;
+            }
+
+            if (declared.Secret)
+            {
+                Collect(before, replaced);
+                notes.Add($"Пользователь исправил секретную переменную «{name}» (значение не показывается).");
+            }
+            else
+            {
+                notes.Add(Redact($"Пользователь исправил переменную «{name}»: {Preview(before)} → {Preview(value)}.", secrets)!);
+            }
+
+            variables[name] = value?.DeepClone();
+        }
+
+        if (notes.Count == 0)
+        {
+            throw new EngineOperationException("Значения не изменились — повторите шаг обычным «Выполнить шаг ещё раз».");
+        }
+
+        return (process with { Variables = variables, Secrets = Remember(process.Secrets, replaced, []) }, notes);
+    }
+
+    private static string Preview(JsonNode? value)
+    {
+        var text = value switch
+        {
+            null => "пусто",
+            JsonValue scalar when scalar.TryGetValue<string>(out var s) => $"«{s}»",
+            _ => value.ToJsonString(),
+        };
+        return text.Length > 120 ? text[..119] + "…" : text;
     }
 
     /// <summary>Считать шаг выполненным или пропустить его и идти дальше по единственному выходу.</summary>

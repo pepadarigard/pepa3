@@ -251,30 +251,48 @@ public sealed partial class ProcessEngine
 
             string? error = null;
             PreparedStart? prepared = null;
-            try
+            if (trigger.Config.GetString("filter") is { Length: > 0 } filter)
             {
-                if (trigger.Config.GetString("filter") is { Length: > 0 } filter && !_expressions.EvaluateCondition(filter, eventScope))
+                bool matches;
+                try
+                {
+                    matches = _expressions.EvaluateCondition(filter, eventScope);
+                }
+                catch (ExpressionException ex)
+                {
+                    // Подходит ли событие, неизвестно — это не «подошло, но не запустилось».
+                    matches = false;
+                    error = $"условие автозапуска не вычислилось — подходит ли событие, неизвестно: {Redact(ex.Message, secrets)}";
+                }
+
+                if (!matches && error is null)
                 {
                     continue;
                 }
-
-                var inputs = new JsonObject();
-                foreach (var (name, expression) in trigger.Inputs ?? [])
-                {
-                    if (expression.AsString() is { Length: > 0 } code)
-                    {
-                        inputs[name] = _expressions.Evaluate(code, eventScope);
-                    }
-                }
-
-                prepared = await PrepareStartAsync(trigger.ScenarioId, inputs, cancellationToken);
-                // Секреты из события секретны и в запущенном процессе.
-                prepared = prepared with { Secrets = record.Secrets };
             }
-            catch (Exception ex) when (ex is ExpressionException or EngineOperationException or ScenarioInvalidException)
+
+            if (error is null)
             {
-                // Текст ошибки может содержать данные события — их секреты скрыты.
-                error = Redact(ex.Message, secrets);
+                try
+                {
+                    var inputs = new JsonObject();
+                    foreach (var (name, expression) in trigger.Inputs ?? [])
+                    {
+                        if (expression.AsString() is { Length: > 0 } code)
+                        {
+                            inputs[name] = _expressions.Evaluate(code, eventScope);
+                        }
+                    }
+
+                    prepared = await PrepareStartAsync(trigger.ScenarioId, inputs, cancellationToken);
+                    // Секреты из события секретны и в запущенном процессе.
+                    prepared = prepared with { Secrets = record.Secrets };
+                }
+                catch (Exception ex) when (ex is ExpressionException or EngineOperationException or ScenarioInvalidException)
+                {
+                    // Текст ошибки может содержать данные события — их секреты скрыты.
+                    error = Redact(ex.Message, secrets);
+                }
             }
 
             ProcessRecord? created = null;
@@ -441,7 +459,8 @@ public sealed partial class ProcessEngine
             var current = await write.GetTriggerAsync(id) ?? throw new EngineOperationException("Триггер не найден (возможно, его удалили).");
             (process, _) = await InsertStartedProcessAsync(write, prepared, null, "вручную по расписанию");
             var now = _time.GetUtcNow();
-            await write.SaveTriggerAsync(current with { MissedRuns = 0, LastRunAt = now, LastProcessId = process.Id, UpdatedAt = now });
+            // Запуск удался — прежняя ошибка автозапуска больше не правда (и следующая снова будет новостью).
+            await write.SaveTriggerAsync(current with { MissedRuns = 0, LastRunAt = now, LastProcessId = process.Id, LastError = null, UpdatedAt = now });
             await write.CommitAsync();
         }
 

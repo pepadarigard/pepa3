@@ -227,11 +227,68 @@ public sealed class TriggerTests
         });
         await WaitUntilAsync(async () => (await h.Store.GetEventAsync(published.EventId))!.State == EventState.Unmatched, h);
         var record = (await h.Store.GetEventAsync(published.EventId))!;
-        Assert.StartsWith("Подошло правило автозапуска, но процесс не запустился — «Новый заказ»:", record.Note);
+        Assert.StartsWith("Автозапуск не запустил процесс — «Новый заказ»:", record.Note);
         Assert.Contains("«Сопоставить снова»", record.Note);
         var failure = Assert.Single(failures);
         Assert.Equal(TriggerKind.Event, failure.Kind);
         Assert.Empty(await ProcessesAsync(h, scenario));
+    }
+
+    private static TriggerRecord OnOrder(string scenarioId, string name, JsonObject? inputs = null, string? filter = null) => new()
+    {
+        Id = "",
+        ScenarioId = scenarioId,
+        Kind = TriggerKind.Event,
+        Name = name,
+        Config = filter is null ? new JsonObject { ["source"] = "shop" } : new JsonObject { ["source"] = "shop", ["filter"] = filter },
+        Inputs = inputs,
+        CreatedAt = default,
+        UpdatedAt = default,
+    };
+
+    [Fact]
+    public async Task Event_that_started_one_autostart_still_tells_which_other_failed()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var good = await h.CreateScenarioAsync(Simple("good"));
+        var bad = await h.CreateScenarioAsync(Simple("bad"));
+        await h.Engine.SaveTriggerAsync(OnOrder(good, "Хороший"));
+        await h.Engine.SaveTriggerAsync(OnOrder(bad, "Плохой", new JsonObject { ["orderId"] = "event.payload.missing.id" }));
+
+        var published = await h.Engine.PublishEventAsync(new EventInput { Source = "shop", ExternalId = "s-1", Payload = new JsonObject { ["id"] = 1 } });
+        var record = await h.WaitForEventAsync(published.EventId, EventState.Delivered);
+        Assert.StartsWith("Запущено процессов по триггерам: 1. Не запустились — «Плохой»:", record.Note);
+    }
+
+    [Fact]
+    public async Task Filter_that_cannot_be_evaluated_is_not_called_a_match()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var scenario = await h.CreateScenarioAsync(Simple("order"));
+        await h.Engine.SaveTriggerAsync(OnOrder(scenario, "Крупный заказ", filter: "event.payload.order.total > 1000"));
+
+        var ping = await h.Engine.PublishEventAsync(new EventInput { Source = "shop", ExternalId = "p-1", Payload = new JsonObject { ["ping"] = true } });
+        var record = await h.WaitForEventAsync(ping.EventId, EventState.Unmatched);
+        Assert.Contains("«Крупный заказ»: условие автозапуска не вычислилось — подходит ли событие, неизвестно", record.Note);
+        Assert.DoesNotContain("Подошло", record.Note);
+
+        var result = await h.Engine.RerouteEventAsync(ping.EventId);
+        Assert.StartsWith("Автозапуск не запустил процесс", result.Message);
+    }
+
+    [Fact]
+    public async Task Manual_run_after_a_failure_clears_the_error()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var scenario = await h.CreateScenarioAsync(Simple("tick"));
+        var trigger = await h.Engine.SaveTriggerAsync(Every(scenario, 30));
+        var stored = (await h.Store.GetScenarioAsync(scenario))!;
+        var broken = await h.Scenarios.UpdateAsync(scenario, new ScenarioBuilder("По расписанию").Node("end", "end").Build(), stored.Version);
+        await WaitUntilAsync(async () => (await h.Store.GetTriggerAsync(trigger.Id))!.LastError is not null, h, TimeSpan.FromSeconds(10));
+
+        await h.Scenarios.UpdateAsync(scenario, Simple("tick"), broken.Version);
+        await h.Engine.RunTriggerNowAsync(trigger.Id);
+        Assert.Null((await h.Store.GetTriggerAsync(trigger.Id))!.LastError);
     }
 
     [Fact]

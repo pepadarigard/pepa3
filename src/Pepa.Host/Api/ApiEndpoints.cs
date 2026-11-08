@@ -337,7 +337,9 @@ internal static class ApiEndpoints
                 triggers.Where(t => t.MissedRuns > 0).ToList(),
                 triggers.Where(t => t is { Enabled: true, NextRunAt: not null }).OrderBy(t => t.NextRunAt).Take(5).ToList(),
                 new PowerDto(keeper.Supported, settings.Current.KeepAwake, keeper.Active, engine.LastSleep?.From, engine.LastSleep?.To),
-                triggers.Where(t => t is { Enabled: true, LastError: not null }).ToList());
+                // Выключенный пользователем автозапуск ошибку не хранит (сохранение её снимает): здесь и разовые, которые
+                // движок выключил после единственного — неудачного — запуска.
+                triggers.Where(t => t.LastError is not null).ToList());
         });
 
         // ───────────── Сценарии ─────────────
@@ -678,7 +680,7 @@ internal static class ApiEndpoints
             new MessageDto((await engine.CancelAsync(id, ct)).Message));
 
         api.MapPost("/processes/{id}/resume", async (string id, ResumeRequest request, ProcessEngine engine, CancellationToken ct) =>
-            new MessageDto((await engine.ResumeAsync(id, request.Action, ct)).Message));
+            new MessageDto((await engine.ResumeAsync(id, request.Action, request.Variables, ct)).Message));
 
         // ───────────── События ─────────────
         api.MapGet("/events", async (string? view, int? limit, IPepaStore store, ProcessMapper mapper, CancellationToken ct) =>

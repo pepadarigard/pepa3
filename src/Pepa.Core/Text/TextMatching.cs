@@ -36,13 +36,17 @@ public static class TextMatching
         return lower[start..end];
     }
 
-    /// <summary>Подходит ли текст к ожидаемому. Ожидаемое без букв и цифр не подходит ни к чему.</summary>
+    /// <summary>
+    /// Подходит ли текст к ожидаемому. Ожидаемое без букв и цифр («+», «👍», «好的») сравнивается целиком, как есть (без
+    /// пробелов по краям), при любом способе: такие ответы обычны в чатах.
+    /// </summary>
     public static bool Matches(string text, string expected, string mode)
     {
         var wanted = Normalize(expected);
         if (wanted.Length == 0)
         {
-            return false;
+            var symbols = Fold(expected).Trim();
+            return symbols.Length > 0 && Fold(text).Trim() == symbols;
         }
 
         switch (mode)

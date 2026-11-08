@@ -210,11 +210,14 @@ export function portLabel(port: PortDescriptor, config: Record<string, Json> | u
   return port.label;
 }
 
-/** Выходы, которые есть у блока с такими настройками: выход незаданного варианта не показывается. */
-export function visibleOutputs(outputs: PortDescriptor[], config: Record<string, Json> | undefined): PortDescriptor[] {
+/**
+ * Выходы, которые есть у блока с такими настройками: выход незаданного варианта не показывается — кроме подключённого
+ * (иначе связь из него стала бы невидимой и её нельзя было бы удалить; проверка сценария и так отметит её ошибкой).
+ */
+export function visibleOutputs(outputs: PortDescriptor[], config: Record<string, Json> | undefined, connected?: ReadonlySet<string>): PortDescriptor[] {
   return outputs.filter((port) => {
-    if (!port.labelField) return true;
+    if (!port.labelField || connected?.has(port.id)) return true;
     const text = config?.[port.labelField];
-    return typeof text === "string" && text.trim() !== "";
+    return (typeof text === "string" && text.trim() !== "") || typeof text === "number" || typeof text === "boolean";
   });
 }

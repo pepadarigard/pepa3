@@ -94,7 +94,8 @@ public sealed class ChoiceNode : INodeExecutor
             }
         }
 
-        var shown = Shown(value);
+        // Секреты процесса скрываются в значении как оно есть — до склейки пробелов и обрезки для текста шага.
+        var shown = Shown(ProcessEngine.Redact(value, ProcessEngine.Expand(context.SecretValues)) ?? "");
         if (hits.Count > 1)
         {
             // Как и неоднозначное событие (D-017): не угадывать, какой из подошедших вариантов имелся в виду.

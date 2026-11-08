@@ -30,9 +30,13 @@ public sealed class TextMatchingTests
         Assert.Equal(expected, TextMatching.Matches(text, option, TextMatching.Starts));
 
     [Fact]
-    public void Option_without_letters_or_digits_matches_nothing()
+    public void Option_of_symbols_only_is_compared_as_it_is()
     {
-        Assert.False(TextMatching.Matches("!!!", "!!!", TextMatching.Exact));
+        Assert.True(TextMatching.Matches("+", "+", TextMatching.Exact));
+        Assert.True(TextMatching.Matches(" 👍 ", "👍", TextMatching.Word));
+        Assert.True(TextMatching.Matches("好的", "好的", TextMatching.Starts));
+        Assert.False(TextMatching.Matches("++", "+", TextMatching.Exact));
+        Assert.False(TextMatching.Matches("+ согласен", "+", TextMatching.Exact));
         Assert.False(TextMatching.Matches("что угодно", "  ", TextMatching.Word));
     }
 }

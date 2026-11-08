@@ -190,15 +190,17 @@ public sealed partial class ProcessEngine
                     {
                         State = EventState.Delivered,
                         StartedProcesses = new JsonArray(started.Select(id => (JsonNode?)JsonValue.Create(id)).ToArray()),
-                        Note = $"Запущено процессов по триггерам: {started.Count}.",
+                        // Сбой другого автозапуска не прячется за удачным: событие говорит, что не запустилось.
+                        Note = $"Запущено процессов по триггерам: {started.Count}." +
+                               (failures.Count > 0 ? $" Не запустились — {string.Join("; ", failures)}." : ""),
                         HandledAt = now,
                     }
                     : record with
                     {
                         State = EventState.Unmatched,
                         Note = failures.Count > 0
-                            ? $"Подошло правило автозапуска, но процесс не запустился — {string.Join("; ", failures)}. Исправьте сценарий " +
-                              "или автозапуск и нажмите «Сопоставить снова»."
+                            ? $"Автозапуск не запустил процесс — {string.Join("; ", failures)}. Исправьте сценарий или автозапуск " +
+                              "и нажмите «Сопоставить снова»."
                             : allowTriggers
                             ? "Нет ожидающих процессов с подходящими правилами. Ничего не запускалось."
                             : "Произошло или принято до запуска Pepa: ожидающих его процессов нет, а запуск по триггерам для " +
@@ -580,10 +582,15 @@ public sealed partial class ProcessEngine
         }
 
         EventsChanged?.Invoke();
+        // Пояснение события уже без секретов: если автозапуск снова не сработал, сказать это, а не «ничего не подошло».
+        var note = (await _store.GetEventAsync(eventId, cancellationToken))?.Note;
         return new ControlResult(state switch
         {
-            EventState.Matched or EventState.Delivered => "Событие сопоставлено.",
+            EventState.Matched or EventState.Delivered => note is { Length: > 0 } && note.Contains("Не запустились", StringComparison.Ordinal)
+                ? $"Событие сопоставлено. {note}"
+                : "Событие сопоставлено.",
             EventState.Conflict => "Событие снова подходит нескольким процессам — выберите вручную.",
+            _ when note is { Length: > 0 } && note.StartsWith("Автозапуск не запустил", StringComparison.Ordinal) => note,
             _ => "Подходящих процессов по-прежнему нет.",
         });
     }

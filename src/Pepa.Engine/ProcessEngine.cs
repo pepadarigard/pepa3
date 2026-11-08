@@ -311,9 +311,18 @@ public sealed partial class ProcessEngine : IAsyncDisposable
     }
 
     /// <summary>Решение пользователя по приостановленному процессу или процессу, требующему внимания.</summary>
-    public async Task<ControlResult> ResumeAsync(string processId, ResumeAction action,
+    public Task<ControlResult> ResumeAsync(string processId, ResumeAction action, CancellationToken cancellationToken = default) =>
+        ResumeAsync(processId, action, null, cancellationToken);
+
+    /// <param name="variables">Для <see cref="ResumeAction.RetryWithChanges"/>: новые значения переменных (только изменённые).</param>
+    public async Task<ControlResult> ResumeAsync(string processId, ResumeAction action, JsonObject? variables,
         CancellationToken cancellationToken = default)
     {
+        if (action == ResumeAction.RetryWithChanges && variables is not { Count: > 0 })
+        {
+            throw new EngineOperationException("Укажите, какие переменные исправить.");
+        }
+
         EnsureRunning();
         var slot = Slot(processId);
         if (slot.Faulted)
@@ -343,6 +352,7 @@ public sealed partial class ProcessEngine : IAsyncDisposable
                 ResumeAction.Continue => await ContinueCoreAsync(process, tokens),
                 ResumeAction.Verify => await VerifyCoreAsync(process, tokens),
                 ResumeAction.Retry => await RetryCoreAsync(process, tokens),
+                ResumeAction.RetryWithChanges => await RetryCoreAsync(process, tokens, variables),
                 ResumeAction.MarkSucceeded => await ProceedCoreAsync(process, tokens, StepState.Succeeded),
                 ResumeAction.MarkFailed => await MarkFailedCoreAsync(process, tokens),
                 ResumeAction.Skip => await ProceedCoreAsync(process, tokens, StepState.Skipped),
@@ -400,6 +410,8 @@ public sealed partial class ProcessEngine : IAsyncDisposable
                 break;
             case AttentionKind.StepFailed:
                 actions.Add(ProcessAction.Retry);
+                // Ошибка подтверждена — действие не выполнилось: можно исправить данные и повторить тот же шаг.
+                actions.Add(ProcessAction.RetryWithChanges);
                 if (singleSuccessPort)
                 {
                     actions.Add(ProcessAction.Skip);
@@ -485,6 +497,7 @@ public sealed partial class ProcessEngine : IAsyncDisposable
         ResumeAction.MarkFailed => ProcessAction.MarkFailed,
         ResumeAction.Skip => ProcessAction.Skip,
         ResumeAction.RunWithoutPauses => ProcessAction.RunWithoutPauses,
+        ResumeAction.RetryWithChanges => ProcessAction.RetryWithChanges,
         _ => throw new ArgumentOutOfRangeException(nameof(action)),
     };
 

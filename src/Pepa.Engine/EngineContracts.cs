@@ -74,6 +74,12 @@ public enum ResumeAction
 
     /// <summary>Отладка: продолжить без пауз перед блоками (пошаговый режим и точки останова выключаются для процесса).</summary>
     RunWithoutPauses,
+
+    /// <summary>
+    /// Исправить переменные процесса и выполнить шаг ещё раз (D-085) — только после подтверждённой ошибки шага, не при
+    /// неизвестном итоге: действие точно не выполнилось, а то, что процесс уже сделал (сайт, сообщения), не повторяется.
+    /// </summary>
+    RetryWithChanges,
 }
 
 /// <summary>Действия, доступные над процессом. Интерфейс показывает только их.</summary>
@@ -88,6 +94,7 @@ public enum ProcessAction
     Skip,
     RunWithoutPauses,
     MarkFailed,
+    RetryWithChanges,
 }
 
 public sealed record EngineChange(string ProcessId);

@@ -1,4 +1,4 @@
-import { AlertTriangle, Ban, CheckCircle2, FastForward, Hourglass, Loader2, Pause, Play, RotateCcw, SearchCheck, SkipForward, Square, ThumbsDown, ThumbsUp, XCircle, type LucideIcon } from "lucide-react";
+import { AlertTriangle, Ban, CheckCircle2, FastForward, Hourglass, Loader2, Pause, PencilLine, Play, RotateCcw, SearchCheck, SkipForward, Square, ThumbsDown, ThumbsUp, XCircle, type LucideIcon } from "lucide-react";
 import type { ProcessAction, ProcessStatus, ProcessSummary, ResumeAction, StepState } from "../api/types";
 import { useProcessControl } from "../api/hooks";
 import { ru } from "../i18n/ru";
@@ -7,6 +7,8 @@ import { processTone, stepTone, waitText } from "../lib/status";
 import { navigate } from "../router";
 import { Badge, Button } from "./ui";
 import { useFeedback } from "./feedback";
+import { FixAndRetryDialog } from "./FixAndRetryDialog";
+import { useState } from "react";
 
 export const processIcons: Record<ProcessStatus, LucideIcon> = {
   running: Loader2,
@@ -44,6 +46,7 @@ const actionIcons: Record<ProcessAction, LucideIcon> = {
   markFailed: ThumbsDown,
   skip: SkipForward,
   runWithoutPauses: FastForward,
+  retryWithChanges: PencilLine,
 };
 
 /** Кнопки только для действий, разрешённых движком в текущем состоянии процесса. */
@@ -52,7 +55,12 @@ export function ProcessActions({ process, size, exclude = [] }: { process: Proce
   const feedback = useFeedback();
   const actions = process.allowedActions.filter((a) => !exclude.includes(a));
 
+  const [fixing, setFixing] = useState(false);
   const run = async (action: ProcessAction) => {
+    if (action === "retryWithChanges") {
+      setFixing(true);
+      return;
+    }
     const confirmation = confirmationFor(process, action);
     if (confirmation && !(await feedback.confirm({ title: ru.actions[action].label, text: confirmation, confirmLabel: ru.actions[action].label, danger: action === "cancel" }))) {
       return;
@@ -83,6 +91,7 @@ export function ProcessActions({ process, size, exclude = [] }: { process: Proce
           {ru.actions[action].label}
         </Button>
       ))}
+      {fixing && <FixAndRetryDialog processId={process.id} onClose={() => setFixing(false)} />}
     </div>
   );
 }
@@ -146,7 +155,7 @@ export function ProcessTable({ processes, showScenario = true, showActions = tru
               <td className="muted">{p.stepCount}</td>
               {showActions && (
                 <td style={{ textAlign: "right" }}>
-                  <ProcessActions process={p} size="small" exclude={["verify", "markSucceeded", "markFailed", "skip", "retry"]} />
+                  <ProcessActions process={p} size="small" exclude={["verify", "markSucceeded", "markFailed", "skip", "retry", "retryWithChanges"]} />
                 </td>
               )}
             </tr>

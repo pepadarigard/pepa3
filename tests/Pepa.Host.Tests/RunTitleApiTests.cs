@@ -95,6 +95,54 @@ public sealed class FailedTriggerApiTests
         Assert.False(string.IsNullOrEmpty(failed["lastError"]!.GetValue<string>()));
         var events = await f.GetAsync("/api/events?view=all");
         var note = events.AsArray().Single(e => e!["id"]!.GetValue<long>() == eventId)!["note"]!.GetValue<string>();
-        Assert.StartsWith("Подошло правило автозапуска", note);
+        Assert.StartsWith("Автозапуск не запустил процесс", note);
+    }
+}
+
+/// <summary>«Исправить и повторить» через API (D-085).</summary>
+public sealed class FixAndRetryApiTests
+{
+    [Fact]
+    public async Task Failed_step_is_repeated_with_the_fixed_input()
+    {
+        await using var f = await HostFixture.StartAsync(seedSamples: false);
+        Directory.CreateDirectory(f.Workspace);
+        await File.WriteAllTextAsync(Path.Combine(f.Workspace, "заказ.txt"), "A-17", TestContext.Current.CancellationToken);
+        var (_, scenario) = await f.SendAsync(HttpMethod.Post, "/api/scenarios", new
+        {
+            name = "Прочитать заказ",
+            variables = new object[]
+            {
+                new { name = "file", type = "text", isInput = true },
+                new { name = "text", type = "any" },
+            },
+            nodes = new object[]
+            {
+                new { id = "start", type = "start" },
+                new { id = "read", type = "file.read", config = new { path = "{{ vars.file }}", saveTo = "text" } },
+                new { id = "end", type = "end", config = new { message = "{{ vars.text }}" } },
+            },
+            edges = new object[]
+            {
+                new { id = "a", source = "start", sourcePort = "out", target = "read" },
+                new { id = "b", source = "read", sourcePort = "out", target = "end" },
+            },
+        });
+        var (_, run) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{scenario!["id"]!.GetValue<string>()}/run",
+            new { inputs = new { file = "закз.txt" } });
+        var id = run!["processId"]!.GetValue<string>();
+        var stopped = await f.WaitForProcessAsync(id, p => HostFixture.Status(p) == "needsAttention");
+        Assert.Contains("retryWithChanges", stopped["process"]!["allowedActions"]!.AsArray().Select(a => a!.GetValue<string>()));
+
+        var (status, body) = await f.SendAsync(HttpMethod.Post, $"/api/processes/{id}/resume",
+            new { action = "retryWithChanges", variables = new { file = "заказ.txt" } });
+        Assert.Equal(200, status);
+        Assert.StartsWith("Переменные исправлены (1).", body!["message"]!.GetValue<string>());
+        var done = await f.WaitForProcessAsync(id, p => HostFixture.Status(p) == "completed");
+        Assert.Equal("A-17", done["process"]!["statusMessage"]!.GetValue<string>());
+
+        var details = await f.GetAsync($"/api/processes/{id}");
+        Assert.Contains(details["journal"]!.AsArray(), j =>
+            j!["message"]!.GetValue<string>() == "Пользователь исправил переменную «file»: «закз.txt» → «заказ.txt».");
     }
 }

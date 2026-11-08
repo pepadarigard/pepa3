@@ -96,4 +96,24 @@ public sealed class ChoiceTests
         Assert.True(warnings.IsValid);
         Assert.Contains(warnings.Issues, i => i.Code == "port.option.unconnected" && i.Message.Contains("«нет»", StringComparison.Ordinal));
     }
+    [Fact]
+    public async Task Symbol_answers_match_and_a_secret_with_odd_spaces_is_hidden_in_the_step_text()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var plus = await RunAsync(h, Choose(option2: "+; 👍"), "👍", ProcessStatus.Failed);
+        Assert.Equal("отказ", plus.StatusMessage);
+
+        // Секрет с неразрывным пробелом и переносом строки: в пояснении шага он скрыт, хотя пробелы там склеиваются.
+        var id = await h.RunAsync(new ScenarioBuilder("Секрет")
+            .Variable("answer", VariableType.Text, "pass\u00A0word\nline2", secret: true)
+            .Node("start", "start")
+            .Node("choose", "choice", new { value = "{{ vars.answer }}", option1 = "готово" })
+            .Node("yes", "end")
+            .Edge("start", "choose").Edge("choose", "yes", "v1")
+            .Build());
+        var stopped = await h.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
+        Assert.DoesNotContain("pass", stopped.StatusMessage);
+        Assert.DoesNotContain("line2", stopped.StatusMessage);
+        Assert.All(await h.Store.GetJournalAsync(id), j => Assert.DoesNotContain("line2", j.Message));
+    }
 }

@@ -151,8 +151,8 @@ export const api = {
   process: (id: string) => request<ProcessDetails>("GET", `/processes/${id}`),
   pause: (id: string) => request<{ message: string }>("POST", `/processes/${id}/pause`),
   cancel: (id: string) => request<{ message: string }>("POST", `/processes/${id}/cancel`),
-  resume: (id: string, action: ResumeAction) =>
-    request<{ message: string }>("POST", `/processes/${id}/resume`, { action }),
+  resume: (id: string, action: ResumeAction, variables?: Record<string, Json>) =>
+    request<{ message: string }>("POST", `/processes/${id}/resume`, variables ? { action, variables } : { action }),
 
   events: (view: "open" | "conflict" | "unmatched" | "all" = "all", limit = 200) =>
     request<PepaEvent[]>("GET", `/events?view=${view}&limit=${limit}`),

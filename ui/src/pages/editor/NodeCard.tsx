@@ -1,5 +1,5 @@
-import { createContext, memo, useContext, useMemo } from "react";
-import { Handle, Position, type NodeProps } from "@xyflow/react";
+import { createContext, memo, useCallback, useContext, useMemo } from "react";
+import { Handle, Position, useStore, type NodeProps, type ReactFlowState } from "@xyflow/react";
 import type { NodeTypeDescriptor, StepState } from "../../api/types";
 import { useScenarios } from "../../api/hooks";
 import { categoryColor, NodeIcon } from "../../components/Icon";
@@ -39,7 +39,11 @@ export const NodeCard = memo(function NodeCard({ id, data, selected }: NodeProps
   const context = useContext(FlowContext);
   const definition = data.definition;
   const descriptor = context.descriptors.get(definition.type);
-  const outputs = visibleOutputs(descriptor?.outputs ?? [], definition.config);
+  // Подключённые выходы этого блока (строкой — чтобы блок не перерисовывался от чужих связей).
+  const connectedKey = useStore(useCallback((s: ReactFlowState) =>
+    s.edges.filter((e) => e.source === id).map((e) => e.sourceHandle ?? "out").sort().join("|"), [id]));
+  const connected = useMemo(() => new Set(connectedKey ? connectedKey.split("|") : []), [connectedKey]);
+  const outputs = visibleOutputs(descriptor?.outputs ?? [], definition.config, connected);
   const errors = context.issues?.get(id) ?? 0;
   const run = context.states ? context.states.get(id) ?? { state: "none" as const, count: 0 } : undefined;
   const scenarioNames = useScenarioNames(descriptor?.fields.some((f) => f.kind === "scenario") ?? false);
