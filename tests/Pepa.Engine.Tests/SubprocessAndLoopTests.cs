@@ -195,13 +195,10 @@ public sealed class SubprocessAndLoopTests
 
         var root = await h.Engine.StartProcessAsync(created.Id);
         ProcessRecord? last = null;
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
-        while (last is null && DateTime.UtcNow < deadline)
-        {
-            last = (await h.Store.ListProcessesAsync(new ProcessQuery { Statuses = [ProcessStatus.NeedsAttention] })).SingleOrDefault();
-            await Task.Delay(20);
-        }
-
+        // Девять вложенных процессов — около 26 записей на диск подряд: на загруженном раннере Windows (>0,3 с на запись) 15 с впритык.
+        await h.UntilAsync(async () =>
+                (last = (await h.Store.ListProcessesAsync(new ProcessQuery { Statuses = [ProcessStatus.NeedsAttention] })).SingleOrDefault()) is not null,
+            "процесс на пределе вложенности", TimeSpan.FromSeconds(60));
         Assert.NotNull(last);
         Assert.Equal(8, last.Depth);
         Assert.Equal(9, (await h.Store.ListProcessesAsync(new ProcessQuery())).Count);

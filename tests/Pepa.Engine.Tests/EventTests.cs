@@ -174,6 +174,9 @@ public sealed class EventTests
 
         // Срок вышел, пока событие ждёт решения: никто не уходит по тайм-ауту.
         await h.IdleAsync(TimeSpan.FromMinutes(3));
+        // Запись «отложен до решения» делает исполнитель в фоне (таймер поставил процессы в очередь после срока, запись — на диск): ждать её.
+        await h.UntilAsync(async () => (await h.Store.GetJournalAsync(first)).Any(j => j.Message.Contains("Тайм-аут отложен до решения", StringComparison.Ordinal)),
+            "запись «Тайм-аут отложен до решения» у первого процесса");
         Assert.Equal(ProcessStatus.Waiting, (await h.ProcessAsync(first)).Status);
         Assert.Equal(ProcessStatus.Waiting, (await h.ProcessAsync(second)).Status);
         Assert.Single(await h.Store.GetJournalAsync(first), j => j.Message.Contains("Тайм-аут отложен до решения", StringComparison.Ordinal));

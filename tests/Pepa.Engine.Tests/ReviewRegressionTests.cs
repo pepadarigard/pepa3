@@ -278,6 +278,9 @@ public sealed class ReviewRegressionTests(ITestOutputHelper output)
             // Событие уже досталось P — назначить его ещё и Q нельзя.
         }
 
+        // Процесс, которому досталось событие, применяет его в фоне (исполнитель после сопоставления): дождаться доставки.
+        await Until(async () => (await r.Sqlite.GetEventAsync(ev.EventId))!.State == EventState.Delivered, 30);
+        // Ошибочная вторая доставка (событие у обоих процессов) проявилась бы за это время.
         await Task.Delay(500);
         var pe = (await r.Sqlite.GetProcessAsync(p))!.Variables["ev"]?["id"]?.GetValue<long>();
         var qe = (await r.Sqlite.GetProcessAsync(q))!.Variables["ev"]?["id"]?.GetValue<long>();
@@ -449,7 +452,18 @@ public sealed class ReviewRegressionTests(ITestOutputHelper output)
             }
         };
         r.Time.Advance(TimeSpan.FromSeconds(11));
-        await Until(async () => (await r.Sqlite.GetProcessAsync(a))!.Status == ProcessStatus.Completed);
+        // Таймер ожиданий мог ещё не уснуть к перемотке (первый проход под нагрузкой медленный) — тогда он заведётся уже после
+        // неё и без новой перемотки не сработает: двигать часы, пока «A» ещё ждёт.
+        await Until(async () =>
+        {
+            var status = (await r.Sqlite.GetProcessAsync(a))!.Status;
+            if (status == ProcessStatus.Waiting)
+            {
+                r.Time.Advance(TimeSpan.FromSeconds(1));
+            }
+
+            return status == ProcessStatus.Completed;
+        }, 30);
         await Until(async () => b is not null && (await r.Sqlite.GetProcessAsync(b))!.Status == ProcessStatus.Completed);
     }
 
@@ -504,15 +518,31 @@ public sealed class ReviewRegressionTests(ITestOutputHelper output)
             Config = new JsonObject { ["mode"] = "interval", ["everyMinutes"] = 60 }, CreatedAt = default, UpdatedAt = default,
         });
 
-        // Цикл расписаний должен успеть уснуть на своём таймере (TimerInterval = 3 ч): если перемотать время раньше,
-        // таймер заведётся уже после перемотки и не сработает. Под нагрузкой первый проход цикла бывает медленным.
-        await Task.Delay(500);
-
-        // Компьютер «спал»: цикл расписаний проснулся через 3 часа.
+        // Компьютер «спал»: цикл расписаний проснулся через 3 часа. Его таймер (TimerInterval = 3 ч) заводится после первого
+        // прохода; под нагрузкой этот проход бывает медленнее любой фиксированной паузы — тогда таймер заведён уже после
+        // перемотки и цикл проснётся только после следующей. Перематывать ещё раз, пока пропуск не записан.
         h.Time.Advance(TimeSpan.FromHours(3));
-        await Until(async () => (await h.Store.GetTriggerAsync(trigger.Id))!.MissedRuns > 0);
+        var advancedAt = DateTime.UtcNow;
+        await h.UntilAsync(async () =>
+        {
+            if ((await h.Store.GetTriggerAsync(trigger.Id))!.MissedRuns > 0)
+            {
+                return true;
+            }
+
+            if (DateTime.UtcNow - advancedAt > TimeSpan.FromSeconds(2))
+            {
+                h.Time.Advance(TimeSpan.FromHours(3));
+                advancedAt = DateTime.UtcNow;
+            }
+
+            return false;
+        }, "пропущенный запуск по расписанию");
         await Task.Delay(300);
         Assert.Equal(0, h.World.Executions("late"));
-        Assert.Equal(3, (await h.Store.GetTriggerAsync(trigger.Id))!.MissedRuns);
+        // Пропущен каждый ежечасный запуск от первого до пробуждения цикла: 3, если цикл уже спал к первой перемотке.
+        var after = (await h.Store.GetTriggerAsync(trigger.Id))!;
+        Assert.True(after.MissedRuns >= 3);
+        Assert.Equal((int)(after.NextRunAt!.Value - trigger.NextRunAt!.Value).TotalHours, after.MissedRuns);
     }
 }

@@ -27,8 +27,26 @@ public sealed class FolderWatchTests : IDisposable
     private FolderWatcher Create(FolderWatcherOptions? options = null, Func<EventInput, Task>? publish = null)
     {
         var watcher = new FolderWatcher(new Workspace(Workspace), Path.Combine(_dir, "watches"),
-            (input, _) => publish?.Invoke(input) ?? Record(input), _time, NullLogger.Instance, options);
+            (input, _) => publish?.Invoke(input) ?? Record(input), new ScanEveryTime(_time), NullLogger.Instance, options);
         return watcher;
+    }
+
+    /// <summary>
+    /// Время для слежения в тестах: GetUtcNow — виртуальное (_time / h.Time), а «монотонный таймер» при каждом чтении уходит на час
+    /// вперёд. FolderWatcher откладывает следующую проверку папки на took×10 с по этому таймеру, если проверка заняла больше 200 мс
+    /// настоящего времени; с FakeTimeProvider под нагрузкой CI следующий ScanAsync молча ничего не делал бы.
+    /// </summary>
+    private sealed class ScanEveryTime(TimeProvider time) : TimeProvider
+    {
+        private long _timestamp;
+
+        public override DateTimeOffset GetUtcNow() => time.GetUtcNow();
+
+        public override TimeZoneInfo LocalTimeZone => time.LocalTimeZone;
+
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+
+        public override long GetTimestamp() => Interlocked.Add(ref _timestamp, TimeSpan.TicksPerHour);
     }
 
     private Task Record(EventInput input)
@@ -280,7 +298,7 @@ public sealed class FolderWatchTests : IDisposable
         root = Path.Combine(h.Directory, "workspace");
         Directory.CreateDirectory(Path.Combine(root, "входящие"));
         await using var watcher = new FolderWatcher(new Workspace(root), Path.Combine(h.Directory, "watches"),
-            (input, ct) => h.Engine.PublishEventAsync(input, ct), h.Time, NullLogger.Instance);
+            (input, ct) => h.Engine.PublishEventAsync(input, ct), new ScanEveryTime(h.Time), NullLogger.Instance);
         watcher.Configure(watches);
         watcher.Start(h.Engine.StartedAt, runLoop: false);
         await watcher.ScanAsync(CancellationToken.None);
@@ -497,8 +515,8 @@ public sealed class FolderWatchTests : IDisposable
         root = Path.Combine(h.Directory, "workspace");
         Directory.CreateDirectory(Path.Combine(root, "входящие"));
         var state = Path.Combine(h.Directory, "watches");
-        await using (var before = new FolderWatcher(new Workspace(root), state, (input, ct) => h.Engine.PublishEventAsync(input, ct), h.Time,
-                         NullLogger.Instance))
+        await using (var before = new FolderWatcher(new Workspace(root), state, (input, ct) => h.Engine.PublishEventAsync(input, ct),
+                         new ScanEveryTime(h.Time), NullLogger.Instance))
         {
             before.Configure(watches);
             before.Start(h.Engine.StartedAt, runLoop: false);
@@ -519,8 +537,8 @@ public sealed class FolderWatchTests : IDisposable
         File.SetLastWriteTimeUtc(moved, EngineHarness.StartTime.UtcDateTime.AddDays(-1));
         h.Time.Advance(TimeSpan.FromMinutes(10));
 
-        await using var after = new FolderWatcher(new Workspace(root), state, (input, ct) => h.Engine.PublishEventAsync(input, ct), h.Time,
-            NullLogger.Instance);
+        await using var after = new FolderWatcher(new Workspace(root), state, (input, ct) => h.Engine.PublishEventAsync(input, ct),
+            new ScanEveryTime(h.Time), NullLogger.Instance);
         after.Configure(watches);
         after.Start(h.Time.GetUtcNow(), runLoop: false);
         await after.ScanAsync(CancellationToken.None);

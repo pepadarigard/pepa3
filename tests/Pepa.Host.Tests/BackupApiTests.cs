@@ -187,6 +187,13 @@ public sealed class BackupApiTests
         await f.WaitForProcessAsync(run!["processId"]!.GetValue<string>(), p => HostFixture.Status(p) == "completed");
         var before = await f.Client.GetStringAsync("/api/events", TestContext.Current.CancellationToken);
         Assert.DoesNotContain("Tok-SECRET-998877", before);
+        // Событие процесса сопоставляет фоновый сопоставитель уже после шага; срок хранения трогает только обработанные события.
+        var routed = DateTime.UtcNow + TimeSpan.FromSeconds(20);
+        while ((await f.GetAsync("/api/events")).AsArray().Single(e => e!["type"]!.GetValue<string>() == "notice")!["state"]!.GetValue<string>() != "unmatched")
+        {
+            Assert.True(DateTime.UtcNow < routed, "Событие процесса не сопоставлено.");
+            await Task.Delay(50, TestContext.Current.CancellationToken);
+        }
 
         var store = (SqliteStore)f.Host.Services.GetRequiredService<Pepa.Engine.Persistence.IPepaStore>();
         await using var retention = new HistoryRetention(store, () => 90, new ManualTime(DateTimeOffset.UtcNow.AddDays(91)), NullLogger.Instance);

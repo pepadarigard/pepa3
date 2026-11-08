@@ -69,9 +69,14 @@ public sealed class FolderWatchApiTests
         var moved = Path.Combine(f.Workspace, "обработано", "счёт.txt");
         await WaitForAsync(() => Task.FromResult(File.Exists(moved)), "Сценарий по новому файлу не отработал.");
         Assert.Equal("оплатить", await File.ReadAllTextAsync(moved));
-        var events = (await f.GetAsync("/api/events")).AsArray();
-        var e = Assert.Single(events, x => x!["source"]!.GetValue<string>() == "files")!;
-        Assert.Equal("входящие/счёт.txt", e["payload"]!["path"]!.GetValue<string>());
+        // Процесс запускается (и двигает файл) раньше, чем сопоставитель отдельной записью отмечает его в событии.
+        System.Text.Json.Nodes.JsonNode? e = null;
+        await WaitForAsync(async () =>
+        {
+            e = (await f.GetAsync("/api/events")).AsArray().SingleOrDefault(x => x!["source"]!.GetValue<string>() == "files");
+            return e is not null && e["startedProcesses"]!.AsArray().Count > 0;
+        }, "Событие не отметило запущенный процесс.");
+        Assert.Equal("входящие/счёт.txt", e!["payload"]!["path"]!.GetValue<string>());
         Assert.Single(e["startedProcesses"]!.AsArray());
     }
 

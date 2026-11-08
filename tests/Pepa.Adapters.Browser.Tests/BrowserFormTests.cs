@@ -78,6 +78,9 @@ public sealed class BrowserFormTests
         Assert.Equal(AttentionKind.UnknownStep, process.Attention);
         Assert.Equal(1, process.Variables["clicks"]!.GetValue<double>());
         Assert.Contains("сайт сразу забрал", process.StatusMessage);
+        // Файл сайт отправляет сам, в фоне (fetch из обработчика change, без ожидания): дождаться, что отправка дошла до сайта,
+        // и только потом убедиться, что второй не будет.
+        await f.H.UntilAsync(() => f.Site.Submits >= 1, "сайт отправил выбранный файл");
         await Task.Delay(500, TestContext.Current.CancellationToken);
         Assert.Equal(1, f.Site.Submits);
         Assert.Single(await f.H.StepsAsync(id), s => s.NodeId == "upload");

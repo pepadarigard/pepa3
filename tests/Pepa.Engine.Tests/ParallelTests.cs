@@ -144,7 +144,9 @@ public sealed class ParallelTests
             .Build());
 
         await h.WaitForAsync(parent, _ => Describe(h, parent).Contains("call:Waiting/Event", StringComparison.Ordinal));
-        await h.WaitForStatusAsync(parent, ProcessStatus.Completed, advance: TimeSpan.FromSeconds(10));
+        // Шагом в 1 с: при 10 с часы доходили до 30-минутного ожидания вызванного сценария за ~170 опросов, а родителю до остановки
+        // нужны три записи на диск — на загруженном раннере впритык, и вызванный успевал выполнить своё действие.
+        await h.WaitForStatusAsync(parent, ProcessStatus.Completed, advance: TimeSpan.FromSeconds(1));
         var called = (await h.Store.ListProcessesAsync(new ProcessQuery { Limit = 100 })).Single(p => p.ParentProcessId == parent);
 
         // Вызванный сценарий — часть процесса: он останавливается и своё действие уже не выполнит.

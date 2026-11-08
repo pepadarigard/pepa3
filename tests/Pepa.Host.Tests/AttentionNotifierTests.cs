@@ -65,7 +65,8 @@ public sealed class AttentionNotifierTests
 
     private static async Task Eventually(Func<bool> condition)
     {
-        var deadline = DateTime.UtcNow.AddSeconds(5);
+        // С запасом: фоновые циклы уведомителя на загруженном раннере отстают на секунды (быстрые прогоны не ждут дольше).
+        var deadline = DateTime.UtcNow.AddSeconds(30);
         while (!condition())
         {
             if (DateTime.UtcNow > deadline)
@@ -115,8 +116,18 @@ public sealed class AttentionNotifierTests
         var telegram = new SavedMessages();
         var alerts = new Alerts();
         var enabled = true;
-        await using var notifier = new AttentionNotifier((id, _) => Task.FromResult(processes.GetValueOrDefault(id)), telegram, () => enabled,
-            alerts, NullLogger.Instance, TimeSpan.FromMilliseconds(30));
+        // Что уведомитель прочитал на самом деле — чтобы ждать этого, а не фиксированную паузу.
+        var loaded = new ConcurrentQueue<ProcessRecord>();
+        await using var notifier = new AttentionNotifier((id, _) =>
+            {
+                var process = processes.GetValueOrDefault(id);
+                if (process is not null)
+                {
+                    loaded.Enqueue(process);
+                }
+
+                return Task.FromResult(process);
+            }, telegram, () => enabled, alerts, NullLogger.Instance, TimeSpan.FromMilliseconds(30));
         var old = Process("old", ProcessStatus.NeedsAttention);
         processes[old.Id] = old;
         notifier.Start([old], recovery: null);
@@ -147,7 +158,8 @@ public sealed class AttentionNotifierTests
         // Решение принято, потом процесс снова остановился — новая остановка; вместе с другим процессом — одним сообщением.
         processes[a.Id] = a with { Status = ProcessStatus.Running, Attention = AttentionKind.None };
         notifier.OnProcessChanged(a.Id);
-        await Task.Delay(150);
+        // Уведомитель должен прочитать «работает» (и забыть остановку) до новой остановки с той же подписью.
+        await Eventually(() => loaded.Any(p => p.Id == a.Id && p.Status == ProcessStatus.Running));
         processes[a.Id] = a;
         var b = Process("b", ProcessStatus.NeedsAttention);
         processes[b.Id] = b;
@@ -170,13 +182,19 @@ public sealed class AttentionNotifierTests
     {
         var processes = new ConcurrentDictionary<string, ProcessRecord>();
         var telegram = new SavedMessages { State = TelegramState.Disconnected };
-        await using var notifier = new AttentionNotifier((id, _) => Task.FromResult(processes.GetValueOrDefault(id)), telegram, () => true,
-            null, NullLogger.Instance, TimeSpan.FromMilliseconds(20));
+        var loaded = new ConcurrentQueue<string>();
+        await using var notifier = new AttentionNotifier((id, _) =>
+            {
+                loaded.Enqueue(id);
+                return Task.FromResult(processes.GetValueOrDefault(id));
+            }, telegram, () => true, null, NullLogger.Instance, TimeSpan.FromMilliseconds(20));
         notifier.Start([], recovery: null);
 
         var a = Process("a", ProcessStatus.NeedsAttention);
         processes[a.Id] = a;
         notifier.OnProcessChanged(a.Id);
+        // «a» должен быть разобран, пока Telegram не подключён.
+        await Eventually(() => loaded.Contains(a.Id));
         await Task.Delay(150);
         Assert.Empty(telegram.Messages);
         await Assert.ThrowsAsync<InvalidOperationException>(() => notifier.SendTestAsync(CancellationToken.None));
@@ -187,6 +205,8 @@ public sealed class AttentionNotifierTests
         var b = Process("b", ProcessStatus.NeedsAttention);
         processes[b.Id] = b;
         notifier.OnProcessChanged(b.Id);
+        // Отправка о «b» должна попасть на ошибку, а не после её исправления.
+        await Eventually(() => loaded.Contains(b.Id));
         await Task.Delay(150);
         telegram.Fail = false;
         var c = Process("c", ProcessStatus.NeedsAttention);
@@ -194,7 +214,8 @@ public sealed class AttentionNotifierTests
         notifier.OnProcessChanged(c.Id);
         await Eventually(() => telegram.Messages.Count == 1);
         Assert.Contains("«Заказ c»", telegram.Messages.Single());
-        Assert.Equal(1, notifier.Sent);
+        // Счётчик растёт после того, как сообщение уже легло в «Избранное».
+        await Eventually(() => notifier.Sent == 1);
     }
 
     [Fact]
@@ -312,6 +333,8 @@ public sealed class AttentionNotifierTests
         failLookup = 1;
         processes[asking.Id] = asking with { Status = ProcessStatus.Waiting };
         notifier.OnProcessChanged(asking.Id);
+        // Сбой чтения вопросов должен случиться здесь, а не при следующей остановке (там он съел бы вопрос «Код из SMS?»).
+        await Eventually(() => Volatile.Read(ref failLookup) == 0);
         await Task.Delay(250);
         Assert.Single(telegram.Messages);
 
@@ -346,8 +369,10 @@ public sealed class AttentionNotifierTests
             });
         notifier.Start([], recovery: null);
         notifier.OnProcessChanged(process.Id);
-        await Task.Delay(800);
-        Assert.InRange(calls, 2, 4);
+        // Первая попытка и три повтора (MaxReadRetries = 3) — дождаться их, потом убедиться, что новых попыток нет.
+        await Eventually(() => Volatile.Read(ref calls) >= 4);
+        await Task.Delay(300);
+        Assert.Equal(4, Volatile.Read(ref calls));
     }
 
     [Fact]

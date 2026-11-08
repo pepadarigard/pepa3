@@ -494,7 +494,8 @@ public sealed class SecretTests
         await using var h = await EngineHarness.CreateAsync();
         var id = await h.RunAsync(new ScenarioBuilder("Коротко").Node("start", "start").Node("end", "end").Chain("start", "end").Build());
         var done = await h.WaitForStatusAsync(id, ProcessStatus.Completed);
-        Assert.Equal(0, h.Engine.ExecutionGraphCount);
+        // Сценарий выполнения убирается из памяти сразу после записи итога (AfterCommit) — ждать этого, а не проверять в тот же миг.
+        await h.UntilAsync(() => h.Engine.ExecutionGraphCount == 0, "сценарий завершённого процесса убран из памяти");
 
         h.Engine.Graph(done with { Status = ProcessStatus.Running });
         Assert.Equal(0, h.Engine.ExecutionGraphCount);

@@ -110,15 +110,16 @@ public sealed class EmailServiceTests : IAsyncDisposable
     [Fact]
     public async Task Mail_moved_in_with_an_old_date_still_counts_as_new_for_waiting_processes()
     {
-        var service = await ConnectedAsync();
         var checkedAt = DateTimeOffset.UtcNow;
+        var service = await ConnectedAsync();
         // Правило почты перенесло письмо из другой папки: у него дата прихода неделю назад.
         _server.Deliver(FakeImapServer.Message("noreply@site.ru", "Перенесено", "код"), DateTimeOffset.UtcNow.AddDays(-7));
         _server.Deliver(FakeImapServer.Message("noreply@site.ru", "Часы спешат", "код"), DateTimeOffset.UtcNow.AddHours(3));
         await service.CheckAsync(CancellationToken.None);
 
         var events = _events.ToList();
-        Assert.True(events[0].OccurredAt >= checkedAt.AddSeconds(-2));
+        // Не раньше прошлой проверки — а она началась после checkedAt.
+        Assert.True(events[0].OccurredAt >= checkedAt);
         Assert.True(events[1].OccurredAt <= DateTimeOffset.UtcNow);
     }
 
