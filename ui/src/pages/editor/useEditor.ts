@@ -3,7 +3,7 @@ import type { ScenarioDefinition } from "../../api/types";
 import { toDefinition, toFlowEdges, toFlowNodes, type PepaEdge, type PepaNode } from "../../lib/graph";
 import { readGroups } from "../../lib/groups";
 
-export type Meta = Pick<ScenarioDefinition, "id" | "name" | "description" | "variables" | "schemaVersion" | "editor">;
+export type Meta = Pick<ScenarioDefinition, "id" | "name" | "description" | "runTitle" | "variables" | "schemaVersion" | "editor">;
 
 export interface EditorState {
   meta: Meta;

@@ -4,7 +4,7 @@ import { MessageCircleQuestionMark, Send } from "lucide-react";
 import { api } from "../api/client";
 import { useQuestions } from "../api/hooks";
 import type { Question } from "../api/types";
-import { formatMoment, relative } from "../lib/format";
+import { formatMoment, processLabel, relative } from "../lib/format";
 import { navigate } from "../router";
 import { useFeedback } from "./feedback";
 import { Button, Card } from "./ui";
@@ -62,7 +62,7 @@ function QuestionItem({ question, showProcess }: { question: Question; showProce
       {showProcess && (
         <div className="small muted">
           <a href={`#/process/${question.process.id}`} onClick={(e) => { e.preventDefault(); navigate({ page: "process", id: question.process.id }); }}>
-            «{question.process.scenarioName}» · #{question.process.shortId}
+            {processLabel(question.process)}
           </a>
           {" · "}спрошено {relative(question.askedAt)}
           {question.expiresAt && <> · ждёт до {formatMoment(question.expiresAt)}</>}

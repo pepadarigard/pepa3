@@ -10,7 +10,7 @@ import { useRunScenario } from "../components/RunDialog";
 import { Dialog, useFeedback } from "../components/feedback";
 import { Badge, Button, Card, Empty, ErrorState, Loading } from "../components/ui";
 import { ru } from "../i18n/ru";
-import { durationBetween, formatDateTime, formatMoment, preview } from "../lib/format";
+import { durationBetween, formatDateTime, formatMoment, preview, processLabel } from "../lib/format";
 import { toFlowEdges, toFlowNodes, type PepaEdge } from "../lib/graph";
 import { processReport } from "../lib/report";
 import { canvasView, isGroupNodeId, readGroups, type CanvasNode } from "../lib/groups";
@@ -76,6 +76,7 @@ export function ProcessPage({ id }: { id: string }) {
             <h1>{p.scenarioName}</h1>
             <ProcessStatusBadge status={p.status} />
           </div>
+          {p.title && <p className="subtitle" data-testid="run-title" style={{ fontWeight: 560, marginBottom: 2 }}>{p.title}</p>}
           <p className="subtitle">
             Процесс <span className="mono">#{p.shortId}</span> · запущен {formatDateTime(p.createdAt)}
             {p.finishedAt && <> · завершён {formatDateTime(p.finishedAt)}</>} · длительность {durationBetween(p.createdAt, p.finishedAt)} ·
@@ -94,7 +95,7 @@ export function ProcessPage({ id }: { id: string }) {
             Скопировать отчёт
           </Button>
           <Button icon={Pencil} onClick={() => navigate({ page: "editor", id: p.scenarioId })}>Сценарий</Button>
-          {!isActive(p.status) && <Button icon={RotateCw} onClick={() => runner.run(p.scenarioId)}>Запустить снова</Button>}
+          {!isActive(p.status) && <Button icon={RotateCw} onClick={() => runner.run(p.scenarioId, { values: data.runInputs })}>Запустить снова</Button>}
         </div>
       </header>
 
@@ -408,7 +409,7 @@ function Relations({ data }: { data: ProcessDetails }) {
         {data.parent && (
           <div className="row wrap small">
             <Workflow size={15} className="muted" /> Запущен из процесса
-            <a href={`#/process/${data.parent.id}`}>«{data.parent.scenarioName}» #{data.parent.shortId}</a>
+            <a href={`#/process/${data.parent.id}`}>{processLabel(data.parent)}</a>
             <Badge tone={processTone[data.parent.status]}>{ru.processStatus[data.parent.status]}</Badge>
           </div>
         )}

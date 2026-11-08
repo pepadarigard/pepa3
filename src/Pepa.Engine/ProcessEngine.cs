@@ -181,13 +181,17 @@ public sealed partial class ProcessEngine : IAsyncDisposable
             return (existing, false);
         }
 
-        var (process, token) = NewProcess(prepared, _time.GetUtcNow(), parentId: null, depth: 0, originKey);
+        var (process, token, titleProblem) = NewProcess(prepared, _time.GetUtcNow(), parentId: null, depth: 0, originKey);
         process = process with { Debug = debug };
         await write.InsertProcessAsync(process);
         await write.UpsertTokenAsync(token);
         await write.AddJournalAsync(Journal(process.Id, JournalLevel.Info,
             $"Процесс запущен{(origin is null ? "" : $" ({origin})")}: сценарий «{prepared.Scenario.Name}», " +
             $"версия {prepared.Scenario.Version}."));
+        if (titleProblem is not null)
+        {
+            await write.AddJournalAsync(Journal(process.Id, JournalLevel.Warning, Redact(titleProblem, SecretValues(process, prepared.Definition))!));
+        }
         return (process, true);
     }
 

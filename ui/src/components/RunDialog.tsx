@@ -7,12 +7,15 @@ import { ru } from "../i18n/ru";
 import { navigate } from "../router";
 import { Dialog, useFeedback } from "./feedback";
 import { Button, Callout } from "./ui";
+import { AdsPowerPicker } from "../pages/editor/FieldEditor";
 
 /** Запуск сценария: если есть входные переменные — сначала спросить значения. */
 export function useRunScenario() {
   const feedback = useFeedback();
   const queryClient = useQueryClient();
-  const [dialog, setDialog] = useState<{ id: string; name: string; inputs: VariableDefinition[]; stepMode: boolean } | null>(null);
+  const [dialog, setDialog] = useState<{
+    id: string; name: string; inputs: VariableDefinition[]; stepMode: boolean; values?: Record<string, Json> | null;
+  } | null>(null);
 
   const start = async (id: string, inputs?: Record<string, Json>, stepMode = false) => {
     try {
@@ -32,8 +35,11 @@ export function useRunScenario() {
     }
   };
 
-  /** <paramref name="stepMode"/> — отладка: пауза перед каждым блоком. */
-  const run = async (id: string, options?: { stepMode?: boolean }) => {
+  /**
+   * <paramref name="stepMode"/> — отладка: пауза перед каждым блоком. <paramref name="values"/> — входные данные прошлого
+   * запуска («Запустить снова»): подставляются в окно запуска, секретные поля остаются пустыми.
+   */
+  const run = async (id: string, options?: { stepMode?: boolean; values?: Record<string, Json> | null }) => {
     const stepMode = options?.stepMode === true;
     try {
       const scenario = await api.scenario(id);
@@ -41,7 +47,7 @@ export function useRunScenario() {
       if (inputs.length === 0) {
         await start(id, undefined, stepMode);
       } else {
-        setDialog({ id, name: scenario.name, inputs, stepMode });
+        setDialog({ id, name: scenario.name, inputs, stepMode, values: options?.values });
       }
     } catch (e) {
       feedback.error(e);
@@ -52,6 +58,7 @@ export function useRunScenario() {
     <RunDialog
       name={dialog.name}
       inputs={dialog.inputs}
+      previous={dialog.values}
       onCancel={() => setDialog(null)}
       onRun={async (values) => {
         if (await start(dialog.id, values, dialog.stepMode)) setDialog(null);
@@ -62,9 +69,12 @@ export function useRunScenario() {
   return { run, element };
 }
 
-function RunDialog({ name, inputs, onRun, onCancel }: { name: string; inputs: VariableDefinition[]; onRun: (values: Record<string, Json>) => Promise<void>; onCancel: () => void }) {
+function RunDialog({ name, inputs, previous, onRun, onCancel }: {
+  name: string; inputs: VariableDefinition[]; previous?: Record<string, Json> | null;
+  onRun: (values: Record<string, Json>) => Promise<void>; onCancel: () => void;
+}) {
   const [values, setValues] = useState<Record<string, string | boolean>>(() =>
-    Object.fromEntries(inputs.map((v) => [v.name, initialText(v)])),
+    Object.fromEntries(inputs.map((v) => [v.name, initialText(v, v.secret ? undefined : previous?.[v.name])])),
   );
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -98,7 +108,11 @@ function RunDialog({ name, inputs, onRun, onCancel }: { name: string; inputs: Va
         </>
       }
     >
-      <p className="muted small">Укажите входные значения. Каждый запуск — отдельный процесс со своими переменными.</p>
+      <p className="muted small">
+        {previous
+          ? "Значения — как у прошлого запуска (секретные нужно ввести заново). Каждый запуск — отдельный процесс со своими переменными."
+          : "Укажите входные значения. Каждый запуск — отдельный процесс со своими переменными."}
+      </p>
       {inputs.map((variable) => (
         <label key={variable.name} className="field">
           <span className="field-label">
@@ -129,6 +143,9 @@ function RunDialog({ name, inputs, onRun, onCancel }: { name: string; inputs: Va
               onChange={(e) => setValues({ ...values, [variable.name]: e.target.value })}
             />
           )}
+          {variable.lookup === "adspower-profiles" && !variable.secret && (
+            <AdsPowerPicker onPick={(id) => setValues({ ...values, [variable.name]: id })} />
+          )}
           {variable.description && <span className="field-help">{variable.description}</span>}
         </label>
       ))}
@@ -137,11 +154,13 @@ function RunDialog({ name, inputs, onRun, onCancel }: { name: string; inputs: Va
   );
 }
 
-function initialText(v: VariableDefinition): string | boolean {
-  if (v.type === "boolean") return v.default === true;
-  if (v.default === null || v.default === undefined) return "";
-  if (v.type === "text" || v.type === "number") return String(v.default);
-  return JSON.stringify(v.default, null, 2);
+/** Начальное значение поля: прошлое значение (если есть) или значение по умолчанию. */
+function initialText(v: VariableDefinition, previous?: Json): string | boolean {
+  const value = previous !== undefined ? previous : v.default;
+  if (v.type === "boolean") return value === true;
+  if (value === null || value === undefined) return "";
+  if (v.type === "text" || v.type === "number" || (v.type === "any" && typeof value === "string")) return String(value);
+  return JSON.stringify(value, null, 2);
 }
 
 export function parseInput(v: VariableDefinition, raw: string | boolean | undefined): { value: Json } | { error: string } {

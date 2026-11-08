@@ -15,6 +15,7 @@ export function processReport(details: ProcessDetails, version: string | null): 
   const lines: string[] = [];
   lines.push("Отчёт о процессе Pepa" + (version ? ` (Pepa ${version})` : ""));
   lines.push(`Сценарий: «${p.scenarioName}», версия ${p.scenarioVersion}`);
+  if (p.title) lines.push(`Запуск: ${p.title}`);
   lines.push(`Процесс: ${p.id}`);
   lines.push(`Состояние: ${ru.processStatus[p.status]}` + (p.attention !== "none" ? ` (${p.attention})` : "") +
     (p.pauseReason !== "none" ? `, пауза: ${p.pauseReason}` : ""));

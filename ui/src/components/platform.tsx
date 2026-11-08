@@ -4,7 +4,7 @@ import { AlertTriangle, Inbox, Lock, LockOpen, RefreshCw, Send, SkipForward, Squ
 import { api } from "../api/client";
 import type { Json, PepaEvent, Resource } from "../api/types";
 import { ru } from "../i18n/ru";
-import { formatMoment, preview } from "../lib/format";
+import { formatMoment, preview, processLabel } from "../lib/format";
 import { eventTone } from "../lib/status";
 import { Dialog, useFeedback } from "./feedback";
 import { Badge, Button, Callout, Card, Empty } from "./ui";
@@ -83,7 +83,7 @@ export function EventConflicts({ events }: { events: PepaEvent[] }) {
                   busy={busy === `${event.id}:${c.subscriptionId}`}
                   title={c.stillWaiting ? "Отдать событие этому процессу" : "Этот процесс уже не ждёт событие"}
                   onClick={() => resolve(event, c.subscriptionId)}>
-                  {c.process.scenarioName} #{c.process.shortId}
+                  {processLabel(c.process)}
                 </Button>
               ))}
               <Button size="small" icon={SkipForward} busy={busy === `${event.id}:null`} onClick={() => resolve(event, null)}>
@@ -154,7 +154,7 @@ export function EventsTable({ events }: { events: PepaEvent[] }) {
               </td>
               <td className="small" style={{ maxWidth: 260 }}>
                 {event.process ? (
-                  <ProcessLink id={event.process.id} label={`${event.process.scenarioName} #${event.process.shortId}`} />
+                  <ProcessLink id={event.process.id} label={processLabel(event.process)} />
                 ) : event.startedProcesses.length > 0 ? (
                   <span>
                     Запущено:{" "}
@@ -312,7 +312,7 @@ export function ResourcesCard({ resources }: { resources: Resource[] }) {
     if (!(await feedback.confirm({
       title: `Освободить «${resource.title}»?`,
       text:
-        `Ресурс занят процессом «${resource.holder?.scenarioName}» #${resource.holder?.shortId}. Освобождайте вручную, только если ` +
+        `Ресурс занят процессом ${resource.holder ? `«${processLabel(resource.holder)}»` : ""}. Освобождайте вручную, только если ` +
         "уверены, что процесс им больше не пользуется (например, он приостановлен и вы закрыли профиль сами). " +
         (resource.queue.length > 0 ? "Ресурс сразу получит следующий в очереди." : ""),
       confirmLabel: "Освободить",
@@ -361,7 +361,7 @@ export function ResourcesCard({ resources }: { resources: Resource[] }) {
                   <td className="small">
                     {r.holder ? (
                       <>
-                        <ProcessLink id={r.holder.id} label={`${r.holder.scenarioName} #${r.holder.shortId}`} />
+                        <ProcessLink id={r.holder.id} label={processLabel(r.holder)} />
                         <div className="faint">{ru.processStatus[r.holder.status]}</div>
                       </>
                     ) : r.heldBy ? (
@@ -376,7 +376,7 @@ export function ResourcesCard({ resources }: { resources: Resource[] }) {
                       ? <span className="muted">—</span>
                       : r.queue.map((w, i) => (
                           <div key={w.process.id}>
-                            {i + 1}. <ProcessLink id={w.process.id} label={`${w.process.scenarioName} #${w.process.shortId}`} />
+                            {i + 1}. <ProcessLink id={w.process.id} label={processLabel(w.process)} />
                             {w.process.status !== "waiting" && <span className="faint"> · {ru.processStatus[w.process.status].toLowerCase()}, пропускается</span>}
                           </div>
                         ))}

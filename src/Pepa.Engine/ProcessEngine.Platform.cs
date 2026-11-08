@@ -1,7 +1,9 @@
 using System.Globalization;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging;
 using Pepa.Core;
+using Pepa.Core.Expressions;
 using Pepa.Core.Model;
 using Pepa.Core.Nodes;
 using Pepa.Core.Serialization;
@@ -965,16 +967,20 @@ public sealed partial class ProcessEngine
     private async Task<string> CreateChildAsync(IStoreWrite write, PreparedStart prepared, ProcessRecord parent, long stepId,
         DateTimeOffset now)
     {
-        var (process, token) = NewProcess(InheritSecrets(parent, prepared), now, parent.Id, parent.Depth + 1, $"child:{parent.Id}:{stepId}");
+        var (process, token, titleProblem) = NewProcess(InheritSecrets(parent, prepared), now, parent.Id, parent.Depth + 1, $"child:{parent.Id}:{stepId}");
         await write.InsertProcessAsync(process);
         await write.UpsertTokenAsync(token);
         await write.AddJournalAsync(Journal(process.Id, JournalLevel.Info,
             $"Процесс запущен из процесса #{parent.Id[^6..]} (сценарий «{parent.ScenarioName}»): сценарий «{prepared.Scenario.Name}», " +
             $"версия {prepared.Scenario.Version}."));
+        if (titleProblem is not null)
+        {
+            await write.AddJournalAsync(Journal(process.Id, JournalLevel.Warning, Redact(titleProblem, SecretValues(process, prepared.Definition))!));
+        }
         return process.Id;
     }
 
-    internal (ProcessRecord Process, TokenRecord Token) NewProcess(PreparedStart prepared, DateTimeOffset now,
+    internal (ProcessRecord Process, TokenRecord Token, string? TitleProblem) NewProcess(PreparedStart prepared, DateTimeOffset now,
         string? parentId, int depth, string? originKey)
     {
         var process = new ProcessRecord
@@ -994,6 +1000,8 @@ public sealed partial class ProcessEngine
             UpdatedAt = now,
             Secrets = Remember(null, [], prepared.Secrets ?? []),
         };
+        var (title, titleProblem) = RunTitle(process, prepared.Definition);
+        process = process with { Title = title, Inputs = RunInputs(process, prepared.Definition) };
         var token = new TokenRecord
         {
             Id = NewId(),
@@ -1002,7 +1010,84 @@ public sealed partial class ProcessEngine
             State = TokenState.Ready,
             CreatedAt = now,
         };
-        return (process, token);
+        return (process, token, titleProblem);
+    }
+
+    /// <summary>Самое длинное название запуска; длиннее — обрезается.</summary>
+    private const int MaxRunTitleLength = 120;
+
+    /// <summary>
+    /// Название запуска (D-081): по шаблону сценария, а без него — значения первых двух несекретных входных переменных
+    /// (простые: текст, число, да/нет). Строки склеиваются, секреты процесса заменяются на «••••». Шаблон, который не
+    /// вычислился, не мешает запуску: названия нет, причина — в журнал.
+    /// </summary>
+    internal (string? Title, string? Problem) RunTitle(ProcessRecord process, ScenarioDefinition definition)
+    {
+        string raw;
+        if (!string.IsNullOrWhiteSpace(definition.RunTitle))
+        {
+            try
+            {
+                raw = _expressions.RenderTemplate(definition.RunTitle, new ExpressionScope(process.Variables));
+            }
+            catch (ExpressionException ex)
+            {
+                return (null, $"Название запуска не вычислилось: {ex.Message}");
+            }
+        }
+        else
+        {
+            raw = string.Join(" · ", definition.Variables
+                .Where(v => v.IsInput && !v.Secret)
+                .Select(v => ScalarText(process.Variables[v.Name]))
+                .Where(text => text is { Length: > 0 })
+                .Select(text => text!.Length > 60 ? text[..59] + "…" : text)
+                .Take(2));
+        }
+
+        var title = string.Join(' ', raw.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        title = Redact(title, SecretValues(process, definition))!;
+        if (title.Length > MaxRunTitleLength)
+        {
+            title = title[..(MaxRunTitleLength - 1)] + "…";
+        }
+
+        return (title.Length == 0 ? null : title, null);
+    }
+
+    private static string? ScalarText(JsonNode? value) => value is JsonValue scalar
+        ? scalar.GetValueKind() switch
+        {
+            JsonValueKind.String => scalar.GetValue<string>().Trim(),
+            JsonValueKind.Number => scalar.ToJsonString(),
+            JsonValueKind.True => "да",
+            JsonValueKind.False => "нет",
+            _ => null,
+        }
+        : null;
+
+    /// <summary>
+    /// Входные данные запуска для «Запустить снова»: несекретные входные переменные, кроме значений, в которых есть секрет
+    /// процесса (например, переданный вызвавшим процессом).
+    /// </summary>
+    private static JsonObject? RunInputs(ProcessRecord process, ScenarioDefinition definition)
+    {
+        var secrets = RawSecretValues(process, definition).Where(v => v.Length >= MinSecretLength).ToList();
+        var inputs = new JsonObject();
+        foreach (var variable in definition.Variables.Where(v => v.IsInput && !v.Secret))
+        {
+            var value = process.Variables[variable.Name];
+            var text = value?.ToJsonString() ?? "";
+            if (secrets.Any(secret => text.Contains(secret, StringComparison.Ordinal) ||
+                                      text.Contains(JsonEncodedText.Encode(secret).Value, StringComparison.Ordinal)))
+            {
+                continue;
+            }
+
+            inputs[variable.Name] = value?.DeepClone();
+        }
+
+        return inputs.Count == 0 ? null : inputs;
     }
 
     internal static JsonObject EventJson(EventRecord record) => new()

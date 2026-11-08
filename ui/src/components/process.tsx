@@ -131,6 +131,7 @@ export function ProcessTable({ processes, showScenario = true, showActions = tru
               {showScenario && (
                 <td>
                   <div style={{ fontWeight: 560 }}>{p.scenarioName}</div>
+                  {p.title && <div className="small truncate" style={{ maxWidth: 280 }} title={p.title}>{p.title}</div>}
                   <div className="faint small mono">#{p.shortId}{p.parentProcessId ? ` · вызван из #${p.parentProcessId.slice(-6)}` : ""}</div>
                 </td>
               )}

@@ -66,7 +66,9 @@ public sealed record ProcessSummaryDto(
     IReadOnlyList<ProcessAction> AllowedActions,
     WaitKind WaitKind,
     string? WaitingFor,
-    string? ParentProcessId);
+    string? ParentProcessId,
+    /// <summary>Название запуска (D-081), без секретов.</summary>
+    string? Title = null);
 
 public sealed record StepDto(
     long Id,
@@ -98,10 +100,12 @@ public sealed record ProcessDetailsDto(
     IReadOnlyList<ProcessSummaryDto> Children,
     IReadOnlyList<WaitDto> Waits,
     IReadOnlyList<string> HeldResources,
-    IReadOnlyList<string> ActiveNodeIds);
+    IReadOnlyList<string> ActiveNodeIds,
+    /// <summary>Входные данные запуска без секретов — для «Запустить снова».</summary>
+    JsonObject? RunInputs = null);
 
 /// <summary>Краткая ссылка на процесс.</summary>
-public sealed record ProcessRefDto(string Id, string ShortId, string ScenarioName, ProcessStatus Status);
+public sealed record ProcessRefDto(string Id, string ShortId, string ScenarioName, ProcessStatus Status, string? Title = null);
 
 /// <summary>Чего ждал или ждёт шаг процесса.</summary>
 public sealed record WaitDto(

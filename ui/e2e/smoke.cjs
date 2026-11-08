@@ -419,6 +419,8 @@ async function main() {
     await page.getByText("Ждёт событие «manual / reply» с ключом «Z-1»").first().waitFor({ timeout: 15000 });
     const replyProcess = page.url().split("/process/")[1];
     await page.getByText("Связи и ожидания").waitFor();
+    // Название запуска — по входным данным: видно, какой это заказ, без открытия процесса.
+    await page.getByTestId("run-title").getByText("Z-1", { exact: true }).waitFor();
     await page.screenshot({ path: path.join(shots, "08-waiting-event.png") });
 
     await page.goto(`${base}/#/runs`);
@@ -432,6 +434,11 @@ async function main() {
     await page.getByText(/Событие #\d+ отправлено/).waitFor();
     await page.goto(`${base}/#/process/${replyProcess}`);
     await page.locator(".badge", { hasText: "Завершён" }).first().waitFor({ timeout: 15000 });
+    // «Запустить снова» — с теми же входными данными.
+    await page.getByRole("button", { name: "Запустить снова" }).click();
+    const again = page.getByRole("dialog");
+    if ((await again.getByRole("textbox").first().inputValue()) !== "Z-1") throw new Error("«Запустить снова»: ожидался номер заказа Z-1");
+    await again.getByRole("button", { name: "Отмена" }).click();
     const reply = fs.readFileSync(path.join(workspace, "примеры", "ответы", "Z-1.txt"), "utf8");
     if (reply !== "Ответ по заказу Z-1: согласовано") throw new Error(`Неожиданный ответ: ${reply}`);
     await page.goto(`${base}/#/runs`);

@@ -79,6 +79,15 @@ public sealed record ProcessRecord
     public required string ScenarioName { get; init; }
     public required int ScenarioVersion { get; init; }
 
+    /// <summary>
+    /// Название запуска (D-081): чем этот процесс отличается от других процессов того же сценария («anna · профиль k1a2»).
+    /// Вычисляется при запуске; секреты в нём скрыты. null — названия нет.
+    /// </summary>
+    public string? Title { get; init; }
+
+    /// <summary>Входные данные запуска без секретов — чтобы «Запустить снова» с теми же значениями.</summary>
+    public JsonObject? Inputs { get; init; }
+
     /// <summary>Снимок сценария на момент запуска: правки сценария не меняют уже запущенные процессы.</summary>
     public required string DefinitionJson { get; init; }
 

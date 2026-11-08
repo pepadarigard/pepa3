@@ -78,6 +78,21 @@ public sealed class AttentionNotifierTests
     }
 
     [Fact]
+    public async Task Message_names_the_run_so_the_account_is_known_without_opening_pepa()
+    {
+        var processes = new ConcurrentDictionary<string, ProcessRecord>();
+        var telegram = new SavedMessages();
+        await using var notifier = new AttentionNotifier((id, _) => Task.FromResult(processes.GetValueOrDefault(id)), telegram, () => true,
+            null, NullLogger.Instance, TimeSpan.FromMilliseconds(30));
+        notifier.Start([], recovery: null);
+        var stopped = Process("t", ProcessStatus.NeedsAttention) with { Title = "anna · профиль k1a2" };
+        processes[stopped.Id] = stopped;
+        notifier.OnProcessChanged(stopped.Id);
+        await Eventually(() => telegram.Messages.Count == 1);
+        Assert.Contains("«Заказ t» · anna · профиль k1a2 (#cess-t)", telegram.Messages.Single());
+    }
+
+    [Fact]
     public async Task Each_stop_is_reported_once_and_several_at_once_in_one_message()
     {
         var processes = new ConcurrentDictionary<string, ProcessRecord>();

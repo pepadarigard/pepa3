@@ -90,6 +90,8 @@ internal static class SqliteMapping
         UpdatedAt = DateOf(r, "updated_at")!.Value,
         FinishedAt = DateOf(r, "finished_at"),
         Secrets = Str(r, "secrets") is { } secrets ? System.Text.Json.JsonSerializer.Deserialize<ProcessSecrets>(secrets) : null,
+        Title = Str(r, "title"),
+        Inputs = ObjectOf(r, "inputs"),
     };
 
     public static TokenRecord ReadToken(SqliteDataReader r) => new()

@@ -73,3 +73,8 @@ export function preview(value: unknown, max = 80): string {
   const text = typeof value === "string" ? value : JSON.stringify(value);
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
+
+/** «Сценарий · название запуска #номер» — по названию видно, какой аккаунт или профиль (D-081). */
+export function processLabel(p: { scenarioName: string; shortId: string; title?: string | null }): string {
+  return `${p.scenarioName}${p.title ? ` · ${p.title}` : ""} #${p.shortId}`;
+}

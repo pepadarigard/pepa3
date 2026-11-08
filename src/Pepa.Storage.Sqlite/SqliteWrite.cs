@@ -51,10 +51,10 @@ internal sealed class SqliteWrite(SqliteConnection connection, SqliteTransaction
         RunAsync("""
                  INSERT INTO processes (id, scenario_id, scenario_name, scenario_version, definition, status, attention,
                      pause_reason, status_message, attention_step_id, attention_token_id, variables, last_error, memory, debug, parent_process_id,
-                     origin_key, depth, step_count, step_budget, created_at, updated_at, finished_at, secrets)
+                     origin_key, depth, step_count, step_budget, created_at, updated_at, finished_at, secrets, title, inputs)
                  VALUES ($id, $scenario_id, $scenario_name, $scenario_version, $definition, $status, $attention,
                      $pause_reason, $status_message, $attention_step_id, $attention_token_id, $variables, $last_error, $memory, $debug, $parent_process_id,
-                     $origin_key, $depth, $step_count, $step_budget, $created_at, $updated_at, $finished_at, $secrets);
+                     $origin_key, $depth, $step_count, $step_budget, $created_at, $updated_at, $finished_at, $secrets, $title, $inputs);
                  """, c => BindProcess(c, process));
 
     public async Task UpdateProcessAsync(ProcessRecord process)
@@ -476,6 +476,8 @@ internal sealed class SqliteWrite(SqliteConnection connection, SqliteTransaction
         c.Parameters.AddWithValue("$created_at", Date(p.CreatedAt));
         c.Parameters.AddWithValue("$updated_at", Date(p.UpdatedAt));
         c.Parameters.AddWithValue("$finished_at", DateOrNull(p.FinishedAt));
+        c.Parameters.AddWithValue("$title", OrNull(p.Title));
+        c.Parameters.AddWithValue("$inputs", JsonOrNull(p.Inputs));
     }
 
     private static void BindStep(SqliteCommand c, StepRecord s)

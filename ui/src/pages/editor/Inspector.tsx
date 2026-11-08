@@ -218,6 +218,15 @@ export function ScenarioInspector({ meta, issues, onChange }: { meta: Meta; issu
           <textarea className="textarea" style={{ minHeight: 64 }} value={meta.description}
             onChange={(e) => onChange((m) => ({ ...m, description: e.target.value }), "description")} />
         </label>
+        <label className="field">
+          <span className="field-label">Название запуска</span>
+          <input className="input mono" value={meta.runTitle ?? ""} placeholder="{{ vars.login }} · профиль {{ vars.profile }}"
+            onChange={(e) => onChange((m) => ({ ...m, runTitle: e.target.value === "" ? null : e.target.value }), "runTitle")} />
+          <span className="field-help">
+            Чем один запуск отличается от другого — так процесс подписан в списках, вопросах и уведомлениях. Пусто — значения первых
+            двух входных переменных. Секретные значения в названии скрываются.
+          </span>
+        </label>
         {scenarioIssues.map((issue, i) => (
           <div key={i} className={`issue ${issue.severity}`} style={{ border: 0, padding: 0, cursor: "default" }}>
             <AlertTriangle size={14} /> {issue.message}
@@ -260,6 +269,13 @@ export function ScenarioInspector({ meta, issues, onChange }: { meta: Meta; issu
               <input type="checkbox" checked={variable.secret === true} onChange={(e) => updateVariable(index, { secret: e.target.checked }, "secret")} />
               Секретная (пароль)
             </label>
+            {variable.isInput && !variable.secret && (variable.type === "text" || variable.type === "any") && (
+              <label className="check small" title="При запуске рядом с полем — список профилей из AdsPower (имя, номер, группа)">
+                <input type="checkbox" checked={variable.lookup === "adspower-profiles"}
+                  onChange={(e) => updateVariable(index, { lookup: e.target.checked ? "adspower-profiles" : null }, "lookup")} />
+                При запуске выбирать профиль AdsPower
+              </label>
+            )}
           </div>
         ))}
       </div>

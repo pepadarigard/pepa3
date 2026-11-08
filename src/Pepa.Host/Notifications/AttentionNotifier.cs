@@ -402,12 +402,12 @@ public sealed class AttentionNotifier : IAsyncDisposable
             if (question is not null)
             {
                 text.AppendLine("Pepa: процесс задаёт вопрос.");
-                text.AppendLine($"«{p.ScenarioName}» (#{Short(p.Id)}): {Cut(question, 600)}");
+                text.AppendLine($"{Name(p)}: {Cut(question, 600)}");
             }
             else
             {
                 text.AppendLine("Pepa: процесс ждёт вашего решения.");
-                text.AppendLine($"«{p.ScenarioName}» (#{Short(p.Id)}) — {Title(p.Attention)}.");
+                text.AppendLine($"{Name(p)} — {Title(p.Attention)}.");
                 if (!string.IsNullOrWhiteSpace(p.StatusMessage))
                 {
                     text.AppendLine(Cut(p.StatusMessage, 600));
@@ -421,7 +421,7 @@ public sealed class AttentionNotifier : IAsyncDisposable
                 : $"Pepa: процессы ждут вашего решения и ответов (процессов — {processes}).");
             foreach (var (p, question) in notices.Take(MaxListed))
             {
-                text.AppendLine($"• «{p.ScenarioName}» (#{Short(p.Id)}) — " + (question is null ? Title(p.Attention) : "вопрос: " + Cut(question, 120)));
+                text.AppendLine($"• {Name(p)} — " + (question is null ? Title(p.Attention) : "вопрос: " + Cut(question, 120)));
             }
 
             if (notices.Count > MaxListed)
@@ -473,6 +473,10 @@ public sealed class AttentionNotifier : IAsyncDisposable
     };
 
     private static string Short(string id) => id.Length > 6 ? id[^6..] : id;
+
+    /// <summary>«Сценарий» · название запуска (#номер): по названию видно, какой аккаунт или профиль остановился (D-081).</summary>
+    private static string Name(ProcessRecord p) =>
+        $"«{p.ScenarioName}»{(p.Title is { Length: > 0 } title ? $" · {Cut(title, 80)}" : "")} (#{Short(p.Id)})";
 
     private static string Cut(string text, int max) => text.Length > max ? text[..max] + "…" : text;
 

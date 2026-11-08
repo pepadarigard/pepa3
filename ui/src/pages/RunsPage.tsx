@@ -53,6 +53,7 @@ export function RunsPage() {
                     <div className="stack" style={{ gap: 6, flex: 1, minWidth: 0 }}>
                       <div className="row wrap">
                         <a href={`#/process/${p.id}`} style={{ fontWeight: 620 }}>{p.scenarioName}</a>
+                        {p.title && <span className="small">{p.title}</span>}
                         <span className="faint mono small">#{p.shortId}</span>
                         <span className="faint small">· запущен {formatMoment(p.createdAt)}</span>
                       </div>

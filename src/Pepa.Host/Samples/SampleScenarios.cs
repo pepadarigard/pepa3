@@ -285,7 +285,7 @@ public static class SampleScenarios
                       "Профиль занят этим процессом — другой процесс с тем же профилем подождёт. Нужен запущенный AdsPower.",
         Variables =
         [
-            new VariableDefinition { Name = "profile", Type = VariableType.Text, Default = "", IsInput = true, Description = "ID профиля AdsPower" },
+            new VariableDefinition { Name = "profile", Type = VariableType.Text, Default = "", IsInput = true, Description = "ID профиля AdsPower", Lookup = "adspower-profiles" },
             new VariableDefinition { Name = "url", Type = VariableType.Text, Default = "https://example.com", IsInput = true, Description = "Адрес сайта" },
             new VariableDefinition { Name = "reply", Type = VariableType.Any, Description = "Полученный ответ" },
         ],
@@ -359,9 +359,10 @@ public static class SampleScenarios
         Name = "Пример 10. AdsPower + Telegram: сайт, сообщение и ответ",
         Description = "Открывает профиль AdsPower и сайт, делает снимок, пишет в Telegram и ждёт ответ со словом «готово» до 30 минут; " +
                       "затем закрывает профиль. Профиль занят этим процессом, ответ из чата получает только он. Нужны AdsPower и Telegram.",
+        RunTitle = "профиль {{ vars.profile }} · {{ vars.chat }}",
         Variables =
         [
-            new VariableDefinition { Name = "profile", Type = VariableType.Text, Default = "", IsInput = true, Description = "ID профиля AdsPower" },
+            new VariableDefinition { Name = "profile", Type = VariableType.Text, Default = "", IsInput = true, Description = "ID профиля AdsPower", Lookup = "adspower-profiles" },
             new VariableDefinition { Name = "url", Type = VariableType.Text, Default = "https://example.com", IsInput = true, Description = "Адрес сайта" },
             new VariableDefinition
             {

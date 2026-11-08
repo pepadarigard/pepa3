@@ -14,6 +14,14 @@ public sealed record ScenarioDefinition
     public string Id { get; init; } = "";
     public string Name { get; init; } = "";
     public string Description { get; init; } = "";
+
+    /// <summary>
+    /// Шаблон названия запуска: чем один процесс этого сценария отличается от другого («{{ vars.login }} · {{ vars.profile }}»).
+    /// Вычисляется один раз при запуске; секреты в нём скрываются. Пусто — значения первых двух несекретных входных
+    /// переменных (D-081).
+    /// </summary>
+    public string? RunTitle { get; init; }
+
     public IReadOnlyList<VariableDefinition> Variables { get; init; } = [];
     public IReadOnlyList<NodeDefinition> Nodes { get; init; } = [];
     public IReadOnlyList<EdgeDefinition> Edges { get; init; } = [];
@@ -86,6 +94,9 @@ public sealed record VariableDefinition
     /// параметрах шагов и пояснениях заменяется на «••••». Сама переменная хранит настоящее значение — оно нужно процессу.
     /// </summary>
     public bool Secret { get; init; }
+
+    /// <summary>Откуда выбрать значение при запуске («adspower-profiles» — список профилей AdsPower); null — ввести вручную.</summary>
+    public string? Lookup { get; init; }
 }
 
 /// <summary>Стандартные имена портов.</summary>

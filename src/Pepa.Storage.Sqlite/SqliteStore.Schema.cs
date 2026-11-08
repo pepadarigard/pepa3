@@ -223,5 +223,10 @@ public sealed partial class SqliteStore
         """
         CREATE INDEX ix_subscriptions_event ON subscriptions (event_id) WHERE event_id IS NOT NULL;
         """,
+        // 8: название запуска и входные данные без секретов (D-081).
+        """
+        ALTER TABLE processes ADD COLUMN title TEXT NULL;
+        ALTER TABLE processes ADD COLUMN inputs TEXT NULL;
+        """,
     ];
 }

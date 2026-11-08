@@ -26,7 +26,8 @@ export function HistoryPage({ scenarioId }: { scenarioId?: string }) {
     return (processes.data ?? []).filter(
       (p) =>
         (status === "all" || p.status === status) &&
-        (!q || p.scenarioName.toLowerCase().includes(q) || (p.statusMessage ?? "").toLowerCase().includes(q) || p.id.includes(q)),
+        (!q || p.scenarioName.toLowerCase().includes(q) || (p.title ?? "").toLowerCase().includes(q) ||
+          (p.statusMessage ?? "").toLowerCase().includes(q) || p.id.includes(q)),
     );
   }, [processes.data, status, query]);
 

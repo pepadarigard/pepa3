@@ -92,6 +92,7 @@ export function HomePage() {
                   <div className="stack" style={{ gap: 6, flex: 1, minWidth: 0 }}>
                     <div className="row">
                       <strong>{p.scenarioName}</strong>
+                      {p.title && <span className="small truncate">{p.title}</span>}
                       <span className="faint mono small">#{p.shortId}</span>
                     </div>
                     <div><strong>{explanation.title}.</strong> <span className="small">{explanation.text}</span></div>
@@ -138,7 +139,7 @@ export function HomePage() {
                 <div key={p.id} className="picker-item" onClick={() => navigate({ page: "process", id: p.id })}>
                   <ProcessStatusBadge status={p.status} />
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div className="truncate" style={{ fontWeight: 560 }}>{p.scenarioName}</div>
+                    <div className="truncate" style={{ fontWeight: 560 }}>{p.scenarioName}{p.title && <span className="muted"> · {p.title}</span>}</div>
                     <div className="small faint truncate">{explainProcess(p).title}</div>
                   </div>
                 </div>

@@ -82,7 +82,8 @@ internal sealed class ProcessMapper(ProcessEngine engine, IPepaStore store)
             engine.GetAllowedActions(process, tokens),
             waiting?.WaitKind ?? WaitKind.None,
             waiting is null || process.IsTerminal ? null : Mask(DescribeWait(process, waiting, subscriptions)),
-            process.ParentProcessId);
+            process.ParentProcessId,
+            Mask(process.Title));
     }
 
     private static string? DescribeWait(ProcessRecord process, TokenRecord token,
@@ -135,7 +136,7 @@ internal sealed class ProcessMapper(ProcessEngine engine, IPepaStore store)
         (subscription.CorrelationKey is { Length: > 0 } key ? $" с ключом «{key}»" : "");
 
     public static ProcessRefDto Ref(ProcessRecord process) =>
-        new(process.Id, ShortId(process.Id), process.ScenarioName, process.Status);
+        new(process.Id, ShortId(process.Id), process.ScenarioName, process.Status, process.Title);
 
     public static string ShortId(string id) => id.Length > 6 ? id[^6..] : id;
 

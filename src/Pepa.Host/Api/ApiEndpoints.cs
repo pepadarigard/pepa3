@@ -666,7 +666,8 @@ internal static class ApiEndpoints
                 }).ToList(),
                 held,
                 // Где сейчас ветви процесса (у параллельного участка их несколько).
-                tokens.Where(t => t.State != TokenState.Completed).Select(t => t.NodeId).Distinct().ToList()));
+                tokens.Where(t => t.State != TokenState.Completed).Select(t => t.NodeId).Distinct().ToList(),
+                RunInputs(process, masker)));
         });
 
         api.MapPost("/processes/{id}/pause", async (string id, ProcessEngine engine, CancellationToken ct) =>
@@ -1064,6 +1065,32 @@ internal static class ApiEndpoints
 
     private static AssistantStatusDto AssistantDto(string? key, Assistant.ScenarioAssistant assistant) =>
         new(key is not null, key is null ? null : AssistantKeyStore.Hint(key), assistant.Model);
+
+    /// <summary>
+    /// Входные данные запуска для «Запустить снова»: значение, в котором нашёлся секрет процесса (узнанный уже после
+    /// запуска), не отдаётся — его введут заново.
+    /// </summary>
+    private static System.Text.Json.Nodes.JsonObject? RunInputs(ProcessRecord process, SecretMasker masker)
+    {
+        if (process.Inputs is not { Count: > 0 } inputs)
+        {
+            return null;
+        }
+
+        var result = new System.Text.Json.Nodes.JsonObject();
+        foreach (var (name, value) in inputs)
+        {
+            var masked = value?.DeepClone();
+            if (masker.Values.Count > 0 && masked is not null && ProcessEngine.Redact(masked, masker.Values)?.ToJsonString() != masked.ToJsonString())
+            {
+                continue;
+            }
+
+            result[name] = masked;
+        }
+
+        return result.Count == 0 ? null : result;
+    }
 
     private static SettingsDto ToDto(SettingsService settings)
     {

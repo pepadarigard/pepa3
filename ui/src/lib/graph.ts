@@ -68,7 +68,7 @@ export function toFlowEdge(edge: EdgeDefinition): PepaEdge {
 }
 
 export function toDefinition(
-  meta: Pick<ScenarioDefinition, "id" | "name" | "description" | "variables" | "schemaVersion" | "editor">,
+  meta: Pick<ScenarioDefinition, "id" | "name" | "description" | "runTitle" | "variables" | "schemaVersion" | "editor">,
   nodes: PepaNode[],
   edges: PepaEdge[],
 ): ScenarioDefinition {

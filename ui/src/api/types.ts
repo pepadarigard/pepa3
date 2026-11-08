@@ -12,6 +12,8 @@ export interface VariableDefinition {
   isInput: boolean;
   /** Секретное значение (пароль): вводится скрыто, в истории процесса — «••••». */
   secret?: boolean;
+  /** Откуда выбрать значение при запуске: «adspower-profiles» — список профилей AdsPower. */
+  lookup?: string | null;
 }
 
 export interface NodeSettings {
@@ -44,6 +46,8 @@ export interface ScenarioDefinition {
   id: string;
   name: string;
   description: string;
+  /** Шаблон названия запуска («{{ vars.login }} · {{ vars.profile }}»); пусто — значения первых входных данных. */
+  runTitle?: string | null;
   variables: VariableDefinition[];
   nodes: NodeDefinition[];
   edges: EdgeDefinition[];
@@ -205,6 +209,8 @@ export interface ProcessSummary {
   waitKind: WaitKind;
   waitingFor: string | null;
   parentProcessId: string | null;
+  /** Название запуска: чем этот процесс отличается от других процессов того же сценария (без секретов). */
+  title?: string | null;
 }
 
 export type WaitKind = "none" | "timer" | "retry" | "event" | "resource";
@@ -214,6 +220,7 @@ export interface ProcessRef {
   shortId: string;
   scenarioName: string;
   status: ProcessStatus;
+  title?: string | null;
 }
 
 export type SubscriptionState = "active" | "fulfilled" | "expired" | "cancelled";
@@ -362,6 +369,8 @@ export interface ProcessDetails {
   heldResources: string[];
   /** Блоки, где сейчас ветви процесса (у параллельного участка их несколько). */
   activeNodeIds: string[];
+  /** Входные данные запуска без секретов — для «Запустить снова». */
+  runInputs?: Record<string, Json> | null;
 }
 
 export interface Overview {

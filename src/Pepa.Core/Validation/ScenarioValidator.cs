@@ -73,6 +73,10 @@ public sealed partial class ScenarioValidator(NodeRegistry registry, IExpression
         }
 
         var variables = ValidateVariables(scenario, Error, Warning);
+        if (!string.IsNullOrWhiteSpace(scenario.RunTitle) && expressions.CheckTemplate(scenario.RunTitle) is { } titleError)
+        {
+            Error("scenario.runTitle", $"Название запуска: {titleError}");
+        }
 
         // Блоки
         var nodes = new Dictionary<string, NodeDefinition>(StringComparer.Ordinal);
