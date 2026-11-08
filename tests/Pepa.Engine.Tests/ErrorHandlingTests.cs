@@ -31,7 +31,7 @@ public sealed class ErrorHandlingTests
         Assert.Equal(AttentionKind.StepFailed, process.Attention);
         Assert.Contains("Отказ внешней системы", process.StatusMessage);
         Assert.Equal(0, h.World.Executions("b"));
-        Assert.Equal([ProcessAction.Retry, ProcessAction.RetryWithChanges, ProcessAction.Skip, ProcessAction.Cancel],
+        Assert.Equal([ProcessAction.Retry, ProcessAction.RetryWithChanges, ProcessAction.RetryWithNewBlock, ProcessAction.Skip, ProcessAction.Cancel],
             h.Engine.GetAllowedActions(process, await h.Store.GetTokensAsync(id)));
         var journal = await h.Store.GetJournalAsync(id);
         Assert.Contains(journal, j => j.Level == JournalLevel.Error && j.Message.Contains("не выполнен"));

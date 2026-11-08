@@ -57,6 +57,19 @@ internal sealed class SqliteWrite(SqliteConnection connection, SqliteTransaction
                      $origin_key, $depth, $step_count, $step_budget, $created_at, $updated_at, $finished_at, $secrets, $title, $inputs);
                  """, c => BindProcess(c, process));
 
+    public async Task UpdateProcessDefinitionAsync(string processId, string definitionJson)
+    {
+        var changed = await RunAsync("UPDATE processes SET definition = $definition WHERE id = $id;", c =>
+        {
+            c.Parameters.AddWithValue("$id", processId);
+            c.Parameters.AddWithValue("$definition", definitionJson);
+        });
+        if (changed == 0)
+        {
+            throw new InvalidOperationException($"Процесс {processId} не найден в хранилище.");
+        }
+    }
+
     public async Task UpdateProcessAsync(ProcessRecord process)
     {
         var changed = await RunAsync("""

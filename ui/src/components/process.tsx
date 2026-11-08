@@ -1,4 +1,4 @@
-import { AlertTriangle, Ban, CheckCircle2, FastForward, Hourglass, Loader2, Pause, PencilLine, Play, RotateCcw, SearchCheck, SkipForward, Square, ThumbsDown, ThumbsUp, XCircle, type LucideIcon } from "lucide-react";
+import { AlertTriangle, Ban, CheckCircle2, FastForward, Hourglass, Loader2, Pause, PencilLine, Play, RotateCcw, SearchCheck, SkipForward, Square, ThumbsDown, ThumbsUp, Wrench, XCircle, type LucideIcon } from "lucide-react";
 import type { ProcessAction, ProcessStatus, ProcessSummary, ResumeAction, StepState } from "../api/types";
 import { useProcessControl } from "../api/hooks";
 import { ru } from "../i18n/ru";
@@ -47,6 +47,7 @@ const actionIcons: Record<ProcessAction, LucideIcon> = {
   skip: SkipForward,
   runWithoutPauses: FastForward,
   retryWithChanges: PencilLine,
+  retryWithNewBlock: Wrench,
 };
 
 /** Кнопки только для действий, разрешённых движком в текущем состоянии процесса. */
@@ -108,6 +109,8 @@ function confirmationFor(process: ProcessSummary, action: ProcessAction): string
       return ru.confirmations.markSucceeded;
     case "markFailed":
       return ru.confirmations.markFailed;
+    case "retryWithNewBlock":
+      return ru.confirmations.retryWithNewBlock;
     case "skip":
       return ru.confirmations.skip;
     default:
@@ -155,7 +158,7 @@ export function ProcessTable({ processes, showScenario = true, showActions = tru
               <td className="muted">{p.stepCount}</td>
               {showActions && (
                 <td style={{ textAlign: "right" }}>
-                  <ProcessActions process={p} size="small" exclude={["verify", "markSucceeded", "markFailed", "skip", "retry", "retryWithChanges"]} />
+                  <ProcessActions process={p} size="small" exclude={["verify", "markSucceeded", "markFailed", "skip", "retry", "retryWithChanges", "retryWithNewBlock"]} />
                 </td>
               )}
             </tr>

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { NodeTypeDescriptor, ProcessSummary } from "../api/types";
 import { nodeSummary } from "./graph";
-import { waitText } from "./status";
+import { attentionAdvice, waitText } from "./status";
 
 const base: ProcessSummary = {
   id: "p1234567890",
@@ -79,5 +79,20 @@ describe("nodeSummary для блоков событий и сценариев",
     const d = descriptor("scenario.call", "scenario", "scenario");
     expect(nodeSummary(node("scenario.call", { scenario: "abc" }), d, names)).toBe("Дочерний");
     expect(nodeSummary(node("scenario.call", { scenario: "zzz" }), d, names)).toBe("сценарий не найден");
+  });
+});
+
+describe("attentionAdvice после ошибки шага", () => {
+  const failed = { ...base, status: "needsAttention", attention: "stepFailed" } as ProcessSummary;
+
+  it("предлагает исправить данные или блок, только когда это доступно", () => {
+    const fixable = attentionAdvice({ ...failed, allowedActions: ["retry", "retryWithChanges", "retryWithNewBlock", "cancel"] });
+    expect(fixable).toContain("«Исправить и повторить»");
+    expect(fixable).toContain("«Взять блок из сценария»");
+
+    // Действие выполнилось, процессу некуда идти: исправления не предлагаются.
+    const ran = attentionAdvice({ ...failed, allowedActions: ["retry", "cancel"] });
+    expect(ran).not.toContain("Исправить");
+    expect(ran).toContain("выполнит действие снова");
   });
 });

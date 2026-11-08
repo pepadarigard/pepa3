@@ -80,6 +80,12 @@ public enum ResumeAction
     /// неизвестном итоге: действие точно не выполнилось, а то, что процесс уже сделал (сайт, сообщения), не повторяется.
     /// </summary>
     RetryWithChanges,
+
+    /// <summary>
+    /// Взять блок из сохранённого сценария и выполнить шаг ещё раз (D-085): настройку блока исправили в конструкторе — процесс
+    /// берёт только этот блок (схема и всё сделанное остаются). Только после подтверждённой ошибки, как и исправление данных.
+    /// </summary>
+    RetryWithNewBlock,
 }
 
 /// <summary>Действия, доступные над процессом. Интерфейс показывает только их.</summary>
@@ -95,6 +101,7 @@ public enum ProcessAction
     RunWithoutPauses,
     MarkFailed,
     RetryWithChanges,
+    RetryWithNewBlock,
 }
 
 public sealed record EngineChange(string ProcessId);

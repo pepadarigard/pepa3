@@ -60,6 +60,7 @@ public sealed class FaultInjectingStore(IPepaStore inner) : IPepaStore
         public Task<bool> DeleteScenarioAsync(string id) => inner.DeleteScenarioAsync(id);
         public Task InsertProcessAsync(ProcessRecord process) => inner.InsertProcessAsync(process);
         public Task UpdateProcessAsync(ProcessRecord process) => inner.UpdateProcessAsync(process);
+        public Task UpdateProcessDefinitionAsync(string processId, string definitionJson) => inner.UpdateProcessDefinitionAsync(processId, definitionJson);
         public Task UpsertTokenAsync(TokenRecord token) => inner.UpsertTokenAsync(token);
         public Task<IReadOnlyList<TokenRecord>> GetTokensAsync(string processId) => inner.GetTokensAsync(processId);
 

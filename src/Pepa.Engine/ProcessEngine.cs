@@ -358,6 +358,7 @@ public sealed partial class ProcessEngine : IAsyncDisposable
                 ResumeAction.Verify => await VerifyCoreAsync(process, tokens),
                 ResumeAction.Retry => await RetryCoreAsync(process, tokens),
                 ResumeAction.RetryWithChanges => await RetryCoreAsync(process, tokens, variables),
+                ResumeAction.RetryWithNewBlock => await RetryWithNewBlockAsync(process, tokens),
                 ResumeAction.MarkSucceeded => await ProceedCoreAsync(process, tokens, StepState.Succeeded),
                 ResumeAction.MarkFailed => await MarkFailedCoreAsync(process, tokens),
                 ResumeAction.Skip => await ProceedCoreAsync(process, tokens, StepState.Skipped),
@@ -420,6 +421,7 @@ public sealed partial class ProcessEngine : IAsyncDisposable
                 if (process.LastError?["actionRan"]?.GetValueKind() != System.Text.Json.JsonValueKind.True)
                 {
                     actions.Add(ProcessAction.RetryWithChanges);
+                    actions.Add(ProcessAction.RetryWithNewBlock);
                 }
                 if (singleSuccessPort)
                 {
@@ -507,6 +509,7 @@ public sealed partial class ProcessEngine : IAsyncDisposable
         ResumeAction.Skip => ProcessAction.Skip,
         ResumeAction.RunWithoutPauses => ProcessAction.RunWithoutPauses,
         ResumeAction.RetryWithChanges => ProcessAction.RetryWithChanges,
+        ResumeAction.RetryWithNewBlock => ProcessAction.RetryWithNewBlock,
         _ => throw new ArgumentOutOfRangeException(nameof(action)),
     };
 

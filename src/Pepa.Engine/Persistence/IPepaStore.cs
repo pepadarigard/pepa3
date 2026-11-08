@@ -82,6 +82,9 @@ public interface IStoreWrite : IAsyncDisposable
 
     Task InsertProcessAsync(ProcessRecord process);
     Task UpdateProcessAsync(ProcessRecord process);
+
+    /// <summary>Заменить сценарий, по которому идёт процесс (блок, взятый из сохранённого сценария, D-085).</summary>
+    Task UpdateProcessDefinitionAsync(string processId, string definitionJson);
     Task<ProcessRecord?> GetProcessByOriginAsync(string originKey);
     Task<ProcessRecord?> GetProcessAsync(string id);
     Task<IReadOnlyList<TokenRecord>> GetTokensAsync(string processId);

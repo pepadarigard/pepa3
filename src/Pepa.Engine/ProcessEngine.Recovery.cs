@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using Pepa.Core;
 using Pepa.Core.Model;
 using Pepa.Core.Nodes;
+using Pepa.Core.Serialization;
 using Pepa.Core.Validation;
 using Pepa.Engine.Persistence;
 
@@ -302,11 +303,19 @@ public sealed partial class ProcessEngine
             $"Пользователь отметил шаг {Label(node, executor.Descriptor)} невыполненным.");
     }
 
-    private async Task<ControlResult> RetryCoreAsync(ProcessRecord process, IReadOnlyList<TokenRecord> tokens, JsonObject? changes = null)
+    private async Task<ControlResult> RetryCoreAsync(ProcessRecord process, IReadOnlyList<TokenRecord> tokens, JsonObject? changes = null,
+        BlockReplacement? block = null)
     {
         // Исправления переменных — до повтора, в той же записи: шаг возьмёт новые значения.
         var (changed, changeNotes) = changes is null ? (process, []) : ApplyChanges(process, changes);
         process = changed;
+        if (block is not null)
+        {
+            process = process with { DefinitionJson = block.DefinitionJson };
+            changeNotes.Add(block.Note);
+        }
+
+        var fresh = changes is not null || block is not null;
         var step = process.AttentionStepId is { } stepId ? await _store.GetStepAsync(stepId) : null;
         // Повторяется шаг той ветви, что остановилась (у процесса с параллельными ветвями их несколько).
         var token = AttentionToken(process, tokens, step?.TokenId)
@@ -332,10 +341,14 @@ public sealed partial class ProcessEngine
             // то, что блок берёт из прошлой попытки (ключ от повтора у «Отправить HTTP-запрос»), относилось к другим данным.
             await write.UpsertTokenAsync(token with
             {
-                State = TokenState.Ready, Attempt = changes is null ? token.Attempt + 1 : 1, WaitKind = WaitKind.None, WakeAt = null,
+                State = TokenState.Ready, Attempt = fresh ? 1 : token.Attempt + 1, WaitKind = WaitKind.None, WakeAt = null,
                 WaitingStepId = null, WaitRef = null,
             });
             await write.UpdateProcessAsync(updated);
+            if (block is not null)
+            {
+                await write.UpdateProcessDefinitionAsync(process.Id, block.DefinitionJson);
+            }
             foreach (var note in changeNotes)
             {
                 await write.AddJournalAsync(Journal(process.Id, JournalLevel.Warning, note, step?.Id, token.NodeId));
@@ -345,9 +358,103 @@ public sealed partial class ProcessEngine
             await write.CommitAsync();
         }
 
+        if (block is not null)
+        {
+            // Процесс дальше идёт по сценарию с новым блоком (до этого — по запомненному прежнему).
+            _graphs[process.Id] = ParseGraph(block.DefinitionJson);
+        }
+
         AfterCommit(updated);
         await ApplyEffectsAsync(effects);
-        return new ControlResult(changeNotes.Count > 0 ? $"Переменные исправлены ({changeNotes.Count}). {message}" : message);
+        return new ControlResult(block is not null ? $"Блок взят из сохранённого сценария. {message}"
+            : changeNotes.Count > 0 ? $"Переменные исправлены ({changeNotes.Count}). {message}" : message);
+    }
+
+    /// <summary>Сценарий процесса с заменённым блоком и запись об этом для журнала.</summary>
+    private sealed record BlockReplacement(string DefinitionJson, string Note);
+
+    /// <summary>
+    /// «Взять блок из сохранённого сценария и повторить» (D-085): блок с ошибкой в настройке (селектор, адрес, текст) исправили
+    /// в конструкторе и сохранили. Процесс берёт из сохранённого сценария только этот блок — тот же блок (по номеру) того же
+    /// типа; схема, переменные и всё, что процесс уже сделал, остаются. Шаг выполняется снова с первой попытки.
+    /// </summary>
+    private async Task<ControlResult> RetryWithNewBlockAsync(ProcessRecord process, IReadOnlyList<TokenRecord> tokens)
+    {
+        var step = process.AttentionStepId is { } stepId ? await _store.GetStepAsync(stepId) : null;
+        var token = AttentionToken(process, tokens, step?.TokenId)
+                    ?? throw new EngineOperationException("У процесса нет точки, с которой можно продолжить.");
+        var graph = ExecutionGraph(process);
+        var current = graph.FindNode(token.NodeId)
+                      ?? throw new EngineOperationException("Блока, на котором остановился процесс, нет в его сценарии.");
+        var descriptor = _registry.FindDescriptor(current.Type);
+        var label = Label(current, descriptor);
+        var stored = await _store.GetScenarioAsync(process.ScenarioId)
+                     ?? throw new EngineOperationException("Сценарий процесса удалён — взять блок неоткуда.");
+        var saved = PepaJson.Deserialize<ScenarioDefinition>(stored.DefinitionJson);
+        var replacement = saved.Nodes.FirstOrDefault(n => n.Id == current.Id)
+                          ?? throw new EngineOperationException(
+                              $"В сохранённом сценарии нет блока {label}: его удалили или заменили другим. Взять можно только тот же блок.");
+        if (replacement.Type != current.Type)
+        {
+            throw new EngineOperationException($"В сохранённом сценарии на месте блока {label} блок другого типа — взять можно только тот же блок.");
+        }
+
+        var secrets = SecretValues(process, graph.Definition);
+        var differences = BlockDifferences(current, replacement, descriptor, secrets);
+        if (differences.Count == 0)
+        {
+            throw new EngineOperationException(
+                $"Блок {label} в сохранённом сценарии такой же, как в процессе. Исправьте его в конструкторе, сохраните сценарий и выберите это действие снова.");
+        }
+
+        var patched = graph.Definition with
+        {
+            Nodes = [.. graph.Definition.Nodes.Select(n => n.Id == current.Id ? replacement with { Position = n.Position } : n)],
+        };
+        var outgoing = patched.Edges.Where(e => e.Source == current.Id).Select(e => e.Id).ToHashSet(StringComparer.Ordinal);
+        var problems = _validator.Validate(patched).Issues
+            .Where(i => i.Severity == IssueSeverity.Error && (i.NodeId == current.Id || (i.EdgeId is { } edge && outgoing.Contains(edge))))
+            .Select(i => i.Message)
+            .ToList();
+        if (problems.Count > 0)
+        {
+            throw new EngineOperationException(
+                $"Блок {label} из сохранённого сценария с ошибкой: {string.Join(" ", problems)} Исправьте его в конструкторе и сохраните сценарий.");
+        }
+
+        var note = Redact($"Блок {label} взят из сохранённого сценария (версия {stored.Version}): {string.Join("; ", differences)}.", secrets)!;
+        return await RetryCoreAsync(process, tokens, block: new BlockReplacement(PepaJson.Serialize(patched), note));
+    }
+
+    /// <summary>Что изменилось в блоке: подпись, параметры (со значениями, без секретов), настройки повтора.</summary>
+    private static List<string> BlockDifferences(NodeDefinition before, NodeDefinition after, NodeTypeDescriptor? descriptor,
+        IReadOnlyList<string> secrets)
+    {
+        var result = new List<string>();
+        if ((before.Label ?? "") != (after.Label ?? ""))
+        {
+            result.Add($"подпись «{before.Label}» → «{after.Label}»");
+        }
+
+        foreach (var name in before.Config.Select(p => p.Key).Union(after.Config.Select(p => p.Key)).Distinct(StringComparer.Ordinal))
+        {
+            var old = before.Config[name];
+            var now = after.Config[name];
+            if (JsonNode.DeepEquals(old, now))
+            {
+                continue;
+            }
+
+            var title = descriptor?.Fields.FirstOrDefault(f => f.Name == name)?.Label ?? name;
+            result.Add($"«{title}»: {Preview(old, secrets)} → {Preview(now, secrets)}");
+        }
+
+        if (before.Settings != after.Settings)
+        {
+            result.Add("настройки повтора и тайм-аута");
+        }
+
+        return result;
     }
 
     /// <summary>

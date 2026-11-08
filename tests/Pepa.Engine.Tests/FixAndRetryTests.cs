@@ -176,4 +176,89 @@ public sealed class FixAndRetryTests
         Assert.DoesNotContain("Qw9z", fixedNote.Message);
         Assert.Contains(ProcessEngine.SecretMask, fixedNote.Message);
     }
+
+    [Fact]
+    public async Task Block_fixed_in_the_editor_is_taken_by_the_stopped_process_and_earlier_work_is_not_repeated()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        h.World.Plan("send-@ivn", ActionMode.Fail);
+        var definition = SiteThenSend();
+        var scenarioId = await h.CreateScenarioAsync(definition);
+        var id = await h.Engine.StartProcessAsync(scenarioId);
+        var stopped = await h.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
+        Assert.Contains(ProcessAction.RetryWithNewBlock, h.Engine.GetAllowedActions(stopped, await h.Store.GetTokensAsync(id)));
+
+        // Блок ещё не исправлен — отказ с подсказкой, процесс ждёт как был.
+        var same = await Assert.ThrowsAsync<EngineOperationException>(() => h.Engine.ResumeAsync(id, ResumeAction.RetryWithNewBlock));
+        Assert.Contains("такой же, как в процессе", same.Message);
+
+        // В конструкторе исправили сам блок (адрес отправки), а не данные.
+        var stored = (await h.Store.GetScenarioAsync(scenarioId))!;
+        var fixedDefinition = definition with
+        {
+            Nodes = [.. definition.Nodes.Select(n => n.Id == "send"
+                ? n with { Config = new JsonObject { ["key"] = "send-@ivan" }, Position = new NodePosition(500, 500) }
+                : n)],
+        };
+        await h.Scenarios.UpdateAsync(scenarioId, fixedDefinition, stored.Version);
+
+        var result = await h.Engine.ResumeAsync(id, ResumeAction.RetryWithNewBlock);
+        Assert.StartsWith("Блок взят из сохранённого сценария.", result.Message);
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Equal(1, h.World.Executions("site"));
+        Assert.Equal(1, h.World.EffectCount("send-@ivan"));
+        var journal = await h.Store.GetJournalAsync(id);
+        Assert.Contains(journal, j => j.Message.StartsWith("Блок «", StringComparison.Ordinal) &&
+                                      j.Message.Contains("взят из сохранённого сценария (версия 2)", StringComparison.Ordinal) &&
+                                      j.Message.Contains("«send-{{ vars.chat }}» → «send-@ivan»", StringComparison.Ordinal));
+        // Процесс помнит схему с новым блоком (и после перезапуска), но место блока на схеме — прежнее.
+        await h.RestartAsync();
+        var process = await h.ProcessAsync(id);
+        var node = Core.Serialization.PepaJson.Deserialize<ScenarioDefinition>(process.DefinitionJson).Nodes.Single(n => n.Id == "send");
+        Assert.Equal("send-@ivan", node.Config["key"]!.GetValue<string>());
+        Assert.NotEqual(new NodePosition(500, 500), node.Position);
+    }
+
+    [Fact]
+    public async Task Block_is_not_taken_when_it_was_removed_replaced_or_is_invalid()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        h.World.Plan("send-@ivn", ActionMode.Fail);
+        var definition = SiteThenSend();
+        var scenarioId = await h.CreateScenarioAsync(definition);
+        var id = await h.Engine.StartProcessAsync(scenarioId);
+        await h.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
+
+        async Task<string> RefusedWith(ScenarioDefinition saved)
+        {
+            var stored = (await h.Store.GetScenarioAsync(scenarioId))!;
+            await using (var write = await h.Store.BeginWriteAsync())
+            {
+                // Прямо в хранилище: сохранение через конструктор не пропустило бы неверный сценарий.
+                await write.SaveScenarioAsync(stored with { DefinitionJson = Core.Serialization.PepaJson.Serialize(saved), Version = stored.Version + 1 },
+                    stored.Version);
+                await write.CommitAsync();
+            }
+
+            return (await Assert.ThrowsAsync<EngineOperationException>(() => h.Engine.ResumeAsync(id, ResumeAction.RetryWithNewBlock))).Message;
+        }
+
+        var withoutBlock = definition with
+        {
+            Nodes = [.. definition.Nodes.Where(n => n.Id != "send")],
+            Edges = [.. definition.Edges.Where(e => e.Source != "send" && e.Target != "send")],
+        };
+        Assert.Contains("нет блока", await RefusedWith(withoutBlock));
+        Assert.Contains("другого типа", await RefusedWith(definition with
+        {
+            Nodes = [.. definition.Nodes.Select(n => n.Id == "send" ? n with { Type = "wait", Config = new JsonObject { ["amount"] = 1 } } : n)],
+        }));
+        Assert.Contains("с ошибкой", await RefusedWith(definition with
+        {
+            Nodes = [.. definition.Nodes.Select(n => n.Id == "send" ? n with { Config = new JsonObject { ["key"] = "{{ vars.chat " } } : n)],
+        }));
+        var process = await h.ProcessAsync(id);
+        Assert.Equal(ProcessStatus.NeedsAttention, process.Status);
+        Assert.Contains("send-{{ vars.chat }}", process.DefinitionJson);
+    }
 }
