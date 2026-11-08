@@ -682,11 +682,19 @@ public sealed partial class ProcessEngine
     /// <summary>Запись действий в окнах Windows держит мышь и клавиатуру.</summary>
     public const string RecordingHolder = ExternalHolderPrefix + "recording";
 
+    /// <summary>
+    /// Компьютер заблокирован (Win+L): мышь и клавиатура недоступны — блоки окон ждут разблокировки в очереди, а не падают с
+    /// «не удалось вывести окно на передний план» (D-086).
+    /// </summary>
+    public const string LockedHolder = ExternalHolderPrefix + "locked";
+
     public static bool IsExternalHolder(string? holder) => holder?.StartsWith(ExternalHolderPrefix, StringComparison.Ordinal) == true;
 
     /// <summary>Кем занят ресурс, если не процессом: «запись действий в окнах Windows»; null — процессом (или свободен).</summary>
     public static string? ExternalHolderTitle(string? holder) =>
-        holder == RecordingHolder ? "запись действий в окнах Windows" : IsExternalHolder(holder) ? "Pepa" : null;
+        holder == RecordingHolder ? "запись действий в окнах Windows"
+        : holder == LockedHolder ? "компьютер заблокирован"
+        : IsExternalHolder(holder) ? "Pepa" : null;
 
     /// <summary>
     /// Занять ресурс самой Pepa (не процессом): процессы, которым он нужен, ждут в очереди, как если бы его держал другой

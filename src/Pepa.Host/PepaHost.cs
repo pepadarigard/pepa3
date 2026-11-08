@@ -413,6 +413,18 @@ public sealed class PepaHost : IAsyncDisposable
         logger.LogInformation("Добавлены примеры сценариев: {Count}.", added);
     }
 
+    /// <summary>Сколько процессов работает или ждёт и сколько ждут решения (подсказка значка в области уведомлений).</summary>
+    public async Task<(int Active, int NeedsAttention)> CountsAsync()
+    {
+        var store = Services.GetRequiredService<IPepaStore>();
+        var processes = await store.ListProcessesAsync(new ProcessQuery
+        {
+            Statuses = [ProcessStatus.Running, ProcessStatus.Waiting, ProcessStatus.NeedsAttention],
+            Limit = 10_000,
+        });
+        return (processes.Count(p => p.Status != ProcessStatus.NeedsAttention), processes.Count(p => p.Status == ProcessStatus.NeedsAttention));
+    }
+
     /// <summary>Сколько процессов выполняется или ждёт (для предупреждения при закрытии окна).</summary>
     public async Task<int> CountActiveProcessesAsync()
     {

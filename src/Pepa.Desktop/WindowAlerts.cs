@@ -15,8 +15,13 @@ internal sealed class WindowAlerts : IDesktopAlerts
     private const uint FlashUntilForeground = 12;
 
     private Window? _window;
+    private TrayIcon? _tray;
 
-    public void Attach(Window window) => _window = window;
+    public void Attach(Window window, TrayIcon? tray = null)
+    {
+        _window = window;
+        _tray = tray;
+    }
 
     public void RequestAttention(string text)
     {
@@ -29,6 +34,13 @@ internal sealed class WindowAlerts : IDesktopAlerts
         {
             if (window.IsActive)
             {
+                return;
+            }
+
+            // Окно свёрнуто в область уведомлений: мигать нечему — всплывающее сообщение у значка.
+            if (!window.IsVisible)
+            {
+                _tray?.ShowBalloon("Pepa ждёт вашего решения", text);
                 return;
             }
 

@@ -20,14 +20,18 @@ public partial class MainWindow : Window
 {
     private const string WebViewDownloadUrl = "https://developer.microsoft.com/microsoft-edge/webview2/";
     private readonly PepaHost _host;
+    private readonly DesktopSettings _settings;
     private readonly bool _dark;
     private bool _closeConfirmed;
     private bool _stopped;
     private bool _shown;
+    private bool _exitRequested;
+    private bool _toldAboutTray;
 
-    public MainWindow(PepaHost host)
+    public MainWindow(PepaHost host, DesktopSettings settings)
     {
         _host = host;
+        _settings = settings;
         _dark = IsSystemDark();
         InitializeComponent();
         ApplyTheme();
@@ -81,6 +85,15 @@ public partial class MainWindow : Window
         return uri.StartsWith(origin, StringComparison.OrdinalIgnoreCase) ||
                uri.StartsWith("blob:" + origin, StringComparison.OrdinalIgnoreCase);
     }
+
+    /// <summary>Значок в области уведомлений (задаётся приложением).</summary>
+    public TrayIcon? Tray { get; set; }
+
+    /// <summary>
+    /// «Выйти из Pepa» (меню значка): закрыть совсем, с прежним предупреждением о работающих процессах. Окно, запущенное
+    /// свёрнутым, могло ни разу не показываться — выход не полагается на его закрытие.
+    /// </summary>
+    public async void ExitPepa() => await ExitAsync();
 
     /// <summary>Закрыть без вопросов (завершение сеанса Windows): движок остановится, остальное доделает восстановление.</summary>
     public void CloseForSessionEnd()
@@ -207,40 +220,98 @@ public partial class MainWindow : Window
         }
 
         e.Cancel = true;
-        int active;
-        try
+        // Крестик окна (а не «Выйти из Pepa»): по умолчанию — спросить один раз, свернуть ли в область уведомлений.
+        if (Tray is not null)
         {
-            active = await _host.CountActiveProcessesAsync();
-        }
-        catch
-        {
-            active = 0;
-        }
-
-        if (active > 0)
-        {
-            var answer = MessageBox.Show(this,
-                $"Сейчас работают или ждут процессы: {active}.\n\n" +
-                "При закрытии они будут приостановлены. После следующего запуска Pepa ничего не продолжит само — " +
-                "процессы нужно будет проверить и возобновить вручную.\n\nЗакрыть Pepa?",
-                "Pepa", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No);
-            if (answer != MessageBoxResult.Yes)
+            if (_settings.CloseAction == CloseAction.Ask)
             {
+                var choice = MessageBox.Show(this,
+                    "Свернуть Pepa в область уведомлений (рядом с часами)?\n\n" +
+                    "Да — окно скроется, а процессы продолжат работать и ждать ответы; расписания будут запускаться. Открыть Pepa — " +
+                    "двойной щелчок по значку.\nНет — закрыть Pepa (работающие процессы приостановятся).\n\n" +
+                    "Выбор запомнится; изменить его можно в меню значка Pepa.",
+                    "Pepa", MessageBoxButton.YesNoCancel, MessageBoxImage.Question, MessageBoxResult.Yes);
+                if (choice == MessageBoxResult.Cancel)
+                {
+                    return;
+                }
+
+                _settings.CloseAction = choice == MessageBoxResult.Yes ? CloseAction.Tray : CloseAction.Exit;
+                _settings.Save();
+                Tray.SetChecks(_settings.CloseAction == CloseAction.Tray, _settings.StartWithWindows);
+            }
+
+            if (_settings.CloseAction == CloseAction.Tray)
+            {
+                Hide();
+                if (!_toldAboutTray)
+                {
+                    _toldAboutTray = true;
+                    Tray.ShowBalloon("Pepa работает", "Окно свёрнуто в область уведомлений — процессы продолжаются. Открыть — двойной щелчок по значку.");
+                }
+
                 return;
             }
         }
 
-        _closeConfirmed = true;
-        _stopped = true;
-        Hide();
+        await ExitAsync();
+    }
+
+    /// <summary>Завершить Pepa: предупредить о работающих процессах, дождаться движка и закрыть приложение.</summary>
+    private async Task ExitAsync()
+    {
+        if (_exitRequested)
+        {
+            return;
+        }
+
+        _exitRequested = true;
         try
         {
-            // Дождаться завершения выполняющихся шагов и аккуратно остановить движок.
-            await _host.StopAsync();
+            int active;
+            try
+            {
+                active = await _host.CountActiveProcessesAsync();
+            }
+            catch
+            {
+                active = 0;
+            }
+
+            if (active > 0)
+            {
+                const string text = "При закрытии они будут приостановлены. После следующего запуска Pepa ничего не продолжит само — " +
+                                    "процессы нужно будет проверить и возобновить вручную.\n\nЗакрыть Pepa?";
+                var question = $"Сейчас работают или ждут процессы: {active}.\n\n{text}";
+                var answer = IsVisible
+                    ? MessageBox.Show(this, question, "Pepa", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No)
+                    : MessageBox.Show(question, "Pepa", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No);
+                if (answer != MessageBoxResult.Yes)
+                {
+                    return;
+                }
+            }
+
+            _closeConfirmed = true;
+            _stopped = true;
+            Hide();
+            try
+            {
+                // Дождаться завершения выполняющихся шагов и аккуратно остановить движок.
+                await _host.StopAsync();
+            }
+            finally
+            {
+                Close();
+                Application.Current.Shutdown(0);
+            }
         }
         finally
         {
-            Close();
+            if (!_closeConfirmed)
+            {
+                _exitRequested = false;
+            }
         }
     }
 
