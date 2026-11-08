@@ -93,8 +93,16 @@ public sealed class FailedTriggerApiTests
         var failed = (await f.GetAsync("/api/overview"))["failedTriggers"]!.AsArray().Single()!;
         Assert.Equal("Новый заказ", failed["name"]!.GetValue<string>());
         Assert.False(string.IsNullOrEmpty(failed["lastError"]!.GetValue<string>()));
-        var events = await f.GetAsync("/api/events?view=all");
-        var note = events.AsArray().Single(e => e!["id"]!.GetValue<long>() == eventId)!["note"]!.GetValue<string>();
+
+        // Сбой автозапуска записывается раньше, чем пометка у события (её ставит разбор события после запусков).
+        string? note;
+        while ((note = (await f.GetAsync("/api/events?view=all")).AsArray()
+                   .Single(e => e!["id"]!.GetValue<long>() == eventId)!["note"]?.GetValue<string>()) is null)
+        {
+            Assert.True(DateTime.UtcNow < deadline, "у события нет пометки о сбое автозапуска");
+            await Task.Delay(50, TestContext.Current.CancellationToken);
+        }
+
         Assert.StartsWith("Автозапуск не запустил процесс", note);
     }
 }
