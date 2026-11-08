@@ -355,6 +355,41 @@ async function main() {
     await page.locator(".snapshot-zoom").waitFor({ state: "detached" });
     await fetch(`${base}/api/processes/${shotRun.processId}/cancel`, { method: "POST", headers: { "X-Pepa-Token": token } });
 
+    step("Исправить и повторить: опечатка во входных данных");
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(path.join(workspace, "заказ.txt"), "A-17");
+    const fixScenario = await (await fetch(`${base}/api/scenarios`, {
+      method: "POST",
+      headers: { "X-Pepa-Token": token, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "E2E: прочитать заказ",
+        variables: [{ name: "file", type: "text", isInput: true }, { name: "text", type: "any" }],
+        nodes: [
+          { id: "start", type: "start", position: { x: 0, y: 0 } },
+          { id: "read", type: "file.read", position: { x: 260, y: 0 }, config: { path: "{{ vars.file }}", saveTo: "text" } },
+          { id: "end", type: "end", position: { x: 520, y: 0 }, config: { message: "заказ: {{ vars.text }}" } },
+        ],
+        edges: [
+          { id: "e1", source: "start", sourcePort: "out", target: "read" },
+          { id: "e2", source: "read", sourcePort: "out", target: "end" },
+        ],
+      }),
+    })).json();
+    const fixRun = await (await fetch(`${base}/api/scenarios/${fixScenario.id}/run`, {
+      method: "POST",
+      headers: { "X-Pepa-Token": token, "Content-Type": "application/json" },
+      body: JSON.stringify({ inputs: { file: "закз.txt" } }),
+    })).json();
+    await page.goto(`${base}/#/process/${fixRun.processId}`);
+    await page.getByRole("button", { name: "Исправить и повторить" }).first().click({ timeout: 15000 });
+    await page.getByRole("button", { name: "Взять блок из сценария" }).first().waitFor();
+    const fileField = page.locator('[data-testid="fix-variable"]', { hasText: "file" }).locator("input");
+    await fileField.fill("заказ.txt");
+    await page.getByRole("button", { name: "Исправить и выполнить шаг" }).click();
+    await page.locator(".badge", { hasText: "Завершён" }).first().waitFor({ timeout: 15000 });
+    await page.getByText("заказ: A-17").first().waitFor();
+    await page.getByText("Пользователь исправил переменную «file»: «закз.txt» → «заказ.txt».").first().waitFor();
+
     step("Спросить пользователя: вопрос на «Главной» и ответ кнопкой");
     const askScenario = await (await fetch(`${base}/api/scenarios`, {
       method: "POST",
