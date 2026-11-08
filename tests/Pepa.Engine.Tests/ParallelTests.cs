@@ -116,8 +116,7 @@ public sealed class ParallelTests
 
         // Ответ после завершения процесса никому не достаётся.
         var late = await h.Engine.PublishEventAsync(Reply("A-1", "поздно"));
-        await h.IdleAsync(TimeSpan.FromSeconds(2));
-        Assert.Equal(EventState.Unmatched, (await h.Store.GetEventAsync(late.EventId))!.State);
+        await h.WaitForEventAsync(late.EventId, EventState.Unmatched);
     }
 
     [Fact]

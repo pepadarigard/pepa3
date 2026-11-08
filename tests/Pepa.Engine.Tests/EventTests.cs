@@ -55,25 +55,8 @@ public sealed class EventTests
         return id;
     }
 
-    private static async Task<EventRecord> WaitEventStateAsync(EngineHarness h, long eventId, EventState state)
-    {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
-        while (true)
-        {
-            var record = await h.Store.GetEventAsync(eventId);
-            if (record?.State == state)
-            {
-                return record;
-            }
-
-            if (DateTime.UtcNow > deadline)
-            {
-                throw new TimeoutException($"Событие в состоянии {record?.State}, ожидалось {state}. {record?.Note}");
-            }
-
-            await Task.Delay(10);
-        }
-    }
+    private static Task<EventRecord> WaitEventStateAsync(EngineHarness h, long eventId, EventState state) =>
+        h.WaitForEventAsync(eventId, state);
 
     [Fact]
     public async Task Event_goes_only_to_the_process_with_matching_key()
@@ -185,6 +168,8 @@ public sealed class EventTests
         h.Engine.ConflictRaised += record => raised.Enqueue(record.Id);
         var published = await h.Engine.PublishEventAsync(Reply(null, payload: "ответ"));
         await WaitEventStateAsync(h, published.EventId, EventState.Conflict);
+        // Уведомление — после записи конфликта: ждать его, а не проверять в тот же миг.
+        await h.UntilAsync(() => !raised.IsEmpty, "уведомление о конфликте");
         Assert.Equal(published.EventId, Assert.Single(raised));
 
         // Срок вышел, пока событие ждёт решения: никто не уходит по тайм-ауту.

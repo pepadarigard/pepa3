@@ -149,6 +149,33 @@ public sealed class EngineHarness : IAsyncDisposable
     public Task<ProcessRecord> WaitForStatusAsync(string processId, ProcessStatus status, TimeSpan? advance = null) =>
         WaitForAsync(processId, p => p.Status == status, advance);
 
+    /// <summary>Ждёт условия (реальное время, часы не двигаются): движок работает в фоне, и на загруженной машине — не сразу.</summary>
+    public async Task UntilAsync(Func<Task<bool>> condition, string what, TimeSpan? timeout = null)
+    {
+        var deadline = DateTime.UtcNow + (timeout ?? WaitTimeout);
+        while (!await condition())
+        {
+            if (DateTime.UtcNow > deadline)
+            {
+                throw new TimeoutException($"Не дождались: {what}.");
+            }
+
+            await Task.Delay(10);
+        }
+    }
+
+    public Task UntilAsync(Func<bool> condition, string what, TimeSpan? timeout = null) =>
+        UntilAsync(() => Task.FromResult(condition()), what, timeout);
+
+    /// <summary>Ждёт, пока событие примет состояние (сопоставление идёт в фоне).</summary>
+    public async Task<EventRecord> WaitForEventAsync(long eventId, EventState state)
+    {
+        EventRecord? record = null;
+        await UntilAsync(async () => (record = await Store.GetEventAsync(eventId))?.State == state,
+            $"событие #{eventId} в состоянии {state} (сейчас {record?.State}: {record?.Note})");
+        return record!;
+    }
+
     /// <summary>Дать движку поработать некоторое реальное время, продвигая виртуальное.</summary>
     public async Task IdleAsync(TimeSpan virtualTime, int ticks = 20)
     {
