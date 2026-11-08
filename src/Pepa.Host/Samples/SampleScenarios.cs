@@ -357,8 +357,9 @@ public static class SampleScenarios
     public static ScenarioDefinition AdsPowerTelegram() => new()
     {
         Name = "Пример 10. AdsPower + Telegram: сайт, сообщение и ответ",
-        Description = "Открывает профиль AdsPower и сайт, делает снимок, пишет в Telegram и ждёт ответ со словом «готово» до 30 минут; " +
-                      "затем закрывает профиль. Профиль занят этим процессом, ответ из чата получает только он. Нужны AdsPower и Telegram.",
+        Description = "Открывает профиль AdsPower и сайт, делает снимок, пишет в Telegram и ждёт ответ до 30 минут. «Готово» — " +
+                      "закрывает профиль и завершает; «нет» — закрывает профиль и завершает с ошибкой; другой ответ — переспрашивает. " +
+                      "Профиль занят этим процессом, ответ из чата получает только он. Нужны AdsPower и Telegram.",
         RunTitle = "профиль {{ vars.profile }} · {{ vars.chat }}",
         Variables =
         [
@@ -382,24 +383,40 @@ public static class SampleScenarios
             N("send", "telegram.send", 1100, 120, new JsonObject
             {
                 ["chat"] = "{{ vars.chat }}",
-                ["text"] = "Профиль {{ vars.profile }}: открыта страница «{{ vars.title }}». Напишите «готово», когда можно закрывать.",
+                ["text"] = "Профиль {{ vars.profile }}: открыта страница «{{ vars.title }}». Напишите «готово», когда можно закрывать, " +
+                           "или «нет», если что-то не так.",
             }, "Написать"),
             N("wait", "telegram.wait", 1380, 120, new JsonObject
             {
                 ["chat"] = "{{ vars.chat }}",
-                ["contains"] = "готово",
-                ["match"] = "exact",
                 ["timeoutSeconds"] = 1800,
                 ["saveTo"] = "reply",
-            }, "Ждать «готово»"),
-            N("close", "browser.close", 1660, 40, new JsonObject { ["stopProfile"] = true }, "Закрыть профиль"),
-            N("done", "end", 1940, 40, new JsonObject { ["outcome"] = "success", ["message"] = "Ответ: {{ vars.reply.payload.text }}" }),
-            N("late", "end", 1660, 260, new JsonObject { ["outcome"] = "failure", ["message"] = "Ответ не пришёл за 30 минут. Профиль закроется сам." }, "Ответа нет"),
+            }, "Ждать ответ"),
+            N("choose", "choice", 1660, 120, new JsonObject
+            {
+                ["value"] = "{{ vars.reply.payload.text }}",
+                ["match"] = "exact",
+                ["option1"] = "готово",
+                ["option2"] = "нет; не готово; отмена",
+            }, "Что ответили"),
+            N("close", "browser.close", 1940, 20, new JsonObject { ["stopProfile"] = true }, "Закрыть профиль"),
+            N("done", "end", 2220, 20, new JsonObject { ["outcome"] = "success", ["message"] = "Ответ: {{ vars.reply.payload.text }}" }),
+            N("closeNo", "browser.close", 1940, 140, new JsonObject { ["stopProfile"] = true }, "Закрыть профиль"),
+            N("refused", "end", 2220, 140, new JsonObject { ["outcome"] = "failure", ["message"] = "Ответили «{{ vars.reply.payload.text }}». Профиль закрыт." }, "Ответили «нет»"),
+            N("again", "telegram.send", 1940, 260, new JsonObject
+            {
+                ["chat"] = "{{ vars.chat }}",
+                ["text"] = "Не понял ответ. Напишите «готово» или «нет».",
+            }, "Переспросить"),
+            N("late", "end", 1660, 380, new JsonObject { ["outcome"] = "failure", ["message"] = "Ответ не пришёл за 30 минут. Профиль закроется сам." }, "Ответа нет"),
         ],
         Edges =
         [
             E("start", "open"), E("open", "read"), E("read", "shot"), E("shot", "send"), E("send", "wait"),
-            E("wait", "close", Ports.Event), E("wait", "late", Ports.Timeout), E("close", "done"),
+            E("wait", "choose", Ports.Event), E("wait", "late", Ports.Timeout),
+            E("choose", "close", "v1"), E("close", "done"),
+            E("choose", "closeNo", "v2"), E("closeNo", "refused"),
+            E("choose", "again", "other"), E("again", "wait"),
         ],
     };
 

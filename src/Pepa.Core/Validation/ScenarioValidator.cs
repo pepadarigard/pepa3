@@ -153,6 +153,15 @@ public sealed partial class ScenarioValidator(NodeRegistry registry, IExpression
                 continue;
             }
 
+            if (sourceDescriptor?.FindOutput(edge.SourcePort) is { LabelField: { } labelField } labelled &&
+                string.IsNullOrWhiteSpace(nodes[edge.Source].Config.GetString(labelField)))
+            {
+                Error("edge.port.empty",
+                    $"Выход «{labelled.Label}» блока {Name(edge.Source)} подключён, но сам вариант не задан — заполните его или удалите связь.",
+                    edge.Source, edge.Id);
+                continue;
+            }
+
             if (descriptors.TryGetValue(edge.Target, out var targetDescriptor) && targetDescriptor.IsStart)
             {
                 Error("edge.into.start", "В блок «Начало» нельзя вести связь.", edge.Target, edge.Id);
@@ -177,6 +186,13 @@ public sealed partial class ScenarioValidator(NodeRegistry registry, IExpression
                 else if (count == 0 && port.Required)
                 {
                     Error("port.unconnected", $"Выход «{port.Label}» блока {Name(nodeId)} не подключён.", nodeId);
+                }
+                else if (count == 0 && port.LabelField is { } labelField && nodes[nodeId].Config.GetString(labelField) is { } option &&
+                         !string.IsNullOrWhiteSpace(option))
+                {
+                    Warning("port.option.unconnected",
+                        $"Вариант «{option.Trim()}» блока {Name(nodeId)} не подключён: если значение подойдёт к нему, процесс остановится.",
+                        nodeId);
                 }
             }
         }

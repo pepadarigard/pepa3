@@ -3,7 +3,7 @@ import { Handle, Position, type NodeProps } from "@xyflow/react";
 import type { NodeTypeDescriptor, StepState } from "../../api/types";
 import { useScenarios } from "../../api/hooks";
 import { categoryColor, NodeIcon } from "../../components/Icon";
-import { nodeSummary, type PepaNode } from "../../lib/graph";
+import { nodeSummary, portLabel, visibleOutputs, type PepaNode } from "../../lib/graph";
 
 export interface NodeRunState {
   state: StepState | "none";
@@ -39,7 +39,7 @@ export const NodeCard = memo(function NodeCard({ id, data, selected }: NodeProps
   const context = useContext(FlowContext);
   const definition = data.definition;
   const descriptor = context.descriptors.get(definition.type);
-  const outputs = descriptor?.outputs ?? [];
+  const outputs = visibleOutputs(descriptor?.outputs ?? [], definition.config);
   const errors = context.issues?.get(id) ?? 0;
   const run = context.states ? context.states.get(id) ?? { state: "none" as const, count: 0 } : undefined;
   const scenarioNames = useScenarioNames(descriptor?.fields.some((f) => f.kind === "scenario") ?? false);
@@ -83,7 +83,7 @@ export const NodeCard = memo(function NodeCard({ id, data, selected }: NodeProps
             {outputs.map((port) => (
               <div key={port.id} className={`pnode-port ${portClass(port.id, port.kind)}`}
                 title={port.kind === "optional" ? "Необязательный выход. Если он не подключён и процесс пойдёт сюда — процесс остановится с понятной причиной." : undefined}>
-                {port.label}
+                {portLabel(port, definition.config)}
                 <Handle type="source" position={Position.Right} id={port.id} className={`source port-${portClass(port.id, port.kind)}`} />
               </div>
             ))}

@@ -518,6 +518,16 @@ async function main() {
     if ((await mail.locator(".callout").allInnerTexts()).some((t) => t.includes("secret-app-pass"))) throw new Error("Пароль почты попал в сообщение");
     await page.screenshot({ path: path.join(shots, "13c-email.png") });
 
+    step("Выбор варианта: выходы подписаны вариантами (пример 10)");
+    const scenarioList = await (await fetch(`${base}/api/scenarios`, { headers: { "X-Pepa-Token": token } })).json();
+    const sample10 = scenarioList.find((s) => s.name.startsWith("Пример 10."));
+    await page.goto(`${base}/#/editor/${sample10.id}`);
+    const chooseNode = page.locator('.react-flow__node[data-id="choose"]');
+    await chooseNode.waitFor();
+    await chooseNode.locator(".pnode-port", { hasText: "готово" }).first().waitFor();
+    await chooseNode.locator(".pnode-port", { hasText: "Другое" }).waitFor();
+    await expectCount(chooseNode.locator(".pnode-port"), 3, "У «Выбора варианта» ожидались три выхода: два варианта и «Другое»");
+
     step("Параллельные ветви: пример 11");
     await page.goto(`${base}/#/scenarios`);
     const parallelCard = page.locator(".scenario-card", { hasText: "Пример 11. Параллельно" });

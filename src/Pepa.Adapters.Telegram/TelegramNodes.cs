@@ -430,24 +430,7 @@ public sealed class WaitTelegramNode(ITelegramGateway telegram) : INodeExecutor
     }
 
     /// <summary>Как сравниваются тексты: строчные, «ё» — «е», без знаков и смайлов по краям.</summary>
-    private static string Normalize(string text)
-    {
-        var lower = text.ToLowerInvariant().Replace('ё', 'е');
-        static bool IsWord(char c) => char.ToLowerInvariant(c) != char.ToUpperInvariant(c) || c is >= '0' and <= '9' or '_';
-        var start = 0;
-        var end = lower.Length;
-        while (start < end && !IsWord(lower[start]))
-        {
-            start++;
-        }
-
-        while (end > start && !IsWord(lower[end - 1]))
-        {
-            end--;
-        }
-
-        return lower[start..end];
-    }
+    private static string Normalize(string text) => Core.Text.TextMatching.Normalize(text);
 
     /// <summary>
     /// Значение условия; null — условия нет. Заданное в схеме, но получившееся пустым (переменная не заполнена), — ошибка:

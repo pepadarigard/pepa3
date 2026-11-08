@@ -97,6 +97,8 @@ export interface PortDescriptor {
   label: string;
   kind: PortKind;
   required: boolean;
+  /** Поле настроек блока, текст которого — подпись выхода; пустое поле — выхода нет (вариант не задан). */
+  labelField?: string | null;
 }
 
 export interface FieldDescriptor {

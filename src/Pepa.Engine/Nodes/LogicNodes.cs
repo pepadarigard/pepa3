@@ -14,6 +14,7 @@ public static class LogicNodes
         .Register(new StartNode())
         .Register(new EndNode())
         .Register(new ConditionNode())
+        .Register(new ChoiceNode())
         .Register(new SetVariableNode())
         .Register(new LogNode())
         .Register(new WaitNode())

@@ -27,7 +27,7 @@ import { useTriggersDialog } from "../../components/triggers";
 import { Badge, Button, Card, Empty, ErrorState, Loading } from "../../components/ui";
 import { formatMoment } from "../../lib/format";
 import { copyBlocks, loadClipboard, pasteBlocks, saveClipboard, type BlockClipboard } from "../../lib/clipboard";
-import { autoLayout, connect, createNode, newId, NODE_WIDTH, nodeSummary, toFlowEdge, type PepaEdge, type PepaNode } from "../../lib/graph";
+import { autoLayout, connect, createNode, newId, NODE_WIDTH, nodeSummary, portLabel, toFlowEdge, type PepaEdge, type PepaNode } from "../../lib/graph";
 import {
   addGroup, canvasView, groupIdOf, groupOfNode, isGroupNodeId, moveMembers, nextGroupTitle, pruneGroups, readGroups, writeGroups,
   type CanvasNode, type EditorGroup,
@@ -641,7 +641,11 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
               edge={selectedEdge}
               sourceTitle={titleOf(selectedEdge.source)}
               targetTitle={titleOf(selectedEdge.target)}
-              portLabel={descriptors.get(state.nodes.find((n) => n.id === selectedEdge.source)?.data.definition.type ?? "")?.outputs.find((p) => p.id === (selectedEdge.sourceHandle ?? "out"))?.label ?? selectedEdge.sourceHandle ?? "out"}
+              portLabel={(() => {
+                const source = state.nodes.find((n) => n.id === selectedEdge.source)?.data.definition;
+                const port = descriptors.get(source?.type ?? "")?.outputs.find((p) => p.id === (selectedEdge.sourceHandle ?? "out"));
+                return port ? portLabel(port, source?.config) : selectedEdge.sourceHandle ?? "out";
+              })()}
               onDelete={() => removeEdge(selectedEdge.id)}
             />
           ) : (

@@ -33,6 +33,12 @@ public enum PortKind
 public sealed record PortDescriptor(string Id, string Label, PortKind Kind = PortKind.Normal)
 {
     public bool Required => Kind == PortKind.Normal;
+
+    /// <summary>
+    /// Поле настроек блока, текст которого — подпись выхода (вариант «готово» у «Выбора варианта»). Пустое поле — выхода как
+    /// будто нет: в конструкторе он не показывается, а подключённая к нему связь — ошибка проверки.
+    /// </summary>
+    public string? LabelField { get; init; }
 }
 
 public enum FieldKind

@@ -11,7 +11,7 @@ import { Dialog, useFeedback } from "../components/feedback";
 import { Badge, Button, Card, Empty, ErrorState, Loading } from "../components/ui";
 import { ru } from "../i18n/ru";
 import { durationBetween, formatDateTime, formatMoment, preview, processLabel } from "../lib/format";
-import { toFlowEdges, toFlowNodes, type PepaEdge } from "../lib/graph";
+import { portLabel, toFlowEdges, toFlowNodes, type PepaEdge } from "../lib/graph";
 import { processReport } from "../lib/report";
 import { canvasView, isGroupNodeId, readGroups, type CanvasNode } from "../lib/groups";
 import { attentionAdvice, explainProcess, isActive, processTone, type Tone } from "../lib/status";
@@ -325,7 +325,10 @@ function StepDetails({ processId, step, descriptor, onClose }: { processId: stri
           <dt>Запланирован</dt><dd>{formatDateTime(step.plannedAt)}</dd>
           <dt>Начат</dt><dd>{formatDateTime(step.startedAt)}</dd>
           <dt>Завершён</dt><dd>{formatDateTime(step.finishedAt)}</dd>
-          {step.port && <><dt>Выход</dt><dd>{descriptor?.outputs.find((o) => o.id === step.port)?.label ?? step.port}</dd></>}
+          {step.port && <><dt>Выход</dt><dd>{(() => {
+            const port = descriptor?.outputs.find((o) => o.id === step.port);
+            return port ? portLabel(port, step.input ?? undefined) : step.port;
+          })()}</dd></>}
         </dl>
         {step.error && <div className="callout danger small"><CircleAlert size={16} className="callout-icon" /><span>{step.error}</span></div>}
         {step.resolution && <div className="callout info small"><Info size={16} className="callout-icon" /><span>{step.resolution}</span></div>}

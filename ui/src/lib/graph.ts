@@ -5,6 +5,7 @@ import type {
   Json,
   NodeDefinition,
   NodeTypeDescriptor,
+  PortDescriptor,
   ScenarioDefinition,
 } from "../api/types";
 
@@ -197,4 +198,23 @@ export function autoLayout(nodes: PepaNode[], edges: PepaEdge[], startId: string
 export function connect(edges: PepaEdge[], source: string, sourcePort: string, target: string): PepaEdge[] {
   const rest = edges.filter((e) => !(e.source === source && (e.sourceHandle ?? "out") === sourcePort));
   return [...rest, toFlowEdge({ id: newId("e"), source, sourcePort, target })];
+}
+
+/** Подпись выхода: текст варианта из настроек блока (у «Выбора варианта»), иначе — обычная подпись. */
+export function portLabel(port: PortDescriptor, config: Record<string, Json> | undefined): string {
+  const text = port.labelField ? config?.[port.labelField] : undefined;
+  if (typeof text === "string" && text.trim()) {
+    const label = text.trim();
+    return label.length > 28 ? `${label.slice(0, 27)}…` : label;
+  }
+  return port.label;
+}
+
+/** Выходы, которые есть у блока с такими настройками: выход незаданного варианта не показывается. */
+export function visibleOutputs(outputs: PortDescriptor[], config: Record<string, Json> | undefined): PortDescriptor[] {
+  return outputs.filter((port) => {
+    if (!port.labelField) return true;
+    const text = config?.[port.labelField];
+    return typeof text === "string" && text.trim() !== "";
+  });
 }
