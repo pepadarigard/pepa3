@@ -85,7 +85,15 @@ export function FixAndRetryDialog({ processId, onClose }: { processId: string; o
             <span className="faint">· {ru.variableTypes[variable.type]}</span>
             {changed.includes(variable) && <span className="faint">· изменено</span>}
           </span>
-          {variable.type === "boolean" && !concealed(variable) ? (
+          {variable.type === "boolean" && concealed(variable) ? (
+            // Скрытое значение «да/нет» — выбор, а не поле ввода: введённый текст стал бы «нет» независимо от написанного.
+            <select className="select" value={current[variable.name] === true ? "yes" : current[variable.name] === false ? "no" : ""}
+              onChange={(e) => setValues({ ...current, [variable.name]: e.target.value === "yes" ? true : e.target.value === "no" ? false : "" })}>
+              <option value="">без изменений (значение не показывается)</option>
+              <option value="yes">Да</option>
+              <option value="no">Нет</option>
+            </select>
+          ) : variable.type === "boolean" ? (
             <span className="check">
               <input type="checkbox" checked={current[variable.name] === true}
                 onChange={(e) => setValues({ ...current, [variable.name]: e.target.checked })} />

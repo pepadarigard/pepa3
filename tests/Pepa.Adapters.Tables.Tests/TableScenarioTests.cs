@@ -129,4 +129,28 @@ public sealed class TableScenarioTests
         Assert.Contains("2 строк", stopped.StatusMessage);
         Assert.Equal("Логин;Статус\r\nanna;1\r\nAnna;2\r\n", await File.ReadAllTextAsync(Path.Combine(root, "a.csv")));
     }
+
+    [Fact]
+    public async Task Row_not_found_by_a_typo_can_be_fixed_and_retried_because_nothing_was_written()
+    {
+        var (h, root) = await CreateAsync();
+        await using var _ = h;
+        await File.WriteAllTextAsync(Path.Combine(root, "a.csv"), "Логин;Статус\r\nanna;новый\r\n");
+        var id = await h.RunAsync(new ScenarioBuilder("Опечатка")
+            .Variable("login", VariableType.Text, "anan", isInput: true)
+            .Node("start", "start")
+            .Node("mark", "table.update", new { path = "a.csv", column = "Логин", value = "{{ vars.login }}", values = "({ Статус: 'готово' })" })
+            .Node("end", "end")
+            .Chain("start", "mark", "end")
+            .Build());
+
+        // «Не найдена» не подключена: остановка, но в таблицу ничего не записано — исправить данные и повторить можно.
+        var stopped = await h.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
+        Assert.Equal(AttentionKind.StepFailed, stopped.Attention);
+        Assert.Contains(ProcessAction.RetryWithChanges, h.Engine.GetAllowedActions(stopped, await h.Store.GetTokensAsync(id)));
+
+        await h.Engine.ResumeAsync(id, ResumeAction.RetryWithChanges, new JsonObject { ["login"] = "anna" });
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Equal("Логин;Статус\r\nanna;готово\r\n", await File.ReadAllTextAsync(Path.Combine(root, "a.csv")));
+    }
 }

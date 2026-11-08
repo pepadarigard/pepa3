@@ -63,7 +63,52 @@ public sealed class BrowserSession
         }
 
         context.Page += (_, opened) => WatchDialogs(opened);
+
+        // Своя вкладка в чужом профиле: процессу принадлежат только она и окна, открытые с неё (вход через всплывающее окно).
+        if (info.OwnTab)
+        {
+            _own = [];
+            Own(page);
+        }
     }
+
+    private readonly HashSet<IPage>? _own;
+    private string? _lostTabNotice;
+
+    private void Own(IPage page)
+    {
+        lock (_own!)
+        {
+            if (!_own.Add(page))
+            {
+                return;
+            }
+        }
+
+        page.Popup += (_, popup) => Own(popup);
+    }
+
+    /// <summary>Вкладка — процесса: в профиле, открытом Pepa, — любая; в чужом — своя и открытые с неё.</summary>
+    public bool IsOwn(IPage page)
+    {
+        if (_own is null)
+        {
+            return true;
+        }
+
+        lock (_own)
+        {
+            return _own.Contains(page);
+        }
+    }
+
+    /// <summary>Открытые вкладки, с которыми процесс может работать.</summary>
+    public IReadOnlyList<IPage> Pages() => Context.Pages.Where(p => !p.IsClosed && IsOwn(p)).ToList();
+
+    /// <summary>Вкладку процесса закрыли, пока Pepa была выключена: пояснение для первого шага после переподключения (один раз).</summary>
+    internal void NoteLostTab(string notice) => _lostTabNotice = notice;
+
+    public string? TakeLostTabNotice() => Interlocked.Exchange(ref _lostTabNotice, null);
 
     public string ProcessId { get; }
     public string Name { get; }
@@ -170,8 +215,11 @@ public sealed class BrowserSession
             return Page;
         }
 
-        Page = Context.Pages.LastOrDefault(p => !p.IsClosed)
-               ?? throw new BrowserSessionLostException($"Все вкладки браузера «{Name}» закрыты.");
+        Page = Pages().LastOrDefault()
+               ?? throw new BrowserSessionLostException(_own is null
+                   ? $"Все вкладки браузера «{Name}» закрыты."
+                   : $"Вкладки процесса в профиле AdsPower {Info.ProfileId} закрыты, а в других вкладках профиля (их открыл не процесс) " +
+                     "Pepa не работает.");
         return Page;
     }
 }
@@ -414,7 +462,8 @@ public sealed class BrowserSessions : IAsyncDisposable
     public async Task RememberPageAsync(BrowserSession session)
     {
         var page = session.Page;
-        if (session.Kind != BrowserKind.AdsPower || page == session.RememberedPage)
+        // Чужую вкладку (в профиле владельца) Pepa своей не запоминает.
+        if (session.Kind != BrowserKind.AdsPower || page == session.RememberedPage || !session.IsOwn(page))
         {
             return;
         }
@@ -541,8 +590,14 @@ public sealed class BrowserSessions : IAsyncDisposable
         try
         {
             var context = browser.Contexts.FirstOrDefault() ?? await browser.NewContextAsync();
-            var page = newTab ? await context.NewPageAsync() : await FindPageAsync(context, info);
-            return new BrowserSession(info.ProcessId, info.Name, BrowserKind.AdsPower, context, browser, page, info);
+            var (page, lost) = newTab ? (await context.NewPageAsync(), null) : await FindPageAsync(context, info);
+            var session = new BrowserSession(info.ProcessId, info.Name, BrowserKind.AdsPower, context, browser, page, info);
+            if (lost is not null)
+            {
+                session.NoteLostTab(lost);
+            }
+
+            return session;
         }
         catch
         {
@@ -553,12 +608,12 @@ public sealed class BrowserSessions : IAsyncDisposable
     }
 
     /// <summary>
-    /// Вкладка процесса после переподключения — запомненная. Её закрыли — шаг останавливается: другая вкладка не та страница,
-    /// на которой процесс остановился, и молча продолжать в ней нельзя. Запомненная вкладка забывается, поэтому повтор шага
-    /// продолжит как без неё: в последней вкладке профиля, открытого Pepa, или в новой вкладке чужого профиля (чужие вкладки
-    /// Pepa не берёт).
+    /// Вкладка процесса после переподключения — запомненная. Её закрыли — другая вкладка не та страница, на которой процесс
+    /// остановился, и молча продолжать в ней нельзя: Pepa открывает вместо неё новую пустую вкладку (она теперь вкладка
+    /// процесса) и возвращает пояснение — первый шаг после переподключения не выполняется, а сообщает его. Дальше процесс
+    /// работает только в новой вкладке: человек может открыть в ней нужную страницу и повторить шаг.
     /// </summary>
-    private async Task<IPage> FindPageAsync(IBrowserContext context, BrowserSessionInfo info)
+    private async Task<(IPage Page, string? Lost)> FindPageAsync(IBrowserContext context, BrowserSessionInfo info)
     {
         var open = context.Pages.Where(p => !p.IsClosed).ToList();
         if (info.TargetId is { } wanted)
@@ -567,19 +622,24 @@ public sealed class BrowserSessions : IAsyncDisposable
             {
                 if (await TargetIdAsync(candidate) == wanted)
                 {
-                    return candidate;
+                    return (candidate, null);
                 }
             }
 
             _logger.LogWarning("Вкладка процесса {Process} в профиле AdsPower {Profile} закрыта.", info.ProcessId, info.ProfileId);
-            SaveRegistry(info with { TargetId = null });
-            throw new BrowserSessionLostException(
+            var replacement = await context.NewPageAsync();
+            if (await TargetIdAsync(replacement) is { } replacementId)
+            {
+                SaveRegistry(info with { TargetId = replacementId });
+            }
+
+            return (replacement,
                 $"Вкладку, в которой работал процесс, в профиле AdsPower {info.ProfileId} закрыли — страница, на которой он " +
-                "остановился, потеряна, и в другой вкладке Pepa сама не продолжает. «Выполнить шаг ещё раз» продолжит " +
-                (info.OwnTab ? "в новой пустой вкладке." : "в последней открытой вкладке профиля."));
+                "остановился, потеряна, и в другой вкладке Pepa не продолжает. Pepa открыла вместо неё новую пустую вкладку: " +
+                "откройте в ней нужную страницу и выберите «Выполнить шаг ещё раз» — или остановите процесс.");
         }
 
-        return info.OwnTab || open.Count == 0 ? await context.NewPageAsync() : open[^1];
+        return (info.OwnTab || open.Count == 0 ? await context.NewPageAsync() : open[^1], null);
     }
 
     // ───────────── Поиск ─────────────

@@ -552,7 +552,11 @@ public sealed partial class ProcessEngine
         }
 
         var replacedSecrets = ReplacedSecretValues(process, graph.Definition, result);
-        result = CheckVariableTypes(result, graph.Definition, descriptor);
+        var checkedResult = CheckVariableTypes(result, graph.Definition, descriptor);
+        // Вызванный сценарий завершился, но его итог не подошёл по типу переменной: он уже отработал — это не «не выполнено».
+        result = result is NodeResult.Success && checkedResult is NodeResult.Failure rejected && node.Type == Nodes.CallScenarioNode.TypeName
+            ? rejected with { ActionRan = true }
+            : checkedResult;
         result = await ResolveIntentAsync(write, process, token, label, result, effects, now,
             ReferenceEquals(result, published) ? eventSecrets : null);
 
@@ -567,7 +571,7 @@ public sealed partial class ProcessEngine
                 // Снимок, который блок сделал для этого исхода («ничего не появилось»), остаётся у остановки.
                 Snapshot = routed.Snapshot,
                 // Действие блока уже выполнилось (или вызванный сценарий уже работал) — это не «не выполнено».
-                ActionRan = descriptor.Effect == NodeEffect.External || node.Type == Nodes.CallScenarioNode.TypeName,
+                ActionRan = (descriptor.Effect == NodeEffect.External && !optional.NothingDone) || node.Type == Nodes.CallScenarioNode.TypeName,
             };
         }
 

@@ -77,10 +77,10 @@ public sealed class SelectOptionNode(BrowserSessions sessions) : INodeExecutor
 
     public async ValueTask<VerificationResult> VerifyAsync(NodeExecutionContext context, CancellationToken cancellationToken)
     {
-        var page = await BrowserNodes.PageForVerifyAsync(sessions, context, cancellationToken);
+        var (page, unavailable) = await BrowserNodes.PageForVerifyAsync(sessions, context, cancellationToken);
         if (page is null)
         {
-            return VerificationResult.Inconclusive("браузер закрыт — проверить нечем");
+            return VerificationResult.Inconclusive(unavailable);
         }
 
         try
@@ -169,10 +169,10 @@ public sealed class CheckNode(BrowserSessions sessions) : INodeExecutor
 
     public async ValueTask<VerificationResult> VerifyAsync(NodeExecutionContext context, CancellationToken cancellationToken)
     {
-        var page = await BrowserNodes.PageForVerifyAsync(sessions, context, cancellationToken);
+        var (page, unavailable) = await BrowserNodes.PageForVerifyAsync(sessions, context, cancellationToken);
         if (page is null)
         {
-            return VerificationResult.Inconclusive("браузер закрыт — проверить нечем");
+            return VerificationResult.Inconclusive(unavailable);
         }
 
         try
@@ -328,10 +328,10 @@ public sealed class UploadFileNode(BrowserSessions sessions, IWorkspace workspac
 
     public async ValueTask<VerificationResult> VerifyAsync(NodeExecutionContext context, CancellationToken cancellationToken)
     {
-        var page = await BrowserNodes.PageForVerifyAsync(sessions, context, cancellationToken);
+        var (page, unavailable) = await BrowserNodes.PageForVerifyAsync(sessions, context, cancellationToken);
         if (page is null)
         {
-            return VerificationResult.Inconclusive("браузер закрыт — проверить нечем");
+            return VerificationResult.Inconclusive(unavailable);
         }
 
         try
@@ -395,7 +395,8 @@ public sealed class SwitchTabNode(BrowserSessions sessions) : INodeExecutor
             var deadline = DateTime.UtcNow + BrowserNodes.WaitSpan(context.Input);
             while (true)
             {
-                var pages = session.Context.Pages.Where(p => !p.IsClosed).ToList();
+                // В чужом профиле — только вкладки процесса (его и открытые с них), не вкладки владельца.
+                var pages = session.Pages();
                 var target = which switch
                 {
                     "first" => pages.FirstOrDefault(),

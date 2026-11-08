@@ -176,14 +176,48 @@ public sealed class AdsPowerTests
         await f.RestartAsync();
         await f.Ads!.OpenTabAsync("k2", "about:blank");
         await f.Ads.CloseTabsAsync("k2", "/form");
+        // Кто-то открыл в профиле ту же форму — это не страница процесса.
+        await f.Ads.OpenTabAsync("k2", f.Site.Url("/form"));
         f.H.Time.Advance(TimeSpan.FromSeconds(61));
         await f.H.Engine.ResumeAsync(id, ResumeAction.Continue);
 
         // В другой вкладке Pepa молча не продолжает: шаг остановлен с понятной причиной.
         var process = await f.H.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
         Assert.Contains("Вкладку, в которой работал процесс", process.StatusMessage);
+        Assert.Contains("новую пустую вкладку", process.StatusMessage);
         Assert.Equal(0, f.Site.Submits);
         Assert.True(f.Ads.IsOpen("k2"));
+
+        // И при повторе — тоже: шаг выполняется в новой вкладке процесса (там формы нет), а не в чужой с формой.
+        await f.H.Engine.ResumeAsync(id, ResumeAction.Retry);
+        var again = await f.H.WaitForAsync(id, p => p.Status == ProcessStatus.NeedsAttention && p.StatusMessage != process.StatusMessage);
+        Assert.DoesNotContain("Вкладку, в которой работал процесс", again.StatusMessage);
+        Assert.Equal(0, f.Site.Submits);
+    }
+
+    [Fact]
+    public async Task In_the_owners_profile_the_process_does_not_switch_to_a_tab_the_owner_opened()
+    {
+        TestBrowser.RequireCdpBrowser();
+        await using var f = await BrowserFixture.CreateAsync(withAdsPower: true);
+        await f.Ads!.OpenByOwnerAsync("k1");
+        var id = await f.H.RunAsync(new ScenarioBuilder("Своя вкладка")
+            .Node("start", "start")
+            .Node("open", "adspower.open", new { profileId = "k1", url = f.Site.Url("/form"), ifOpen = "tab" })
+            .Node("w", "wait", new { mode = "duration", amount = 60, unit = "seconds" })
+            .Node("tab", "browser.tab", new { which = "newest", waitSeconds = 1 })
+            .Node("switched", "end", new { message = "переключились" })
+            .Node("none", "end", new { message = "новой вкладки процесса нет" })
+            .Chain("start", "open", "w", "tab")
+            .Edge("tab", "switched", Ports.Out).Edge("tab", "none", Ports.Timeout)
+            .Build());
+        await f.H.WaitForAsync(id, p => p.Status == ProcessStatus.Waiting && p.StepCount >= 3);
+
+        // Владелец открыл в своём профиле ещё одну вкладку — она «новая», но не процесса.
+        await f.Ads.OpenTabAsync("k1", f.Site.Url("/second"));
+        f.H.Time.Advance(TimeSpan.FromSeconds(61));
+        var done = await f.H.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Equal("новой вкладки процесса нет", done.StatusMessage);
     }
 
     [Fact]

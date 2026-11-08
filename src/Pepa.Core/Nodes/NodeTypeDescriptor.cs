@@ -39,6 +39,13 @@ public sealed record PortDescriptor(string Id, string Label, PortKind Kind = Por
     /// будто нет: в конструкторе он не показывается, а подключённая к нему связь — ошибка проверки.
     /// </summary>
     public string? LabelField { get; init; }
+
+    /// <summary>
+    /// Блок, вышедший сюда, ничего не изменил (например, «Изменить строку» — «Не найдена»), хотя вообще он действует во внешнем
+    /// мире. Если этот необязательный выход не подключён, остановка — подтверждённое «не выполнено», и «Исправить и повторить»
+    /// предлагается (D-085).
+    /// </summary>
+    public bool NothingDone { get; init; }
 }
 
 public enum FieldKind

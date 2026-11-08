@@ -261,4 +261,33 @@ public sealed class FixAndRetryTests
         Assert.Equal(ProcessStatus.NeedsAttention, process.Status);
         Assert.Contains("send-{{ vars.chat }}", process.DefinitionJson);
     }
+
+    [Fact]
+    public async Task Not_offered_when_the_called_scenario_completed_but_its_result_did_not_fit_the_variable()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var childId = await h.CreateScenarioAsync(new ScenarioBuilder("Дочерний")
+            .Variable("profile", VariableType.Text, "", isInput: true)
+            .Node("start", "start")
+            .Node("act", Action, new { key = "child-act" })
+            .Node("end", "end")
+            .Chain("start", "act", "end")
+            .Build());
+        var parent = await h.RunAsync(new ScenarioBuilder("Родитель")
+            .Variable("profile", VariableType.Text, "p1")
+            .Variable("result", VariableType.Text, "")
+            .Node("start", "start")
+            .Node("call", "scenario.call", new { scenario = childId, inputs = "({ profile: vars.profile })", saveTo = "result" })
+            .Node("end", "end")
+            .Edge("start", "call").Edge("call", "end", Ports.Done)
+            .Build());
+
+        // Итог вызванного сценария — объект, а переменная — текст: шаг не принят, но вызванный уже всё сделал.
+        var stopped = await h.WaitForStatusAsync(parent, ProcessStatus.NeedsAttention);
+        Assert.Equal(AttentionKind.StepFailed, stopped.Attention);
+        Assert.Equal(1, h.World.EffectCount("child-act"));
+        var allowed = h.Engine.GetAllowedActions(stopped, await h.Store.GetTokensAsync(parent));
+        Assert.DoesNotContain(ProcessAction.RetryWithChanges, allowed);
+        Assert.DoesNotContain(ProcessAction.RetryWithNewBlock, allowed);
+    }
 }

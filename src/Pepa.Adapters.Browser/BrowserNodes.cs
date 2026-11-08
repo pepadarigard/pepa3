@@ -118,6 +118,12 @@ public static class BrowserNodes
             return NodeResult.Fail(ads.Message, retryable: ads.Retryable);
         }
 
+        // Вкладку процесса закрыли, пока Pepa была выключена: шаг не выполняется (Pepa открыла вместо неё пустую вкладку).
+        if (session.TakeLostTabNotice() is { } lostTab)
+        {
+            return NodeResult.Fail(lostTab, retryable: false);
+        }
+
         // Окно, которое сайт показал между шагами (по таймеру, при загрузке): этот шаг не выполняется — страница уже не та,
         // что ожидалась.
         if (session.TakeDialogs() is { Count: > 0 } earlier)
@@ -358,17 +364,30 @@ public static class BrowserNodes
         }
     }
 
-    /// <summary>Сессию для проверки результата: без переподключения (если её нет — проверить нечем).</summary>
-    internal static async Task<IPage?> PageForVerifyAsync(BrowserSessions sessions, NodeExecutionContext context, CancellationToken cancellationToken)
+    /// <summary>
+    /// Вкладка для проверки результата; null — проверить нечем, и почему. Вкладку процесса закрыли, пока Pepa была выключена, —
+    /// причина та же, что у шага: проверка не должна молча смотреть на другую вкладку.
+    /// </summary>
+    internal static async Task<(IPage? Page, string Unavailable)> PageForVerifyAsync(BrowserSessions sessions, NodeExecutionContext context,
+        CancellationToken cancellationToken)
     {
         try
         {
             var session = await sessions.GetAsync(context.ProcessId, SessionName(context), cancellationToken);
-            return session.CurrentPage();
+            if (session.TakeLostTabNotice() is { } lost)
+            {
+                return (null, lost);
+            }
+
+            return (session.CurrentPage(), "");
         }
-        catch (Exception ex) when (ex is BrowserSessionLostException or AdsPowerException)
+        catch (BrowserSessionLostException ex)
         {
-            return null;
+            return (null, $"проверить нечем: {ex.Message}");
+        }
+        catch (AdsPowerException ex)
+        {
+            return (null, $"не удалось спросить AdsPower: {ex.Message}");
         }
     }
 
@@ -678,10 +697,10 @@ public sealed class GotoNode(BrowserSessions sessions) : INodeExecutor
 
     public async ValueTask<VerificationResult> VerifyAsync(NodeExecutionContext context, CancellationToken cancellationToken)
     {
-        var page = await BrowserNodes.PageForVerifyAsync(sessions, context, cancellationToken);
+        var (page, unavailable) = await BrowserNodes.PageForVerifyAsync(sessions, context, cancellationToken);
         if (page is null)
         {
-            return VerificationResult.Inconclusive("браузер закрыт — проверить нечем");
+            return VerificationResult.Inconclusive(unavailable);
         }
 
         var target = BrowserNodes.NormalizeUrl(context.RequireString("url"));
@@ -781,10 +800,10 @@ public sealed class ClickNode(BrowserSessions sessions) : INodeExecutor
             return VerificationResult.NotSupported();
         }
 
-        var page = await BrowserNodes.PageForVerifyAsync(sessions, context, cancellationToken);
+        var (page, unavailable) = await BrowserNodes.PageForVerifyAsync(sessions, context, cancellationToken);
         if (page is null)
         {
-            return VerificationResult.Inconclusive("браузер закрыт — проверить нечем");
+            return VerificationResult.Inconclusive(unavailable);
         }
 
         return await page.Locator(expect).CountAsync() > 0
@@ -858,10 +877,10 @@ public sealed class FillNode(BrowserSessions sessions) : INodeExecutor
 
     public async ValueTask<VerificationResult> VerifyAsync(NodeExecutionContext context, CancellationToken cancellationToken)
     {
-        var page = await BrowserNodes.PageForVerifyAsync(sessions, context, cancellationToken);
+        var (page, unavailable) = await BrowserNodes.PageForVerifyAsync(sessions, context, cancellationToken);
         if (page is null)
         {
-            return VerificationResult.Inconclusive("браузер закрыт — проверить нечем");
+            return VerificationResult.Inconclusive(unavailable);
         }
 
         try

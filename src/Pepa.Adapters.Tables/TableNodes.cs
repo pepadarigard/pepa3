@@ -18,7 +18,7 @@ public static class TableNodes
         .Register(new UpdateRowNode(workspace));
 
     internal static readonly PortDescriptor Error = new(Ports.Error, "Ошибка", PortKind.Error);
-    internal static readonly PortDescriptor NotFound = new(Ports.False, "Не найдена", PortKind.Optional);
+    internal static readonly PortDescriptor NotFound = new(Ports.False, "Не найдена", PortKind.Optional) { NothingDone = true };
 
     internal static FieldDescriptor PathField => new()
     {
