@@ -670,7 +670,8 @@ internal static class ApiEndpoints
                 held,
                 // Где сейчас ветви процесса (у параллельного участка их несколько).
                 tokens.Where(t => t.State != TokenState.Completed).Select(t => t.NodeId).Distinct().ToList(),
-                RunInputs(process, masker)));
+                RunInputs(process, masker),
+                HiddenVariables(process, definition, masker)));
         });
 
         api.MapPost("/processes/{id}/pause", async (string id, ProcessEngine engine, CancellationToken ct) =>
@@ -1093,6 +1094,25 @@ internal static class ApiEndpoints
         }
 
         return result.Count == 0 ? null : result;
+    }
+
+    /// <summary>
+    /// Несекретные переменные, значение которых показано со скрытой частью: в «Исправить и повторить» их значение не
+    /// подставляется в поле — иначе вместо секрета записалась бы маска.
+    /// </summary>
+    private static List<string>? HiddenVariables(ProcessRecord process, ScenarioDefinition definition, SecretMasker masker)
+    {
+        if (masker.Values.Count == 0)
+        {
+            return null;
+        }
+
+        var hidden = definition.Variables
+            .Where(v => !v.Secret && process.Variables[v.Name] is { } value &&
+                        ProcessEngine.Redact(value.DeepClone(), masker.Values)?.ToJsonString() != value.ToJsonString())
+            .Select(v => v.Name)
+            .ToList();
+        return hidden.Count == 0 ? null : hidden;
     }
 
     private static SettingsDto ToDto(SettingsService settings)

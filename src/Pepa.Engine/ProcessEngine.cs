@@ -323,6 +323,11 @@ public sealed partial class ProcessEngine : IAsyncDisposable
             throw new EngineOperationException("Укажите, какие переменные исправить.");
         }
 
+        if (action != ResumeAction.RetryWithChanges && variables is not null)
+        {
+            throw new EngineOperationException("Исправления переменных принимаются только для «Исправить и повторить».");
+        }
+
         EnsureRunning();
         var slot = Slot(processId);
         if (slot.Faulted)
@@ -410,8 +415,12 @@ public sealed partial class ProcessEngine : IAsyncDisposable
                 break;
             case AttentionKind.StepFailed:
                 actions.Add(ProcessAction.Retry);
-                // Ошибка подтверждена — действие не выполнилось: можно исправить данные и повторить тот же шаг.
-                actions.Add(ProcessAction.RetryWithChanges);
+                // Ошибка подтверждена — действие не выполнилось: можно исправить данные и повторить тот же шаг. Не предлагается,
+                // если действие выполнилось и процессу просто некуда идти дальше.
+                if (process.LastError?["actionRan"]?.GetValueKind() != System.Text.Json.JsonValueKind.True)
+                {
+                    actions.Add(ProcessAction.RetryWithChanges);
+                }
                 if (singleSuccessPort)
                 {
                     actions.Add(ProcessAction.Skip);

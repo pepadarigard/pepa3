@@ -76,4 +76,104 @@ public sealed class FixAndRetryTests
         Assert.Equal(ProcessStatus.NeedsAttention, (await h2.ProcessAsync(failed)).Status);
         Assert.Equal("@ivn", (await h2.ProcessAsync(failed)).Variables["chat"]!.GetValue<string>());
     }
+
+    [Fact]
+    public async Task Fixed_retry_is_a_new_visit_of_the_step_and_variables_are_refused_for_other_actions()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        h.World.Plan("send-@ivn", ActionMode.Fail);
+        var id = await h.RunAsync(SiteThenSend());
+        await h.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
+        await Assert.ThrowsAsync<EngineOperationException>(() =>
+            h.Engine.ResumeAsync(id, ResumeAction.Retry, new JsonObject { ["chat"] = "@ivan" }));
+
+        await h.Engine.ResumeAsync(id, ResumeAction.RetryWithChanges, new JsonObject { ["chat"] = "@ivan" });
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        // Первая попытка с новыми данными: то, что блок берёт из прошлой попытки (ключ от повтора), к ней не относится.
+        var sends = (await h.StepsAsync(id)).Where(s => s.NodeId == "send").ToList();
+        Assert.Equal([1, 1], sends.Select(s => s.Attempt));
+    }
+
+    [Fact]
+    public async Task Not_offered_when_the_action_ran_and_there_is_nowhere_to_go()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var childId = await h.CreateScenarioAsync(new ScenarioBuilder("Дочерний")
+            .Variable("profile", VariableType.Text, "", isInput: true)
+            .Node("start", "start")
+            .Node("end", "end", new { outcome = "failure", message = "не вышло" })
+            .Chain("start", "end")
+            .Build());
+        var parent = await h.RunAsync(new ScenarioBuilder("Родитель")
+            .Variable("profile", VariableType.Text, "p1")
+            .Node("start", "start")
+            .Node("call", "scenario.call", new { scenario = childId, inputs = "({ profile: vars.profile })" })
+            .Node("end", "end")
+            .Edge("start", "call").Edge("call", "end", Ports.Done)
+            .Build());
+        var stopped = await h.WaitForStatusAsync(parent, ProcessStatus.NeedsAttention);
+        Assert.Equal(AttentionKind.StepFailed, stopped.Attention);
+        Assert.Contains("Вызванный сценарий завершился с ошибкой", stopped.StatusMessage);
+        // Вызванный сценарий работал: «с исправлениями» его шаги повторились бы.
+        var allowed = h.Engine.GetAllowedActions(stopped, await h.Store.GetTokensAsync(parent));
+        Assert.Contains(ProcessAction.Retry, allowed);
+        Assert.DoesNotContain(ProcessAction.RetryWithChanges, allowed);
+        await Assert.ThrowsAsync<EngineOperationException>(() =>
+            h.Engine.ResumeAsync(parent, ResumeAction.RetryWithChanges, new JsonObject { ["profile"] = "p2" }));
+    }
+
+    private static ScenarioDefinition Credentials() => new ScenarioBuilder("Учётка")
+        .Variable("password", VariableType.Text, "Qw9z-pass-old", secret: true)
+        .Variable("creds", VariableType.Any)
+        .Variable("note", VariableType.Text, "")
+        .Node("start", "start")
+        .Node("set", "variable.set", new { variable = "creds", value = "({ login: 'anna', password: vars.password })" })
+        .Node("send", Action, new { key = "login-{{ vars.creds.login }}" })
+        .Node("end", "end")
+        .Chain("start", "set", "send", "end")
+        .Build();
+
+    [Fact]
+    public async Task Value_that_holds_a_secret_is_not_taken_back_with_the_mask_and_its_new_value_stays_secret()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        h.World.Plan("login-anna", ActionMode.Fail);
+        var id = await h.RunAsync(Credentials());
+        await h.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
+
+        // Так значение видно в окне: пароль скрыт. Вернуть его маской значило бы записать «••••» вместо пароля.
+        var masked = new JsonObject { ["login"] = "anna.k", ["password"] = ProcessEngine.SecretMask };
+        var refused = await Assert.ThrowsAsync<EngineOperationException>(() =>
+            h.Engine.ResumeAsync(id, ResumeAction.RetryWithChanges, new JsonObject { ["creds"] = masked }));
+        Assert.Contains("Введите значение целиком", refused.Message);
+        Assert.Equal("Qw9z-pass-old", (await h.ProcessAsync(id)).Variables["creds"]!["password"]!.GetValue<string>());
+
+        await h.Engine.ResumeAsync(id, ResumeAction.RetryWithChanges,
+            new JsonObject { ["creds"] = new JsonObject { ["login"] = "anna.k", ["password"] = "Zx8y-pass-new" } });
+        var done = await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        var journal = await h.Store.GetJournalAsync(id);
+        Assert.Contains(journal, j => j.Message == "Пользователь исправил переменную «creds» (значение не показывается: в нём был секрет).");
+        Assert.All(journal, j => Assert.DoesNotContain("pass-", j.Message, StringComparison.Ordinal));
+        Assert.Contains("Zx8y-pass-new", done.Secrets!.All);
+        Assert.Contains("Qw9z-pass-old", done.Secrets.All);
+    }
+
+    [Fact]
+    public async Task Journal_hides_a_secret_entered_in_the_same_fix_and_a_secret_the_cut_would_split()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        h.World.Plan("login-anna", ActionMode.Fail);
+        var id = await h.RunAsync(Credentials());
+        await h.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
+
+        // Новый пароль и заметка с ним же — в одном исправлении; второй секрет (старый пароль) — на месте обрезки.
+        var note = "Server=db;Password=N3w-Pa55word;" + new string('x', 82) + "Qw9z-pass-old";
+        await h.Engine.ResumeAsync(id, ResumeAction.RetryWithChanges,
+            new JsonObject { ["password"] = "N3w-Pa55word", ["note"] = note });
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        var fixedNote = Assert.Single(await h.Store.GetJournalAsync(id), j => j.Message.StartsWith("Пользователь исправил переменную «note»", StringComparison.Ordinal));
+        Assert.DoesNotContain("N3w-Pa55word", fixedNote.Message);
+        Assert.DoesNotContain("Qw9z", fixedNote.Message);
+        Assert.Contains(ProcessEngine.SecretMask, fixedNote.Message);
+    }
 }

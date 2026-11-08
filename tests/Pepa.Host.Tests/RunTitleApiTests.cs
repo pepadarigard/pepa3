@@ -123,16 +123,20 @@ public sealed class FixAndRetryApiTests
             {
                 new { name = "file", type = "text", isInput = true },
                 new { name = "text", type = "any" },
+                new { name = "key", type = "text", @default = "k-Secret-99", secret = true },
+                new { name = "url", type = "text" },
             },
             nodes = new object[]
             {
                 new { id = "start", type = "start" },
+                new { id = "link", type = "variable.set", config = new { variable = "url", value = "'https://x.test/?k=' + vars.key" } },
                 new { id = "read", type = "file.read", config = new { path = "{{ vars.file }}", saveTo = "text" } },
                 new { id = "end", type = "end", config = new { message = "{{ vars.text }}" } },
             },
             edges = new object[]
             {
-                new { id = "a", source = "start", sourcePort = "out", target = "read" },
+                new { id = "a", source = "start", sourcePort = "out", target = "link" },
+                new { id = "l", source = "link", sourcePort = "out", target = "read" },
                 new { id = "b", source = "read", sourcePort = "out", target = "end" },
             },
         });
@@ -141,6 +145,8 @@ public sealed class FixAndRetryApiTests
         var id = run!["processId"]!.GetValue<string>();
         var stopped = await f.WaitForProcessAsync(id, p => HostFixture.Status(p) == "needsAttention");
         Assert.Contains("retryWithChanges", stopped["process"]!["allowedActions"]!.AsArray().Select(a => a!.GetValue<string>()));
+        // В адресе — секретный ключ: окно не подставит его значение (со скрытой частью) в поле.
+        Assert.Equal(["url"], stopped["hiddenVariables"]!.AsArray().Select(v => v!.GetValue<string>()));
 
         var (status, body) = await f.SendAsync(HttpMethod.Post, $"/api/processes/{id}/resume",
             new { action = "retryWithChanges", variables = new { file = "заказ.txt" } });

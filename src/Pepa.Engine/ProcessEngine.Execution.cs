@@ -566,6 +566,8 @@ public sealed partial class ProcessEngine
             {
                 // Снимок, который блок сделал для этого исхода («ничего не появилось»), остаётся у остановки.
                 Snapshot = routed.Snapshot,
+                // Действие блока уже выполнилось (или вызванный сценарий уже работал) — это не «не выполнено».
+                ActionRan = descriptor.Effect == NodeEffect.External || node.Type == Nodes.CallScenarioNode.TypeName,
             };
         }
 
@@ -950,6 +952,11 @@ public sealed partial class ProcessEngine
                         ["at"] = now.ToString("O"),
                     },
                 };
+                if (failure.ActionRan)
+                {
+                    p.LastError!["actionRan"] = true;
+                }
+
                 var maxAttempts = descriptor.SupportsRetry ? Math.Max(0, node.Settings.RetryCount) + 1 : 1;
                 var errorEdge = descriptor.FindOutput(Ports.Error) is not null ? graph.Next(node.Id, Ports.Error) : null;
                 if (failure.Retryable && token.Attempt < maxAttempts)

@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using Microsoft.Playwright;
 using Pepa.Core;
 using Pepa.Core.Model;
@@ -13,7 +14,7 @@ namespace Pepa.Adapters.Browser;
 /// «Ничего из этого» (не подключён — остановка со снимком страницы). Два исхода сразу — тоже остановка: непонятно, что
 /// случилось. Блок только читает страницу.
 /// </summary>
-public sealed class WaitAnyNode(BrowserSessions sessions) : INodeExecutor
+public sealed partial class WaitAnyNode(BrowserSessions sessions) : INodeExecutor
 {
     public const string TypeName = "browser.waitAny";
     public const int MaxOutcomes = 4;
@@ -64,7 +65,7 @@ public sealed class WaitAnyNode(BrowserSessions sessions) : INodeExecutor
                 new FieldDescriptor
                 {
                     Name = TargetField(i), Label = $"Исход {i}: что", Kind = FieldKind.Template,
-                    Placeholder = i switch { 1 => "#dashboard", 2 => "Неверный пароль", 3 => "iframe[src*=captcha]", _ => "/verify" },
+                    Placeholder = i switch { 1 => "#dashboard", 2 => ".error", 3 => "iframe[src*=captcha]", _ => "input[name=code]" },
                     Help = i == 1
                         ? "Элемент — селектор (#id, .класс, text=Выйти); адрес — часть адреса; текст — фраза (регистр и «ё» не важны). " +
                           "Указывайте то, что появляется после действия, а не то, что видно до него (иначе исход совпадёт сразу)."
@@ -118,18 +119,42 @@ public sealed class WaitAnyNode(BrowserSessions sessions) : INodeExecutor
             var wait = BrowserNodes.WaitSpan(context.Input);
             var deadline = DateTimeOffset.UtcNow + wait;
             IReadOnlyList<Outcome>? previous = null;
+            var glimpsed = new SortedDictionary<int, Outcome>();
+            var lastLook = false;
             IPage page = session.CurrentPage();
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                page = session.CurrentPage();
-                var seen = new List<Outcome>();
-                foreach (var outcome in outcomes)
+                try
                 {
-                    if (await SeenAsync(page, outcome))
+                    page = session.CurrentPage();
+                }
+                catch (BrowserSessionLostException lost)
+                {
+                    return NodeResult.Fail(lost.Message, retryable: false);
+                }
+
+                var seen = new List<Outcome>();
+                try
+                {
+                    foreach (var outcome in outcomes)
                     {
-                        seen.Add(outcome);
+                        if (await SeenAsync(page, outcome))
+                        {
+                            seen.Add(outcome);
+                        }
                     }
+                }
+                catch (PlaywrightException) when (page.IsClosed && !session.Closed)
+                {
+                    // Вкладка закрылась во время проверки (окно входа закрылось само) — смотрим заново на ту, что стала текущей.
+                    previous = null;
+                    continue;
+                }
+
+                foreach (var outcome in seen)
+                {
+                    glimpsed[outcome.Index] = outcome;
                 }
 
                 // Одно и то же два раза подряд: страница в переходе (адрес сменился, элемент мелькнул) не решает исход.
@@ -137,9 +162,9 @@ public sealed class WaitAnyNode(BrowserSessions sessions) : INodeExecutor
                 {
                     if (seen.Count > 1)
                     {
-                        return NodeResult.Fail(
-                            $"На странице сразу несколько исходов: {string.Join(", ", seen.Select(o => $"«{o.Name}»"))} — непонятно, что " +
-                            "случилось. Посмотрите на страницу (снимок ниже) и решите.", retryable: false);
+                        return await Stopped(
+                            $"На странице сразу несколько исходов: {Names(seen)} — непонятно, что случилось. Посмотрите на страницу " +
+                            "(снимок ниже) и решите.", page);
                     }
 
                     var hit = seen[0];
@@ -150,15 +175,43 @@ public sealed class WaitAnyNode(BrowserSessions sessions) : INodeExecutor
                 previous = seen;
                 if (DateTimeOffset.UtcNow >= deadline)
                 {
+                    // Исход, впервые замеченный на последней проверке, ещё не подтверждён — ему ещё одна проверка.
+                    if (seen.Count > 0 && !lastLook)
+                    {
+                        lastLook = true;
+                        await Task.Delay(PollInterval, cancellationToken);
+                        continue;
+                    }
+
+                    // Что-то появлялось, но так и не продержалось две проверки подряд: «ничего не появилось» было бы неправдой, а
+                    // ветка «Ничего из этого» могла бы повторить действие, которое уже сработало.
+                    if (glimpsed.Count > 0)
+                    {
+                        return await Stopped(
+                            $"За {wait.TotalSeconds:0} с исход не установился: {Names(glimpsed.Values)} появлялся, но страница ещё " +
+                            "менялась — непонятно, что случилось. Посмотрите на страницу (снимок ниже) и решите.", page);
+                    }
+
                     var output = Output(0, null, page.Url);
                     var none = NodeResult.Ok(Ports.Timeout, Updates(context, output), output,
-                        $"За {wait.TotalSeconds:0} с не появилось ни одного исхода ({string.Join(", ", outcomes.Select(o => $"«{o.Name}»"))}).");
-                    return await BrowserNodes.WithSnapshotAsync(none, sessions, context, page, cancellationToken);
+                        $"За {wait.TotalSeconds:0} с не появилось ни одного исхода ({Names(outcomes)}).");
+
+                    // Снимок нужен, только если «Ничего из этого» не подключён (это остановка); иначе он занял бы место снимков
+                    // настоящих ошибок процесса.
+                    return context.Graph?.Next(context.Node.Id, Ports.Timeout) is null
+                        ? await BrowserNodes.WithSnapshotAsync(none, sessions, context, page, cancellationToken)
+                        : none;
                 }
 
                 await Task.Delay(PollInterval, cancellationToken);
             }
+
+            // Снимок — той вкладки, на которую блок смотрел (она могла смениться за время ожидания).
+            async Task<NodeResult> Stopped(string error, IPage current) =>
+                await BrowserNodes.WithSnapshotAsync(NodeResult.Fail(error, retryable: false), sessions, context, current, cancellationToken);
         }, "ждать одно из");
+
+    private static string Names(IEnumerable<Outcome> outcomes) => string.Join(", ", outcomes.Select(o => $"«{o.Name}»"));
 
     /// <summary>Виден ли исход сейчас — без ожидания.</summary>
     private static async Task<bool> SeenAsync(IPage page, Outcome outcome)
@@ -170,8 +223,10 @@ public sealed class WaitAnyNode(BrowserSessions sessions) : INodeExecutor
             case "text":
                 try
                 {
+                    // Неразрывный пробел («не&nbsp;найден») и переносы строк на странице — обычные пробелы: фразу вводят или
+                    // копируют со страницы (при копировании неразрывный пробел становится обычным).
                     var text = await page.Locator("body").InnerTextAsync(new LocatorInnerTextOptions { Timeout = 2000 });
-                    return TextMatching.Matches(text, outcome.Target, TextMatching.Contains);
+                    return TextMatching.Matches(Spaces().Replace(text, " "), Spaces().Replace(outcome.Target, " "), TextMatching.Contains);
                 }
                 catch (TimeoutException)
                 {
@@ -180,9 +235,13 @@ public sealed class WaitAnyNode(BrowserSessions sessions) : INodeExecutor
                 }
 
             default:
-                return await page.Locator(outcome.Target).First.IsVisibleAsync();
+                // Любой видимый: первым совпадением бывает скрытый шаблон (мобильное меню, сообщение об ошибке другого поля).
+                return await page.Locator(outcome.Target).Filter(new LocatorFilterOptions { Visible = true }).First.IsVisibleAsync();
         }
     }
+
+    [GeneratedRegex(@"\s+")]
+    private static partial Regex Spaces();
 
     private static JsonObject Output(int index, string? name, string url) => new() { ["outcome"] = index, ["name"] = name, ["url"] = url };
 

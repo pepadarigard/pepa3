@@ -328,9 +328,11 @@ public sealed partial class ProcessEngine
                 await write.UpdateStepAsync(step with { Resolution = "Пользователь решил выполнить шаг ещё раз." });
             }
 
+            // С исправленными данными — новое посещение блока (первая попытка): прежние попытки окончательно не выполнены, а
+            // то, что блок берёт из прошлой попытки (ключ от повтора у «Отправить HTTP-запрос»), относилось к другим данным.
             await write.UpsertTokenAsync(token with
             {
-                State = TokenState.Ready, Attempt = token.Attempt + 1, WaitKind = WaitKind.None, WakeAt = null,
+                State = TokenState.Ready, Attempt = changes is null ? token.Attempt + 1 : 1, WaitKind = WaitKind.None, WakeAt = null,
                 WaitingStepId = null, WaitRef = null,
             });
             await write.UpdateProcessAsync(updated);
@@ -351,15 +353,18 @@ public sealed partial class ProcessEngine
     /// <summary>
     /// Новые значения переменных процесса (D-085): только объявленные в сценарии и своего типа. В журнал — что было и что
     /// стало; секретная переменная — только «изменена», её прежнее значение запоминается как секрет процесса, а в тексте
-    /// любого значения скрываются уже известные секреты.
+    /// любого значения скрываются секреты — и прежние, и введённые этим же исправлением. Переменная, в значении которой был
+    /// секрет, показывается пользователю пустой: введённое для неё значение — тоже секрет процесса, а значение со скрытой
+    /// частью («••••») не принимается — иначе вместо секрета записалась бы маска.
     /// </summary>
     private (ProcessRecord Process, List<string> Notes) ApplyChanges(ProcessRecord process, JsonObject changes)
     {
         var definition = ExecutionGraph(process).Definition;
-        var secrets = SecretValues(process, definition);
+        var known = SecretValues(process, definition);
         var variables = (JsonObject)process.Variables.DeepClone();
-        var notes = new List<string>();
+        var edits = new List<(string Name, JsonNode? Before, JsonNode? Value, bool Secret, bool HeldSecret)>();
         var replaced = new List<string>();
+        var entered = new List<string>();
         foreach (var (name, value) in changes)
         {
             var declared = definition.Variables.FirstOrDefault(v => v.Name == name)
@@ -375,28 +380,58 @@ public sealed partial class ProcessEngine
                 continue;
             }
 
-            if (declared.Secret)
+            var heldSecret = !declared.Secret && before is not null && known.Count > 0 &&
+                             Redact(before.DeepClone(), known)?.ToJsonString() != before.ToJsonString();
+            if (heldSecret && HasMask(value))
             {
-                Collect(before, replaced);
-                notes.Add($"Пользователь исправил секретную переменную «{name}» (значение не показывается).");
-            }
-            else
-            {
-                notes.Add(Redact($"Пользователь исправил переменную «{name}»: {Preview(before)} → {Preview(value)}.", secrets)!);
+                throw new EngineOperationException(
+                    $"В значении переменной «{name}» есть «{SecretMask}» — так показана скрытая часть прежнего значения (секрет). " +
+                    "Введите значение целиком.");
             }
 
+            if (declared.Secret || heldSecret)
+            {
+                Collect(before, replaced);
+            }
+
+            if (heldSecret)
+            {
+                Collect(value, entered);
+            }
+
+            edits.Add((name, before, value, declared.Secret, heldSecret));
             variables[name] = value?.DeepClone();
         }
 
-        if (notes.Count == 0)
+        if (edits.Count == 0)
         {
             throw new EngineOperationException("Значения не изменились — повторите шаг обычным «Выполнить шаг ещё раз».");
         }
 
-        return (process with { Variables = variables, Secrets = Remember(process.Secrets, replaced, []) }, notes);
+        var changed = process with { Variables = variables, Secrets = Remember(process.Secrets, replaced, entered) };
+        // Секреты после исправления: прежние и новые значения секретных переменных.
+        var secrets = SecretValues(changed, definition);
+        var notes = edits.Select(e => e switch
+            {
+                { Secret: true } => $"Пользователь исправил секретную переменную «{e.Name}» (значение не показывается).",
+                { HeldSecret: true } => $"Пользователь исправил переменную «{e.Name}» (значение не показывается: в нём был секрет).",
+                _ => Redact($"Пользователь исправил переменную «{e.Name}»: {Preview(e.Before, secrets)} → {Preview(e.Value, secrets)}.", secrets)!,
+            })
+            .ToList();
+        return (changed, notes);
     }
 
-    private static string Preview(JsonNode? value)
+    /// <summary>Есть ли в значении (в его строках) маска скрытого секрета.</summary>
+    private static bool HasMask(JsonNode? value) => value switch
+    {
+        JsonObject obj => obj.Any(p => HasMask(p.Value)),
+        JsonArray array => array.Any(HasMask),
+        JsonValue scalar when scalar.TryGetValue<string>(out var text) => text.Contains(SecretMask, StringComparison.Ordinal),
+        _ => false,
+    };
+
+    /// <summary>Значение для журнала: секреты скрываются до обрезки — иначе обрезанное начало секрета не узнать.</summary>
+    private static string Preview(JsonNode? value, IReadOnlyList<string> secrets)
     {
         var text = value switch
         {
@@ -404,6 +439,7 @@ public sealed partial class ProcessEngine
             JsonValue scalar when scalar.TryGetValue<string>(out var s) => $"«{s}»",
             _ => value.ToJsonString(),
         };
+        text = Redact(text, secrets)!;
         return text.Length > 120 ? text[..119] + "…" : text;
     }
 

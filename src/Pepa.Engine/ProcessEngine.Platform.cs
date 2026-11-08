@@ -335,7 +335,11 @@ public sealed partial class ProcessEngine
                         $"Вызванный сценарий завершён успешно (процесс #{record.CorrelationKey?[^6..]}).")
                     : NodeResult.Fail(
                         $"Вызванный сценарий завершился {(status == "cancelled" ? "остановкой" : "с ошибкой")}" +
-                        (string.IsNullOrWhiteSpace(childMessage) ? "." : $": {childMessage}"), retryable: false);
+                        (string.IsNullOrWhiteSpace(childMessage) ? "." : $": {childMessage}"), retryable: false) with
+                    {
+                        // Вызванный сценарий работал: его шаги повторять «с исправлениями» нельзя.
+                        ActionRan = true,
+                    };
             }
             else if (subscription.Purpose == SubscriptionPurpose.Question)
             {

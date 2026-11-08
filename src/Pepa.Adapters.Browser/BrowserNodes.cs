@@ -144,6 +144,13 @@ public static class BrowserNodes
             session.EndDialogs();
         }
 
+        // Процесс перешёл в другую вкладку (переключился или прежняя закрылась) — запомнить её для продолжения после
+        // перезапуска Pepa.
+        if (!session.Closed && session.Page != session.RememberedPage && !session.Page.IsClosed)
+        {
+            await sessions.RememberPageAsync(session);
+        }
+
         if (session.TakeDialogs() is { Count: > 0 } shown)
         {
             result = WithDialogs(result, shown, answer, what);
@@ -248,7 +255,8 @@ public static class BrowserNodes
     internal static async Task<NodeResult> WithSnapshotAsync(NodeResult result, BrowserSessions sessions, NodeExecutionContext context,
         IPage page, CancellationToken cancellationToken)
     {
-        if (sessions.Snapshots is not { } store || cancellationToken.IsCancellationRequested)
+        // Снимок уже есть (блок сделал его сам — например, той вкладки, на которую смотрел) — второй не нужен.
+        if (sessions.Snapshots is not { } store || cancellationToken.IsCancellationRequested || result.Snapshot is not null)
         {
             return result;
         }

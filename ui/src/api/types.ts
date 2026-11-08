@@ -373,6 +373,8 @@ export interface ProcessDetails {
   activeNodeIds: string[];
   /** Входные данные запуска без секретов — для «Запустить снова». */
   runInputs?: Record<string, Json> | null;
+  /** Несекретные переменные, в значении которых есть секрет процесса: показаны со скрытой частью. */
+  hiddenVariables?: string[] | null;
 }
 
 export interface Overview {

@@ -103,7 +103,9 @@ public sealed record ProcessDetailsDto(
     IReadOnlyList<string> HeldResources,
     IReadOnlyList<string> ActiveNodeIds,
     /// <summary>Входные данные запуска без секретов — для «Запустить снова».</summary>
-    JsonObject? RunInputs = null);
+    JsonObject? RunInputs = null,
+    /// <summary>Несекретные переменные, в значении которых есть секрет процесса (показаны со скрытой частью).</summary>
+    IReadOnlyList<string>? HiddenVariables = null);
 
 /// <summary>Краткая ссылка на процесс.</summary>
 public sealed record ProcessRefDto(string Id, string ShortId, string ScenarioName, ProcessStatus Status, string? Title = null);

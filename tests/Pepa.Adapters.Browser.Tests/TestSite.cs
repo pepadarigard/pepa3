@@ -100,16 +100,18 @@ internal sealed class TestSite : IDisposable
                 // Вход: по введённому значению сайт показывает один из исходов (или ничего, или два сразу).
                 "/login" => """
                            <!doctype html><html><head><title>Вход</title></head><body>
+                           <div class="cabinet" style="display:none">Шаблон кабинета (скрыт)</div>
                            <input id="user"><button id="enter" onclick="enter()">Войти</button><div id="out"></div>
                            <script>
                              function enter() {
                                const v = document.getElementById('user').value;
+                               // «late» — кабинет появляется перед самым концом ожидания (3 с).
                                setTimeout(() => {
                                  const out = document.getElementById('out');
-                                 if (v === 'ok' || v === 'both') { const d = document.createElement('div'); d.id = 'dashboard'; d.textContent = 'Кабинет'; out.appendChild(d); }
-                                 if (v === 'bad' || v === 'both') { const p = document.createElement('p'); p.textContent = 'Неверный ПАРОЛЬ, попробуйте ещё раз'; out.appendChild(p); }
+                                 if (v === 'ok' || v === 'both' || v === 'late') { const d = document.createElement('div'); d.id = 'dashboard'; d.className = 'cabinet'; d.textContent = 'Кабинет'; out.appendChild(d); }
+                                 if (v === 'bad' || v === 'both') { const p = document.createElement('p'); p.textContent = 'Неверный\u00a0ПАРОЛЬ, попробуйте ещё раз'; out.appendChild(p); }
                                  if (v === 'code') { history.pushState({}, '', '/login/verify'); }
-                               }, 400);
+                               }, v === 'late' ? 2800 : 400);
                              }
                            </script>
                            </body></html>

@@ -72,6 +72,9 @@ public sealed class BrowserSession
     public IBrowser? Browser { get; }
     public IPage Page { get; internal set; }
     public BrowserSessionInfo Info { get; internal set; }
+
+    /// <summary>Вкладка, которую Pepa запомнила как вкладку процесса (на диске).</summary>
+    internal IPage? RememberedPage { get; set; }
     public bool Closed { get; private set; }
 
     /// <summary>Окна отвечает человек (запись действий): Pepa их только видит.</summary>
@@ -410,13 +413,32 @@ public sealed class BrowserSessions : IAsyncDisposable
     /// </summary>
     public async Task RememberPageAsync(BrowserSession session)
     {
-        if (session.Kind != BrowserKind.AdsPower || await TargetIdAsync(session.Page) is not { } targetId || targetId == session.Info.TargetId)
+        var page = session.Page;
+        if (session.Kind != BrowserKind.AdsPower || page == session.RememberedPage)
+        {
+            return;
+        }
+
+        if (await TargetIdAsync(page) is not { } targetId)
+        {
+            return;
+        }
+
+        session.RememberedPage = page;
+        if (targetId == session.Info.TargetId)
         {
             return;
         }
 
         session.Info = session.Info with { TargetId = targetId };
-        SaveRegistry(session.Info);
+        lock (_registry)
+        {
+            // Сессию уже закрыли (запись удалена) — не возвращать её в список.
+            if (_registry.ContainsKey(Key(session.ProcessId, session.Name)))
+            {
+                SaveRegistry(session.Info);
+            }
+        }
     }
 
     /// <summary>Идентификатор вкладки в браузере (CDP); null — узнать не удалось.</summary>

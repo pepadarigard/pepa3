@@ -18,7 +18,9 @@ public sealed class BrowserWaitAnyTests
             .Node("enter", "browser.click", new { selector = "#enter" })
             .Node("any", "browser.waitAny", new
             {
-                name1 = "Кабинет", kind1 = "element", target1 = "#dashboard",
+                // Первое совпадение «.cabinet» на странице — скрытый шаблон: исход — любой видимый элемент.
+                name1 = "Кабинет", kind1 = "element", target1 = ".cabinet",
+                // На странице «Неверный&nbsp;ПАРОЛЬ» — неразрывный пробел не мешает.
                 name2 = "Неверный пароль", kind2 = "text", target2 = "неверный пароль",
                 name3 = "Запрос кода", kind3 = "url", target3 = "/verify",
                 waitSeconds = 3, saveTo = "result",
@@ -45,6 +47,18 @@ public sealed class BrowserWaitAnyTests
         Assert.Equal("пароль", (await f.H.WaitForStatusAsync(await f.H.RunAsync(Login(f, "bad")), ProcessStatus.Failed)).StatusMessage);
         Assert.Equal("код", (await f.H.WaitForStatusAsync(await f.H.RunAsync(Login(f, "code")), ProcessStatus.Completed)).StatusMessage);
         Assert.Equal("ничего", (await f.H.WaitForStatusAsync(await f.H.RunAsync(Login(f, "nobody")), ProcessStatus.Completed)).StatusMessage);
+
+        // «Ничего из этого» подключён — это не остановка: снимок страницы не нужен и не занимает место снимков ошибок.
+        Assert.Empty(f.Snapshots.Saved);
+    }
+
+    [Fact]
+    public async Task Outcome_that_appears_just_before_the_end_of_the_wait_is_taken()
+    {
+        TestBrowser.RequireBrowser();
+        await using var f = await BrowserFixture.CreateAsync();
+        var process = await f.H.WaitForStatusAsync(await f.H.RunAsync(Login(f, "late")), ProcessStatus.Completed);
+        Assert.Equal("кабинет: 1", process.StatusMessage);
     }
 
     [Fact]
