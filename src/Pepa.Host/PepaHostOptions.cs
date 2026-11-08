@@ -73,6 +73,9 @@ public sealed record PepaHostOptions
     /// не поддерживается). Для проверок.
     /// </summary>
     public Func<bool, bool>? KeepAwake { get; init; }
+
+    /// <summary>Таймер пробуждения компьютера; null — таймер Windows (на других системах не поддерживается). Для проверок.</summary>
+    public Power.IWakePlatform? WakePlatform { get; init; }
 }
 
 public static class HostPaths

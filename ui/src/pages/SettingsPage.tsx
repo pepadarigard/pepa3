@@ -153,7 +153,17 @@ export function SettingsPage() {
           <span className="field-help" style={{ marginTop: -6 }}>
             Только в Windows. Экран гаснет как обычно. Закрытая крышка ноутбука или «Сон» в меню «Пуск» компьютер всё равно усыпят —
             тогда после пробуждения Pepa сразу переподключит Telegram и почту, а тайм-ауты ожиданий подождут, пока придут сообщения,
-            пропущенные за время сна. Расписание компьютер не будит.
+            пропущенные за время сна.
+          </span>
+          <label className="row small" style={{ gap: 8 }}>
+            <input type="checkbox" checked={form.wakeForSchedule}
+              onChange={(e) => setForm({ ...form, wakeForSchedule: e.target.checked })} />
+            Будить спящий компьютер к запуску по расписанию и к сроку ожидания
+          </label>
+          <span className="field-help" style={{ marginTop: -6 }}>
+            Только в Windows, и только пока Pepa запущена (можно свёрнутой в область уведомлений). Pepa будит компьютер за пару минут
+            до срока, чтобы успели подключиться сеть, Telegram и почта. Нужно, чтобы в схеме питания Windows были разрешены таймеры
+            пробуждения (на батарее Windows их часто запрещает). Выключенный компьютер не включится.
           </span>
         </div>
       </Card>

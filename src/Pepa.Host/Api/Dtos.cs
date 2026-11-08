@@ -234,7 +234,9 @@ public sealed record OverviewDto(
 /// <param name="Supported">Запрет сна возможен (Windows).</param>
 /// <param name="KeepingAwake">Компьютер сейчас не уснёт по бездействию: процессы выполняются или ждут.</param>
 /// <param name="SleptFrom">Последний замеченный сон компьютера (с какого времени), если был с запуска Pepa.</param>
-public sealed record PowerDto(bool Supported, bool Enabled, bool KeepingAwake, DateTimeOffset? SleptFrom, DateTimeOffset? WokeAt);
+/// <param name="WakeAt">На когда Pepa завела пробуждение спящего компьютера (ближайший запуск по расписанию или срок).</param>
+public sealed record PowerDto(bool Supported, bool Enabled, bool KeepingAwake, DateTimeOffset? SleptFrom, DateTimeOffset? WokeAt,
+    bool WakeSupported = false, bool WakeEnabled = false, DateTimeOffset? WakeAt = null);
 
 public sealed record NodeTypesDto(IReadOnlyList<NodeCategory> Categories, IReadOnlyList<NodeTypeDescriptor> NodeTypes);
 
@@ -261,7 +263,9 @@ public sealed record SettingsDto(
     /// <summary>При сохранении: null — не менять.</summary>
     int? HistoryDays = null,
     /// <summary>При сохранении: null — не менять.</summary>
-    bool? KeepAwake = null);
+    bool? KeepAwake = null,
+    /// <summary>При сохранении: null — не менять.</summary>
+    bool? WakeForSchedule = null);
 
 public sealed record CheckResultDto(bool Ok, string Message);
 

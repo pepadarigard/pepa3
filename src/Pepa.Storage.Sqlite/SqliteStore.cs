@@ -434,6 +434,16 @@ public sealed partial class SqliteStore : IPepaStore
                    """,
             c => c.Parameters.AddWithValue("$now", Date(now)), r => r.GetString(0), cancellationToken);
 
+    public async Task<DateTimeOffset?> GetNextWakeAtAsync(CancellationToken cancellationToken = default)
+    {
+        // Даты хранятся строками одной длины в UTC — минимум строки и есть ближайший срок.
+        var rows = await QueryAsync(
+            "SELECT MIN(t.wake_at) FROM tokens t JOIN processes p ON p.id = t.process_id " +
+            "WHERE p.status IN ('Waiting', 'Running') AND t.state = 'Waiting' AND t.wake_at IS NOT NULL;",
+            null, r => r.IsDBNull(0) ? null : r.GetString(0), cancellationToken);
+        return rows is [{ } first] ? SqliteMapping.ParseDateText(first) : null;
+    }
+
     public async Task<IReadOnlyDictionary<string, ProcessRecord>> GetLatestProcessPerScenarioAsync(
         CancellationToken cancellationToken = default)
     {

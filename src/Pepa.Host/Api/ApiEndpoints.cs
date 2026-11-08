@@ -36,7 +36,7 @@ internal static class ApiEndpoints
         api.MapGet("/settings", (SettingsService settings) => ToDto(settings));
 
         api.MapPut("/settings", async (SettingsDto request, SettingsService settings, Adapters.FileSystem.FolderWatcher watcher,
-            Power.PowerKeeper keeper) =>
+            Power.PowerKeeper keeper, Power.WakeTimer waker) =>
         {
             var current = settings.Current;
             await settings.SaveAsync(new PlatformSettings
@@ -50,11 +50,13 @@ internal static class ApiEndpoints
                 NotifyTelegram = request.NotifyTelegram ?? current.NotifyTelegram,
                 HistoryDays = request.HistoryDays ?? current.HistoryDays,
                 KeepAwake = request.KeepAwake ?? current.KeepAwake,
+                WakeForSchedule = request.WakeForSchedule ?? current.WakeForSchedule,
                 FolderWatches = current.FolderWatches,
             });
             // Рабочая папка могла смениться — слежение за папками начинается в новой заново.
             watcher.Configure(settings.Current.FolderWatches);
             keeper.Refresh();
+            waker.Refresh();
             return ToDto(settings);
         });
 
@@ -310,7 +312,7 @@ internal static class ApiEndpoints
             }
         });
 
-        api.MapGet("/overview", async (IPepaStore store, ProcessMapper mapper, ProcessEngine engine, Power.PowerKeeper keeper,
+        api.MapGet("/overview", async (IPepaStore store, ProcessMapper mapper, ProcessEngine engine, Power.PowerKeeper keeper, Power.WakeTimer waker,
             SettingsService settings, CancellationToken ct) =>
         {
             var active = await store.ListProcessesAsync(new ProcessQuery { Statuses = ActiveStatuses, Limit = 500 }, ct);
@@ -336,7 +338,8 @@ internal static class ApiEndpoints
                 conflicts.Count,
                 triggers.Where(t => t.MissedRuns > 0).ToList(),
                 triggers.Where(t => t is { Enabled: true, NextRunAt: not null }).OrderBy(t => t.NextRunAt).Take(5).ToList(),
-                new PowerDto(keeper.Supported, settings.Current.KeepAwake, keeper.Active, engine.LastSleep?.From, engine.LastSleep?.To),
+                new PowerDto(keeper.Supported, settings.Current.KeepAwake, keeper.Active, engine.LastSleep?.From, engine.LastSleep?.To,
+                    waker.Supported, settings.Current.WakeForSchedule, waker.ArmedAt),
                 // Выключенный пользователем автозапуск ошибку не хранит (сохранение её снимает): здесь и разовые, которые
                 // движок выключил после единственного — неудачного — запуска.
                 triggers.Where(t => t.LastError is not null).ToList());
@@ -1120,7 +1123,7 @@ internal static class ApiEndpoints
         var current = settings.Current;
         return new SettingsDto(current.WorkspaceRoot, current.MaxParallelProcesses, current.StepBudget,
             current.ActionTimeoutSeconds, settings.RestartRequired, current.AdsPowerUrl, null, current.AdsPowerApiKey is not null,
-            current.NotifyTelegram, current.HistoryDays, current.KeepAwake);
+            current.NotifyTelegram, current.HistoryDays, current.KeepAwake, current.WakeForSchedule);
     }
 
     private static ScenarioDto ToDto(StoredScenario stored, ScenarioService scenarios)

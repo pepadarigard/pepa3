@@ -29,6 +29,9 @@ public sealed record PlatformSettings
     /// <summary>Не давать компьютеру засыпать по бездействию, пока процессы выполняются или ждут (D-080).</summary>
     public bool KeepAwake { get; init; } = true;
 
+    /// <summary>Будить спящий компьютер к запуску по расписанию и к сроку ожидания (D-087).</summary>
+    public bool WakeForSchedule { get; init; } = true;
+
     /// <summary>Сколько дней хранить завершённые процессы в истории; 0 — всегда.</summary>
     public int HistoryDays { get; init; } = 90;
 

@@ -194,6 +194,18 @@ public sealed class PepaHost : IAsyncDisposable
         builder.Services.AddSingleton(sp => new Power.PowerKeeper(
             async ct => (await store.ListProcessesAsync(new ProcessQuery { Statuses = [ProcessStatus.Running, ProcessStatus.Waiting], Limit = 1 }, ct)).Count > 0,
             () => settings.Current.KeepAwake, sp.GetRequiredService<ILogger<Power.PowerKeeper>>(), options.KeepAwake));
+        // Спящий компьютер будится к ближайшему запуску по расписанию или сроку ожидания (настройка «Будить компьютер»).
+        builder.Services.AddSingleton(sp => new Power.WakeTimer(
+            async ct =>
+            {
+                var schedule = (await store.ListTriggersAsync(null, ct))
+                    .Where(t => t is { Kind: TriggerKind.Schedule, Enabled: true, NextRunAt: not null })
+                    .Select(t => t.NextRunAt)
+                    .Min();
+                var wait = await store.GetNextWakeAtAsync(ct);
+                return schedule is null ? wait : wait is null || schedule < wait ? schedule : wait;
+            },
+            () => settings.Current.WakeForSchedule, sp.GetRequiredService<ILogger<Power.WakeTimer>>(), options.WakePlatform));
         builder.Services.AddSingleton(new AssistantKeyStore(store));
         // Помощнику — каталог блоков из того же реестра и два примера сценариев (как образец формата и стиля).
         builder.Services.AddSingleton(sp => new Assistant.ScenarioAssistant(registry, sp.GetRequiredService<ProcessEngine>().Validator,
@@ -275,6 +287,10 @@ public sealed class PepaHost : IAsyncDisposable
         var keeper = app.Services.GetRequiredService<Power.PowerKeeper>();
         engine.Changed += _ => keeper.Refresh();
         keeper.Changed += () => events.Publish("overview");
+        var waker = app.Services.GetRequiredService<Power.WakeTimer>();
+        engine.Changed += _ => waker.Refresh();
+        engine.TriggersChanged += waker.Refresh;
+        waker.Changed += () => events.Publish("overview");
 
         // То же для файлов, появившихся в отслеживаемых папках, пока Pepa была закрыта.
 

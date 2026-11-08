@@ -32,6 +32,7 @@ public sealed class HookStore(IPepaStore inner) : IPepaStore
     public Task<IReadOnlyList<StepRecord>> GetOpenStepsAsync(string p, CancellationToken c = default) => inner.GetOpenStepsAsync(p, c);
     public Task<IReadOnlyList<JournalEntry>> GetJournalAsync(string p, CancellationToken c = default) => inner.GetJournalAsync(p, c);
     public Task<IReadOnlyList<string>> GetRunnableProcessIdsAsync(DateTimeOffset n, CancellationToken c = default) => inner.GetRunnableProcessIdsAsync(n, c);
+    public Task<DateTimeOffset?> GetNextWakeAtAsync(CancellationToken c = default) => inner.GetNextWakeAtAsync(c);
     public Task<IReadOnlyDictionary<string, ProcessRecord>> GetLatestProcessPerScenarioAsync(CancellationToken c = default) => inner.GetLatestProcessPerScenarioAsync(c);
     public Task<EventRecord?> GetEventAsync(long id, CancellationToken c = default) => inner.GetEventAsync(id, c);
 

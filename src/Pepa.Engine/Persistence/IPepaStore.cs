@@ -44,6 +44,9 @@ public interface IPepaStore
     /// </summary>
     Task<IReadOnlyList<string>> GetRunnableProcessIdsAsync(DateTimeOffset now, CancellationToken cancellationToken = default);
 
+    /// <summary>Ближайший срок ожидания (пауза, повтор, тайм-аут) у ждущих и выполняющихся процессов; null — сроков нет.</summary>
+    Task<DateTimeOffset?> GetNextWakeAtAsync(CancellationToken cancellationToken = default);
+
     /// <summary>Последний запуск каждого сценария (для списка сценариев).</summary>
     Task<IReadOnlyDictionary<string, ProcessRecord>> GetLatestProcessPerScenarioAsync(CancellationToken cancellationToken = default);
 

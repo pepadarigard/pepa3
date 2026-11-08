@@ -63,6 +63,8 @@ public sealed class HostFixture : IAsyncDisposable
         Elevated = false,
         // Запрет сна — не настоящий: проверки не трогают схему питания компьютера, где они идут.
         KeepAwake = static _ => true,
+        // Пробуждение — тоже не настоящее: проверки не заводят таймеры пробуждения на компьютере, где они идут.
+        WakePlatform = new FakeWakePlatform(),
     };
 
     /// <param name="whileStopped">Что сделать, пока Pepa закрыта (например, заменить базу копией).</param>

@@ -35,6 +35,7 @@ public sealed class FaultInjectingStore(IPepaStore inner) : IPepaStore
     public Task<IReadOnlyList<StepRecord>> GetOpenStepsAsync(string processId, CancellationToken cancellationToken = default) => inner.GetOpenStepsAsync(processId, cancellationToken);
     public Task<IReadOnlyList<JournalEntry>> GetJournalAsync(string processId, CancellationToken cancellationToken = default) => inner.GetJournalAsync(processId, cancellationToken);
     public Task<IReadOnlyList<string>> GetRunnableProcessIdsAsync(DateTimeOffset now, CancellationToken cancellationToken = default) => inner.GetRunnableProcessIdsAsync(now, cancellationToken);
+    public Task<DateTimeOffset?> GetNextWakeAtAsync(CancellationToken cancellationToken = default) => inner.GetNextWakeAtAsync(cancellationToken);
     public Task<IReadOnlyDictionary<string, ProcessRecord>> GetLatestProcessPerScenarioAsync(CancellationToken cancellationToken = default) => inner.GetLatestProcessPerScenarioAsync(cancellationToken);
     public Task<IReadOnlyDictionary<string, string>> GetSettingsAsync(CancellationToken cancellationToken = default) => inner.GetSettingsAsync(cancellationToken);
     public Task<IReadOnlyList<ProcessRecord>> GetChildProcessesAsync(string parentProcessId, CancellationToken cancellationToken = default) => inner.GetChildProcessesAsync(parentProcessId, cancellationToken);

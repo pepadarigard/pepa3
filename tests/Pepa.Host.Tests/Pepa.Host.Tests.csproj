@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
     <ProjectReference Include="..\..\src\Pepa.Host\Pepa.Host.csproj" />
+    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
     <!-- Пример расширения: не ссылка (тесты загружают его как расширение), а сборка рядом в sample-plugin\. -->
     <ProjectReference Include="..\..\samples\Pepa.Plugins.Sample\Pepa.Plugins.Sample.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>

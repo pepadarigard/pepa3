@@ -406,6 +406,11 @@ export interface PowerState {
   keepingAwake: boolean;
   sleptFrom: string | null;
   wokeAt: string | null;
+  /** Будить спящий компьютер можно (Windows). */
+  wakeSupported?: boolean;
+  wakeEnabled?: boolean;
+  /** На когда заведено пробуждение компьютера: ближайший запуск по расписанию или срок ожидания. */
+  wakeAt?: string | null;
 }
 
 export interface Info {
@@ -441,6 +446,8 @@ export interface Settings {
   historyDays: number;
   /** Не давать компьютеру засыпать, пока процессы выполняются или ждут. */
   keepAwake: boolean;
+  /** Будить спящий компьютер к запуску по расписанию и к сроку ожидания. */
+  wakeForSchedule: boolean;
 }
 
 export type TelegramState =

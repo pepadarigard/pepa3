@@ -1,4 +1,4 @@
-import { AlertTriangle, CalendarClock, CheckCircle2, Coffee, FolderOpen, Hourglass, Loader2, Moon, Play, Plus, RotateCcw, Workflow } from "lucide-react";
+import { AlarmClock, AlertTriangle, CalendarClock, CheckCircle2, Coffee, FolderOpen, Hourglass, Loader2, Moon, Play, Plus, RotateCcw, Workflow } from "lucide-react";
 import { useInfo, useOverview, useScenarios } from "../api/hooks";
 import type { PowerState } from "../api/types";
 import { ProcessActions, ProcessStatusBadge, ProcessTable } from "../components/process";
@@ -220,12 +220,19 @@ function Stat({ icon: Icon, tone, value, label, onClick }: { icon: typeof Loader
 /** Сон компьютера: не уснёт ли он сам, и когда спал (тогда тайм-ауты ожиданий ждали, пока Telegram и почта догрузят пропущенное). */
 function PowerNote({ power }: { power: PowerState }) {
   const slept = power.sleptFrom && power.wokeAt ? { from: power.sleptFrom, to: power.wokeAt } : null;
-  if (!power.keepingAwake && !slept) return null;
+  const wakeAt = power.wakeEnabled && power.wakeAt ? power.wakeAt : null;
+  if (!power.keepingAwake && !slept && !wakeAt) return null;
   return (
     <div className="stack small muted" data-testid="power-note" style={{ gap: 4 }}>
       {power.keepingAwake && (
         <span className="row" style={{ gap: 6 }}>
           <Coffee size={14} /> Компьютер не уснёт по бездействию, пока процессы выполняются или ждут (это можно выключить в «Настройках»).
+        </span>
+      )}
+      {wakeAt && (
+        <span className="row" style={{ gap: 6 }}>
+          <AlarmClock size={14} /> Если компьютер уснёт, Pepa разбудит его {formatMoment(wakeAt)} — к ближайшему запуску по расписанию
+          или сроку ожидания.
         </span>
       )}
       {slept && (

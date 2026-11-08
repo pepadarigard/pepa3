@@ -22,6 +22,8 @@ internal static class SqliteMapping
 
     public static object OrNull(long? value) => value is { } v ? v : DBNull.Value;
 
+    public static DateTimeOffset ParseDateText(string value) => ParseDate(value);
+
     private static DateTimeOffset ParseDate(string value) =>
         DateTimeOffset.ParseExact(value, DateFormat, CultureInfo.InvariantCulture,
             DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);

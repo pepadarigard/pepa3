@@ -218,4 +218,26 @@ public sealed class SleepTests
         h.Engine.NoticeClock(now + TimeSpan.FromMinutes(30));
         Assert.Equal(1, woke);
     }
+
+    [Fact]
+    public async Task Store_reports_the_nearest_due_time_of_waiting_processes_for_waking_the_computer()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        Assert.Null(await h.Store.GetNextWakeAtAsync());
+        var later = await h.RunAsync(new ScenarioBuilder("Через час")
+            .Node("start", "start").Node("w", "wait", new { mode = "duration", amount = 60, unit = "minutes" }).Node("end", "end")
+            .Chain("start", "w", "end").Build());
+        var sooner = await h.RunAsync(new ScenarioBuilder("Через 10 минут")
+            .Node("start", "start").Node("w", "wait", new { mode = "duration", amount = 10, unit = "minutes" }).Node("end", "end")
+            .Chain("start", "w", "end").Build());
+        await h.WaitForStatusAsync(later, ProcessStatus.Waiting);
+        await h.WaitForStatusAsync(sooner, ProcessStatus.Waiting);
+
+        var soonest = (await h.Store.GetTokensAsync(sooner)).Single(t => t.State == TokenState.Waiting).WakeAt;
+        Assert.Equal(soonest, await h.Store.GetNextWakeAtAsync());
+
+        // Приостановленный процесс сам не продолжит — будить ради него незачем.
+        await h.Engine.PauseAsync(sooner);
+        Assert.Equal((await h.Store.GetTokensAsync(later)).Single(t => t.State == TokenState.Waiting).WakeAt, await h.Store.GetNextWakeAtAsync());
+    }
 }
