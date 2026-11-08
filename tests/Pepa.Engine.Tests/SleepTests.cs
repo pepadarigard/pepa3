@@ -76,11 +76,13 @@ public sealed class SleepTests
         await h.IdleAsync(TimeSpan.FromMinutes(5));
         Assert.Equal(ProcessStatus.Waiting, (await h.ProcessAsync(id)).Status);
 
-        // Источник так и не догрузил пропущенное: тайм-аут — не позже чем через MaxCatchUpWait после пробуждения.
+        // Источник так и не догрузил пропущенное, но тайм-аут всё равно наступает — не раньше чем через MaxCatchUpWait после
+        // пробуждения. Время — по часам движка в момент тайм-аута: часы теста идут вперёд, пока движок работает, и на
+        // загруженной машине убегают.
         var failed = await h.WaitForStatusAsync(id, ProcessStatus.Failed, advance: TimeSpan.FromSeconds(10));
         Assert.Equal("Ответа нет", failed.StatusMessage);
-        Assert.True(h.Time.GetUtcNow() >= wokeAt + h.Options.MaxCatchUpWait);
-        Assert.True(h.Time.GetUtcNow() < wokeAt + h.Options.MaxCatchUpWait + TimeSpan.FromMinutes(1));
+        Assert.True(h.Engine.IsCatchingUp(Source));
+        Assert.True(failed.FinishedAt >= wokeAt + h.Options.MaxCatchUpWait, $"тайм-аут в {failed.FinishedAt:O}, пробуждение в {wokeAt:O}");
         var journal = await h.Store.GetJournalAsync(id);
         Assert.Contains(journal, j => j.Message.Contains("Тайм-аут отложен до конца догрузки", StringComparison.Ordinal) &&
                                       j.Message.Contains("компьютер спал", StringComparison.Ordinal) &&
@@ -147,11 +149,15 @@ public sealed class SleepTests
         await h.IdleAsync(TimeSpan.FromSeconds(5));
         Assert.NotNull(h.Engine.LastSleep);
 
+        var wokeAt = h.Engine.LastSleep!.Value.To;
         var id = await h.RunAsync(WaitReply(timeoutSeconds: 10));
         await h.WaitForStatusAsync(id, ProcessStatus.Waiting);
-        var startedAt = h.Time.GetUtcNow();
-        var failed = await h.WaitForStatusAsync(id, ProcessStatus.Failed, advance: TimeSpan.FromSeconds(1));
+
+        // Ожидание началось после пробуждения: минута поблажки после сна его не касается. Часы — мелкими шагами, чтобы
+        // до конца той минуты у движка было много времени даже на загруженной машине.
+        h.Time.Advance(TimeSpan.FromSeconds(15));
+        var failed = await h.WaitForStatusAsync(id, ProcessStatus.Failed, advance: TimeSpan.FromMilliseconds(100));
         Assert.Equal("Ответа нет", failed.StatusMessage);
-        Assert.True(h.Time.GetUtcNow() < startedAt + TimeSpan.FromSeconds(40));
+        Assert.True(failed.FinishedAt < wokeAt + h.Options.CatchUpGrace, $"тайм-аут в {failed.FinishedAt:O}, пробуждение в {wokeAt:O}");
     }
 }
