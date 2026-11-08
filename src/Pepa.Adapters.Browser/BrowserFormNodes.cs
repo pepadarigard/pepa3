@@ -405,6 +405,7 @@ public sealed class SwitchTabNode(BrowserSessions sessions) : INodeExecutor
                 if (target is not null)
                 {
                     session.Page = target;
+                    await sessions.RememberPageAsync(session);
                     await target.BringToFrontAsync();
                     var title = await target.TitleAsync();
                     return NodeResult.Ok(Ports.Out, new Dictionary<string, JsonNode?>(),

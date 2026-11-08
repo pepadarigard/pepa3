@@ -148,6 +148,45 @@ public sealed class AdsPowerTests
     }
 
     [Fact]
+    public async Task After_restart_the_process_continues_in_its_own_tab_not_in_a_tab_opened_meanwhile()
+    {
+        TestBrowser.RequireCdpBrowser();
+        await using var f = await BrowserFixture.CreateAsync(withAdsPower: true);
+        var id = await f.H.RunAsync(UseProfile(f, "k2", "своя вкладка", holdSeconds: 60));
+        await f.H.WaitForAsync(id, p => p.Status == ProcessStatus.Waiting && p.StepCount >= 3);
+
+        // Пока Pepa была выключена, владелец открыл в профиле другую вкладку — она последняя, но она не процесса.
+        await f.RestartAsync();
+        await f.Ads!.OpenTabAsync("k2", "about:blank");
+        f.H.Time.Advance(TimeSpan.FromSeconds(61));
+        await f.H.Engine.ResumeAsync(id, ResumeAction.Continue);
+
+        await f.H.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Equal(1, f.Site.Submits);
+    }
+
+    [Fact]
+    public async Task Tab_of_the_process_closed_while_Pepa_was_off_stops_the_step()
+    {
+        TestBrowser.RequireCdpBrowser();
+        await using var f = await BrowserFixture.CreateAsync(withAdsPower: true);
+        var id = await f.H.RunAsync(UseProfile(f, "k2", "закрыли вкладку", holdSeconds: 60));
+        await f.H.WaitForAsync(id, p => p.Status == ProcessStatus.Waiting && p.StepCount >= 3);
+
+        await f.RestartAsync();
+        await f.Ads!.OpenTabAsync("k2", "about:blank");
+        await f.Ads.CloseTabsAsync("k2", "/form");
+        f.H.Time.Advance(TimeSpan.FromSeconds(61));
+        await f.H.Engine.ResumeAsync(id, ResumeAction.Continue);
+
+        // В другой вкладке Pepa молча не продолжает: шаг остановлен с понятной причиной.
+        var process = await f.H.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
+        Assert.Contains("Вкладку, в которой работал процесс", process.StatusMessage);
+        Assert.Equal(0, f.Site.Submits);
+        Assert.True(f.Ads.IsOpen("k2"));
+    }
+
+    [Fact]
     public async Task Profile_closed_by_user_is_reported_instead_of_reopened_silently()
     {
         TestBrowser.RequireCdpBrowser();

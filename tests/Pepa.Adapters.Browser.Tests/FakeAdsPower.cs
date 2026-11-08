@@ -49,6 +49,40 @@ internal sealed class FakeAdsPower : IDisposable
     /// <summary>Владелец открыл профиль сам, в AdsPower (не через Pepa).</summary>
     public Task OpenByOwnerAsync(string profileId) => StartAsync(profileId);
 
+    /// <summary>Владелец открыл в профиле ещё одну вкладку.</summary>
+    public async Task OpenTabAsync(string profileId, string url)
+    {
+        using var http = DevToolsClient();
+        using var response = await http.PutAsync($"{DevTools(profileId)}/json/new?{url}", null);
+        response.EnsureSuccessStatusCode();
+    }
+
+    /// <summary>Владелец закрыл вкладки профиля, адрес которых содержит текст.</summary>
+    public async Task CloseTabsAsync(string profileId, string urlContains)
+    {
+        using var http = DevToolsClient();
+        var root = DevTools(profileId);
+        var tabs = JsonNode.Parse(await http.GetStringAsync($"{root}/json/list"))!.AsArray();
+        foreach (var tab in tabs)
+        {
+            if (tab?["type"]?.GetValue<string>() == "page" && tab["url"]?.GetValue<string>() is { } address &&
+                address.Contains(urlContains, StringComparison.Ordinal))
+            {
+                (await http.GetAsync($"{root}/json/close/{tab["id"]!.GetValue<string>()}")).EnsureSuccessStatusCode();
+            }
+        }
+    }
+
+    private static HttpClient DevToolsClient() => new(new HttpClientHandler { UseProxy = false });
+
+    private string DevTools(string profileId)
+    {
+        lock (_lock)
+        {
+            return $"http://127.0.0.1:{new Uri(_open[profileId].Ws).Port}";
+        }
+    }
+
     private async Task LoopAsync()
     {
         while (!_stop.IsCancellationRequested)

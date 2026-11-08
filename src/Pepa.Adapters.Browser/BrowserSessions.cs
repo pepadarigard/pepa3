@@ -71,7 +71,7 @@ public sealed class BrowserSession
     public IBrowserContext Context { get; }
     public IBrowser? Browser { get; }
     public IPage Page { get; internal set; }
-    public BrowserSessionInfo Info { get; }
+    public BrowserSessionInfo Info { get; internal set; }
     public bool Closed { get; private set; }
 
     /// <summary>Окна отвечает человек (запись действий): Pepa их только видит.</summary>
@@ -184,6 +184,15 @@ public sealed record BrowserSessionInfo
 
     /// <summary>Закрыть профиль AdsPower (или браузер), когда процесс завершится.</summary>
     public bool CloseOnFinish { get; init; } = true;
+
+    /// <summary>
+    /// Вкладка, в которой работает процесс (идентификатор вкладки в браузере): после перезапуска Pepa процесс продолжает в
+    /// ней, а не в последней открытой — та могла быть вкладкой владельца профиля.
+    /// </summary>
+    public string? TargetId { get; init; }
+
+    /// <summary>Процесс работает в своей вкладке чужого (открытого не Pepa) профиля: другие вкладки не его ни при каких условиях.</summary>
+    public bool OwnTab { get; init; }
 }
 
 /// <summary>Что делать, если профиль AdsPower уже открыт не Pepa (например, владельцем вручную).</summary>
@@ -361,10 +370,11 @@ public sealed class BrowserSessions : IAsyncDisposable
                 closeOnFinish = false;
             }
 
+            var ownTab = newTab && !closeOnFinish && state.Active && !IsPepaProfile(profileId);
             var info = new BrowserSessionInfo
             {
                 ProcessId = processId, Name = name, Kind = BrowserKind.AdsPower, ProfileId = profileId,
-                ResourceKey = AdsPowerResourceKey(profileId), CloseOnFinish = closeOnFinish,
+                ResourceKey = AdsPowerResourceKey(profileId), CloseOnFinish = closeOnFinish, OwnTab = ownTab,
             };
             SaveRegistry(info);
             if (!state.Active || state.WsEndpoint is null)
@@ -385,6 +395,7 @@ public sealed class BrowserSessions : IAsyncDisposable
 
             var session = await ConnectAsync(info, state.WsEndpoint!, newTab);
             _sessions[(processId, name)] = session;
+            await RememberPageAsync(session);
             return session;
         }
         finally
@@ -393,12 +404,53 @@ public sealed class BrowserSessions : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Запомнить вкладку процесса (на диске), чтобы после перезапуска Pepa продолжить в ней. Только профили AdsPower: обычный
+    /// браузер перезапуск не переживает.
+    /// </summary>
+    public async Task RememberPageAsync(BrowserSession session)
+    {
+        if (session.Kind != BrowserKind.AdsPower || await TargetIdAsync(session.Page) is not { } targetId || targetId == session.Info.TargetId)
+        {
+            return;
+        }
+
+        session.Info = session.Info with { TargetId = targetId };
+        SaveRegistry(session.Info);
+    }
+
+    /// <summary>Идентификатор вкладки в браузере (CDP); null — узнать не удалось.</summary>
+    private static async Task<string?> TargetIdAsync(IPage page)
+    {
+        try
+        {
+            var cdp = await page.Context.NewCDPSessionAsync(page);
+            try
+            {
+                var info = await cdp.SendAsync("Target.getTargetInfo");
+                return info is { } result && result.TryGetProperty("targetInfo", out var target) &&
+                       target.TryGetProperty("targetId", out var id)
+                    ? id.GetString()
+                    : null;
+            }
+            finally
+            {
+                await cdp.DetachAsync();
+            }
+        }
+        catch (PlaywrightException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>Профиль открыла Pepa: запустила сама (и ещё не закрыла) или он записан за процессом Pepa.</summary>
     private bool IsPepaProfile(string profileId)
     {
         lock (_registry)
         {
-            return _started.Contains(profileId) || _registry.Values.Any(i => i.ProfileId == profileId);
+            // Своя вкладка процесса в чужом профиле не делает профиль «открытым Pepa».
+            return _started.Contains(profileId) || _registry.Values.Any(i => i.ProfileId == profileId && !i.OwnTab);
         }
     }
 
@@ -464,9 +516,48 @@ public sealed class BrowserSessions : IAsyncDisposable
             throw new BrowserStartException($"Профиль AdsPower {info.ProfileId} открыт, но подключиться к его браузеру не удалось: {ex.Message}");
         }
 
-        var context = browser.Contexts.FirstOrDefault() ?? await browser.NewContextAsync();
-        var page = newTab ? await context.NewPageAsync() : context.Pages.LastOrDefault(p => !p.IsClosed) ?? await context.NewPageAsync();
-        return new BrowserSession(info.ProcessId, info.Name, BrowserKind.AdsPower, context, browser, page, info);
+        try
+        {
+            var context = browser.Contexts.FirstOrDefault() ?? await browser.NewContextAsync();
+            var page = newTab ? await context.NewPageAsync() : await FindPageAsync(context, info);
+            return new BrowserSession(info.ProcessId, info.Name, BrowserKind.AdsPower, context, browser, page, info);
+        }
+        catch
+        {
+            // Только отключение: браузер профиля остаётся открытым.
+            await browser.CloseAsync();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Вкладка процесса после переподключения — запомненная. Её закрыли — шаг останавливается: другая вкладка не та страница,
+    /// на которой процесс остановился, и молча продолжать в ней нельзя. Запомненная вкладка забывается, поэтому повтор шага
+    /// продолжит как без неё: в последней вкладке профиля, открытого Pepa, или в новой вкладке чужого профиля (чужие вкладки
+    /// Pepa не берёт).
+    /// </summary>
+    private async Task<IPage> FindPageAsync(IBrowserContext context, BrowserSessionInfo info)
+    {
+        var open = context.Pages.Where(p => !p.IsClosed).ToList();
+        if (info.TargetId is { } wanted)
+        {
+            foreach (var candidate in open)
+            {
+                if (await TargetIdAsync(candidate) == wanted)
+                {
+                    return candidate;
+                }
+            }
+
+            _logger.LogWarning("Вкладка процесса {Process} в профиле AdsPower {Profile} закрыта.", info.ProcessId, info.ProfileId);
+            SaveRegistry(info with { TargetId = null });
+            throw new BrowserSessionLostException(
+                $"Вкладку, в которой работал процесс, в профиле AdsPower {info.ProfileId} закрыли — страница, на которой он " +
+                "остановился, потеряна, и в другой вкладке Pepa сама не продолжает. «Выполнить шаг ещё раз» продолжит " +
+                (info.OwnTab ? "в новой пустой вкладке." : "в последней открытой вкладке профиля."));
+        }
+
+        return info.OwnTab || open.Count == 0 ? await context.NewPageAsync() : open[^1];
     }
 
     // ───────────── Поиск ─────────────
