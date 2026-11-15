@@ -183,4 +183,24 @@ public sealed class PowerTests
         Assert.Equal(next - WakeTimer.Lead,
             DateTimeOffset.Parse(power["wakeAt"]!.GetValue<string>(), System.Globalization.CultureInfo.InvariantCulture));
     }
+
+    [Fact]
+    public void Windows_wake_timer_fires_at_the_armed_time_and_can_be_cancelled()
+    {
+        // Настоящий таймер пробуждения Windows (проверяет вызовы системы). Компьютер, где идёт проверка, не спит — таймер
+        // просто срабатывает.
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Таймер пробуждения есть только в Windows.");
+        using var platform = WindowsWakePlatform.TryCreate(NullLogger.Instance);
+        Assert.NotNull(platform);
+
+        Assert.True(platform!.Arm(DateTimeOffset.UtcNow.AddSeconds(30)));
+        platform.Cancel();
+        Assert.False(platform.Fired.WaitOne(TimeSpan.FromSeconds(1)));
+
+        Assert.True(platform.Arm(DateTimeOffset.UtcNow.AddSeconds(2)));
+        Assert.False(platform.Fired.WaitOne(TimeSpan.FromMilliseconds(500)));
+        Assert.True(platform.Fired.WaitOne(TimeSpan.FromSeconds(30)), "Таймер не сработал.");
+        platform.HoldAwake(true);
+        platform.HoldAwake(false);
+    }
 }
