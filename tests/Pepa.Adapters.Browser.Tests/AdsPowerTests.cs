@@ -277,6 +277,34 @@ public sealed class AdsPowerTests
     }
 
     [Fact]
+    public async Task After_restart_the_newest_tab_is_still_the_one_opened_last()
+    {
+        TestBrowser.RequireCdpBrowser();
+        await using var f = await BrowserFixture.CreateAsync(withAdsPower: true);
+        var id = await f.H.RunAsync(new ScenarioBuilder("Новая вкладка после перезапуска")
+            .Node("start", "start")
+            .Node("open", "adspower.open", new { profileId = "k1", url = f.Site.Url("/controls"), closeOnFinish = false })
+            .Node("popup", "browser.click", new { selector = "#popup" })
+            .Node("w", "wait", new { mode = "duration", amount = 60, unit = "seconds" })
+            .Node("tab", "browser.tab", new { which = "newest", waitSeconds = 3 })
+            .Node("end", "end")
+            .Chain("start", "open", "popup", "w")
+            .Edge("w", "tab").Edge("tab", "end", Ports.Out)
+            .Build());
+        await f.H.WaitForAsync(id, p => p.Status == ProcessStatus.Waiting && p.StepCount >= 4);
+        await f.H.UntilAsync(() => f.Sessions.FindInfo(id, "main")?.TabOrder?.Count == 2, "порядок вкладок запомнен");
+
+        // После перезапуска браузер отдаёт вкладки в своём порядке; «новая» — всё равно открытая последней (окно с /second).
+        await f.RestartAsync();
+        f.H.Time.Advance(TimeSpan.FromSeconds(61));
+        await f.H.Engine.ResumeAsync(id, ResumeAction.Continue);
+        var done = await f.H.WaitForStatusAsync(id, ProcessStatus.Completed);
+        var tab = (await f.H.StepsAsync(id)).Last(s => s.NodeId == "tab");
+        Assert.Contains("from=popup", tab.Output!["url"]!.GetValue<string>());
+        Assert.NotNull(done);
+    }
+
+    [Fact]
     public async Task Profile_that_adspower_says_is_still_opening_stays_pepas_and_is_used_once_it_opens()
     {
         TestBrowser.RequireCdpBrowser();

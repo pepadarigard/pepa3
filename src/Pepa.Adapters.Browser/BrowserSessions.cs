@@ -62,7 +62,24 @@ public sealed class BrowserSession
             WatchDialogs(open);
         }
 
-        context.Page += (_, opened) => WatchDialogs(opened);
+        _order.AddRange(context.Pages);
+        context.Page += (_, opened) =>
+        {
+            WatchDialogs(opened);
+            lock (_order)
+            {
+                _order.Add(opened);
+            }
+
+            try
+            {
+                PageOpened?.Invoke(opened);
+            }
+            catch (Exception)
+            {
+                // Запомнить порядок вкладок не вышло — после перезапуска порядок будет тем, в каком браузер их отдаст.
+            }
+        };
 
         // Своя вкладка в чужом профиле: процессу принадлежат только она и окна, открытые с неё (вход через всплывающее окно).
         if (info.OwnTab)
@@ -73,6 +90,33 @@ public sealed class BrowserSession
     }
 
     private readonly HashSet<IPage>? _own;
+
+    /// <summary>Вкладки в порядке открытия (после переподключения — в запомненном порядке, открытые без Pepa — последними).</summary>
+    private readonly List<IPage> _order = [];
+
+    /// <summary>Открылась новая вкладка — чтобы запомнить порядок вкладок на диске.</summary>
+    internal event Action<IPage>? PageOpened;
+
+    /// <summary>Порядок вкладок после переподключения (из запомненного).</summary>
+    internal void Arrange(IReadOnlyList<IPage> ordered)
+    {
+        lock (_order)
+        {
+            _order.Clear();
+            _order.AddRange(ordered);
+        }
+    }
+
+    /// <summary>Открытые вкладки в порядке открытия.</summary>
+    internal IReadOnlyList<IPage> OpenInOrder()
+    {
+        lock (_order)
+        {
+            var known = _order.Where(p => !p.IsClosed).ToList();
+            known.AddRange(Context.Pages.Where(p => !p.IsClosed && !_order.Contains(p)));
+            return known;
+        }
+    }
     private string? _lostTabNotice;
 
     private void Own(IPage page)
@@ -166,7 +210,8 @@ public sealed class BrowserSession
     }
 
     /// <summary>Открытые вкладки, с которыми процесс может работать.</summary>
-    public IReadOnlyList<IPage> Pages() => Context.Pages.Where(p => !p.IsClosed && IsOwn(p)).ToList();
+    /// <remarks>В порядке открытия: «Новая (открытая последней)» после перезапуска Pepa — та же, что до него.</remarks>
+    public IReadOnlyList<IPage> Pages() => OpenInOrder().Where(IsOwn).ToList();
 
     /// <summary>Вкладку процесса закрыли, пока Pepa была выключена: пояснение для первого шага после переподключения (один раз).</summary>
     internal void NoteLostTab(string notice) => _lostTabNotice = notice;
@@ -180,6 +225,9 @@ public sealed class BrowserSession
     public IBrowser? Browser { get; }
     public IPage Page { get; internal set; }
     public BrowserSessionInfo Info { get; internal set; }
+
+    /// <summary>Идентификаторы вкладок браузера (для запомненного порядка); меняются под блокировкой списка сессий.</summary>
+    internal Dictionary<IPage, string> TabIds { get; set; } = [];
 
     /// <summary>Вкладка, которую Pepa запомнила как вкладку процесса (на диске).</summary>
     internal IPage? RememberedPage { get; set; }
@@ -315,6 +363,9 @@ public sealed record BrowserSessionInfo
     /// Pepa процесс узнаёт их все, а не только ту, в которой остановился.
     /// </summary>
     public IReadOnlyList<string>? OwnedTargets { get; init; }
+
+    /// <summary>Открытые вкладки профиля в порядке открытия (идентификаторы): после перезапуска «новая вкладка» — та же.</summary>
+    public IReadOnlyList<string>? TabOrder { get; init; }
 }
 
 /// <summary>Что делать, если профиль AdsPower уже открыт не Pepa (например, владельцем вручную).</summary>
@@ -577,6 +628,39 @@ public sealed class BrowserSessions : IAsyncDisposable
         }
     }
 
+    /// <summary>Новая вкладка — в конец запомненного порядка.</summary>
+    private async Task RecordTabOrderAsync(BrowserSession session, IPage page)
+    {
+        if (await TargetIdAsync(page) is not { } id)
+        {
+            return;
+        }
+
+        lock (_registry)
+        {
+            session.TabIds[page] = id;
+        }
+
+        SaveTabOrder(session);
+    }
+
+    /// <summary>Порядок открытых вкладок — на диск (закрытые выпадают).</summary>
+    private void SaveTabOrder(BrowserSession session)
+    {
+        lock (_registry)
+        {
+            var order = session.OpenInOrder().Select(p => session.TabIds.GetValueOrDefault(p)).OfType<string>().ToList();
+            if (!_registry.ContainsKey(Key(session.ProcessId, session.Name)) ||
+                (session.Info.TabOrder is { } saved && saved.SequenceEqual(order)))
+            {
+                return;
+            }
+
+            session.Info = session.Info with { TabOrder = order };
+            SaveRegistry(session.Info);
+        }
+    }
+
     /// <summary>Запомнить на диске ещё одну вкладку процесса в чужом профиле (окно, открытое с его вкладки).</summary>
     private async Task RecordOwnedAsync(BrowserSession session, IPage page)
     {
@@ -704,14 +788,41 @@ public sealed class BrowserSessions : IAsyncDisposable
                 session.NoteLostTab(lost);
             }
 
+            // Идентификаторы открытых вкладок: по ним — запомненный порядок и вкладки процесса до перезапуска.
+            var ids = new Dictionary<IPage, string>();
+            foreach (var open in context.Pages.Where(p => !p.IsClosed).ToList())
+            {
+                if (await TargetIdAsync(open) is { } id)
+                {
+                    ids[open] = id;
+                }
+            }
+
+            if (!newTab && info.TabOrder is { Count: > 0 } order)
+            {
+                // Вкладки, открытые, пока Pepa была выключена, — новее всех запомненных (порядок среди них — как отдал браузер).
+                var position = new Dictionary<string, int>(StringComparer.Ordinal);
+                for (var at = 0; at < order.Count; at++)
+                {
+                    position.TryAdd(order[at], at);
+                }
+
+                session.Arrange([.. context.Pages.Where(p => !p.IsClosed)
+                    .OrderBy(p => ids.TryGetValue(p, out var id) && position.TryGetValue(id, out var at) ? at : int.MaxValue)]);
+            }
+
+            session.TabIds = ids;
+            session.PageOpened += opened => _ = RecordTabOrderAsync(session, opened);
+            SaveTabOrder(session);
+
             if (info.OwnTab)
             {
                 // Вкладки процесса, запомненные до перезапуска, — снова его; а также связанные с ними «кто кого открыл».
                 if (!newTab && info.OwnedTargets is { Count: > 0 } known)
                 {
-                    foreach (var candidate in context.Pages.Where(p => !p.IsClosed).ToList())
+                    foreach (var (candidate, id) in ids)
                     {
-                        if (await TargetIdAsync(candidate) is { } id && known.Contains(id))
+                        if (known.Contains(id))
                         {
                             session.OwnKnown(candidate);
                         }
