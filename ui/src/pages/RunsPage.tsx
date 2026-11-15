@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Activity, AlertTriangle, Send } from "lucide-react";
 import { useEvents, useProcesses, useResources } from "../api/hooks";
 import { EventConflicts, EventsTable, ResourcesCard, useSendEvent } from "../components/platform";
+import { GroupActions } from "../components/groupActions";
 import { ProcessActions, ProcessTable } from "../components/process";
 import { QuestionsCard } from "../components/questions";
 import { Button, Card, Empty, ErrorState, Loading } from "../components/ui";
@@ -45,6 +46,7 @@ export function RunsPage() {
           <EventConflicts events={conflicts} />
           {attention.length > 0 && (
             <div className="stack" style={{ padding: 14, paddingTop: conflicts.length > 0 ? 0 : 14 }}>
+              <GroupActions processes={attention} />
               {attention.map((p) => {
                 const explanation = explainProcess(p);
                 return (

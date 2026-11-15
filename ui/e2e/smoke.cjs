@@ -411,6 +411,28 @@ async function main() {
     await page.getByText("заказ: A-17").first().waitFor();
     await page.getByText("Пользователь исправил переменную «file»: «закз.txt» → «заказ.txt».").first().waitFor();
 
+    step("Одно решение для всех остановившихся на одном шаге");
+    const groupRun = await (await fetch(`${base}/api/scenarios/${fixScenario.id}/run-many`, {
+      method: "POST",
+      headers: { "X-Pepa-Token": token, "Content-Type": "application/json" },
+      body: JSON.stringify({ runs: [{ file: "пакет.txt" }, { file: "пакет.txt" }], batchId: "e2egroup1" }),
+    })).json();
+    await page.goto(`${base}/#/runs`);
+    const group = page.locator('[data-testid="group-actions"]');
+    await group.getByText("2 процесса «E2E: прочитать заказ»").waitFor({ timeout: 15000 });
+    fs.writeFileSync(path.join(workspace, "пакет.txt"), "B-2");
+    await group.getByRole("button", { name: "Выполнить шаг ещё раз — для всех" }).click();
+    await page.getByRole("dialog").getByRole("button", { name: "Выполнить шаг ещё раз" }).click();
+    await page.getByText("Готово: 2 из 2").first().waitFor();
+    for (const id of groupRun.processIds) {
+      for (let i = 0; ; i++) {
+        const p = await (await fetch(`${base}/api/processes/${id}`, { headers: { "X-Pepa-Token": token } })).json();
+        if (p.process.status === "completed") break;
+        if (i > 100) throw new Error(`Процесс ${id} не завершился после повтора: ${p.process.status}`);
+        await new Promise((r) => setTimeout(r, 150));
+      }
+    }
+
     step("Спросить пользователя: вопрос на «Главной» и ответ кнопкой");
     const askScenario = await (await fetch(`${base}/api/scenarios`, {
       method: "POST",
