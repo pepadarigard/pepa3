@@ -173,6 +173,12 @@ public sealed class SendTelegramNode(ITelegramGateway telegram, IWorkspace works
         {
             return NodeResult.Fail(ex.Message, ex.Retryable);
         }
+        catch (TelegramSendUncertainException ex)
+        {
+            // Сообщение могло уйти позже: сразу проверять историю нельзя (его там ещё может не быть) — решает человек, а
+            // «Проверить» и «Выполнить шаг ещё раз» потом — с тем же ключом от повторов.
+            return new NodeResult.Unknown(ex.Message) { AlreadyChecked = true };
+        }
         catch (TelegramAlreadySentException)
         {
             // Telegram узнал ключ прошлой попытки: сообщение уже отправлено, второго не будет. Это не «неизвестно» — найти его в

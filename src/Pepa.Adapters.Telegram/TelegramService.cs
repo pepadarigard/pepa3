@@ -1471,20 +1471,40 @@ public sealed class TelegramService : ITelegramGateway, IAsyncDisposable
     private async Task<TelegramSentMessage> SendCoreAsync(Connection connection, TelegramPeer chat, long randomId, Func<Task<UpdatesBase>> send,
         CancellationToken cancellationToken)
     {
+        // Как при нажатии кнопки: после «-503» или переподключения библиотека сама отправляет запрос ещё раз (с тем же ключом),
+        // а запрос, который шаг перестал ждать (тайм-аут шага), остаётся в ней и может уйти позже. Тогда отказ или обрыв —
+        // ответ не на единственную отправку: сообщение могло уйти (в том числе позже), и «не отправлено» было бы неправдой.
+        var connects = Volatile.Read(ref connection.Connects);
+        var errors503 = Volatile.Read(ref _rpc503);
+        var call = send();
+        bool Ambiguous() => !call.IsCompleted || Volatile.Read(ref connection.Connects) != connects ||
+                            Volatile.Read(ref _rpc503) != errors503;
         UpdatesBase updates;
         try
         {
-            updates = await send().WaitAsync(cancellationToken);
-        }
-        catch (RpcException ex) when (IsSessionRevoked(ex))
-        {
-            OnSessionRevoked(connection);
-            throw new TelegramSendRejectedException(SessionExpiredHint, retryable: false);
+            updates = await call.WaitAsync(cancellationToken);
         }
         catch (RpcException ex) when (ex.Message.Contains("RANDOM_ID_DUPLICATE", StringComparison.Ordinal))
         {
             // С этим ключом сообщение уже отправлялось (прошлой попыткой) — оно есть, второго не будет.
             throw new TelegramAlreadySentException();
+        }
+        catch (Exception ex) when (Ambiguous())
+        {
+            if (ex is RpcException rpc && IsSessionRevoked(rpc))
+            {
+                OnSessionRevoked(connection);
+            }
+
+            Logger.LogWarning(ex, "Отправка в Telegram: итог неизвестен (запрос мог уйти повторно или позже).");
+            throw new TelegramSendUncertainException(
+                "Во время отправки Telegram не ответил вовремя или связь прерывалась — сообщение могло уйти (в том числе позже). " +
+                "Посмотрите в чате и нажмите «Проверить» — или решите сами.");
+        }
+        catch (RpcException ex) when (IsSessionRevoked(ex))
+        {
+            OnSessionRevoked(connection);
+            throw new TelegramSendRejectedException(SessionExpiredHint, retryable: false);
         }
         catch (RpcException ex) when (ex.Code == 420 || ex.Message.Contains("FLOOD", StringComparison.Ordinal))
         {

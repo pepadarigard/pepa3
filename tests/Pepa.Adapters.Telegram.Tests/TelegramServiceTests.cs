@@ -203,8 +203,29 @@ public sealed class TelegramServiceTests : IAsyncLifetime
         var edit = Assert.Single(events);
         Assert.Equal(TelegramEvents.EditedType, edit.Type);
         Assert.Equal("✅ Код 1234", edit.Payload!["text"]!.GetValue<string>());
-        Assert.Equal($"0:user:42:100:edit:{new DateTimeOffset(editedAt).ToUnixTimeSeconds()}", edit.ExternalId);
+        Assert.StartsWith($"0:user:42:100:edit:{new DateTimeOffset(editedAt).ToUnixTimeSeconds()}:", edit.ExternalId);
         Assert.Equal(new DateTimeOffset(editedAt).ToUnixTimeSeconds(), edit.OccurredAt!.Value.ToUnixTimeSeconds());
+        await service.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task Two_edits_within_the_same_second_are_two_events()
+    {
+        var events = new ConcurrentQueue<EventInput>();
+        var service = new TelegramService(_data, e => { events.Enqueue(e); return Task.CompletedTask; }) { ServerAddress = "127.0.0.1:1" };
+        var manager = await service.ConnectForTestsAsync(Account);
+
+        // Бот показывает ход проверки: «⏳ 50%», а через полсекунды — «✅ Код 1234»; время изменения у Telegram — в секундах.
+        var editedAt = DateTime.SpecifyKind(DateTime.UtcNow.AddSeconds(-5), DateTimeKind.Utc);
+        await InjectEditAsync(manager, 1, 100, "⏳ 50%", editedAt).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await InjectEditAsync(manager, 2, 100, "✅ Код 1234", editedAt).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        Assert.Equal(["⏳ 50%", "✅ Код 1234"], events.Select(e => e.Payload!["text"]!.GetValue<string>()));
+        Assert.Equal(2, events.Select(e => e.ExternalId).Distinct().Count());
+        // То же изменение, пришедшее снова, — тот же ключ (повтор отсекает движок).
+        await InjectEditAsync(manager, 3, 100, "✅ Код 1234", editedAt).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Assert.Equal(3, events.Count);
+        Assert.Equal(events.ElementAt(1).ExternalId, events.ElementAt(2).ExternalId);
         await service.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
     }
 

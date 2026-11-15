@@ -51,6 +51,21 @@ internal sealed class TestSite : IDisposable
             }
 
             var path = context.Request.Url!.AbsolutePath;
+            if (path == "/slow-pay")
+            {
+                Interlocked.Increment(ref _submits);
+                var slow = context;
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(3000);
+                    var page = Encoding.UTF8.GetBytes("<!doctype html><html><head><title>Готово</title></head><body><div class='ok'>Оплачено</div></body></html>");
+                    slow.Response.ContentType = "text/html; charset=utf-8";
+                    await slow.Response.OutputStream.WriteAsync(page);
+                    slow.Response.Close();
+                });
+                continue;
+            }
+
             var html = path switch
             {
                 "/form" => """
@@ -63,6 +78,14 @@ internal sealed class TestSite : IDisposable
                            </body></html>
                            """,
                 "/second" => "<!doctype html><html><head><title>Вторая</title></head><body><p id='msg'>Вторая страница</p></body></html>",
+                // Оплата: сервер отвечает через 3 секунды (медленный прокси), а заготовка «Оплачено» скрыта на странице заранее.
+                "/pay" => """
+                          <!doctype html><html><head><title>Оплата</title></head><body>
+                          <form method="post" action="/slow-pay"><button id="pay">Оплатить</button></form>
+                          <button id="nothing">Ничего не делает</button>
+                          <div class="ok" style="display:none">Оплачено</div>
+                          </body></html>
+                          """,
                 // Страница владельца профиля, которая сразу показывает окно.
                 "/owner-alert" => "<!doctype html><html><head><title>Владелец</title></head><body><script>alert('Окно владельца')</script></body></html>",
                 // Окна сайта: вопрос, сообщение, запрос текста и сообщение по таймеру (между шагами).

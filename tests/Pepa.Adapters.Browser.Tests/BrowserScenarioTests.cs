@@ -12,6 +12,45 @@ namespace Pepa.Adapters.Browser.Tests;
 public sealed class BrowserScenarioTests
 {
     [Fact]
+    public async Task Click_whose_page_answers_slower_than_the_wait_is_unknown_and_is_not_repeated()
+    {
+        TestBrowser.RequireBrowser();
+        await using var f = await BrowserFixture.CreateAsync();
+        var id = await f.H.RunAsync(new ScenarioBuilder("Оплата")
+            .Node("start", "start")
+            .Node("open", "browser.open", BrowserFixture.OpenConfig(f.Site.Url("/pay")))
+            .Node("pay", "browser.click", new { selector = "#pay", waitSeconds = 1 }, new NodeSettings { RetryCount = 1, RetryDelaySeconds = 0 })
+            .Node("end", "end")
+            .Chain("start", "open", "pay", "end")
+            .Build());
+
+        // Нажатие ушло, сервер отвечает через 3 секунды: это не «не нажато» — повторять нельзя, иначе оплата пройдёт дважды.
+        var stopped = await f.H.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
+        Assert.Equal(AttentionKind.UnknownStep, stopped.Attention);
+        await Task.Delay(4000, TestContext.Current.CancellationToken);
+        Assert.Equal(1, f.Site.Submits);
+    }
+
+    [Fact]
+    public async Task Hidden_template_of_the_expected_element_does_not_confirm_a_click()
+    {
+        TestBrowser.RequireBrowser();
+        await using var f = await BrowserFixture.CreateAsync();
+        var id = await f.H.RunAsync(new ScenarioBuilder("Скрытая заготовка")
+            .Node("start", "start")
+            .Node("open", "browser.open", BrowserFixture.OpenConfig(f.Site.Url("/pay")))
+            .Node("click", "browser.click", new { selector = "#nothing", expect = ".ok", waitSeconds = 1 })
+            .Node("end", "end")
+            .Chain("start", "open", "click", "end")
+            .Build());
+
+        // «Оплачено» на странице есть, но скрыто: нажатие не подтверждено — процесс не идёт дальше сам.
+        var stopped = await f.H.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
+        Assert.Equal(AttentionKind.UnknownStep, stopped.Attention);
+        Assert.Contains("не виден", stopped.StatusMessage);
+    }
+
+    [Fact]
     public async Task Open_fill_click_read_screenshot_close()
     {
         TestBrowser.RequireBrowser();

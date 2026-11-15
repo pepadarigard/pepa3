@@ -381,7 +381,18 @@ public sealed record BrowserSessionInfo
     /// (или нового открытия того же профиля, или его закрытия под другим именем).
     /// </summary>
     public bool Retired { get; init; }
+
+    /// <summary>
+    /// Какой запуск браузера профиля подключён (адрес отладки AdsPower: у каждого запуска — свой идентификатор браузера). Профиль
+    /// закрыли (перезагрузка, AdsPower) и открыли заново не Pepa — адрес другой: процесс в этом окне не работает и его не
+    /// закрывает. null — ещё не подключались (например, итог запуска неизвестен).
+    /// </summary>
+    public string? Endpoint { get; init; }
 }
+
+/// <summary>Чем закончилось закрытие: запись сессии и что сделано с профилем AdsPower.</summary>
+/// <param name="Note">Профиль не закрыт, хотя просили (чужой, у другого процесса, открыт заново не Pepa), — почему.</param>
+public sealed record BrowserClosed(BrowserSessionInfo Info, bool ProfileStopped, string? Note);
 
 /// <summary>Что делать, если профиль AdsPower уже открыт не Pepa (например, владельцем вручную).</summary>
 public enum AdsPowerOpenedElsewhere
@@ -432,7 +443,8 @@ public sealed class BrowserSessions : IAsyncDisposable
 {
     private readonly BrowserModuleOptions _options;
     private readonly AdsPowerClient _adsPower;
-    private readonly ILogger _logger;
+    /// <summary>Журнал Pepa (задаётся после запуска приложения; до этого — никуда).</summary>
+    public ILogger Logger { get; set; }
     private readonly ConcurrentDictionary<(string, string), BrowserSession> _sessions = new();
     private readonly SemaphoreSlim _lock = new(1, 1);
     private readonly string _registryPath;
@@ -440,14 +452,18 @@ public sealed class BrowserSessions : IAsyncDisposable
 
     /// <summary>Профили AdsPower, которые запустила Pepa и ещё не закрыла (на диске: переживают перезапуск Pepa).</summary>
     private readonly string _startedPath;
-    private readonly HashSet<string> _started;
+    /// <summary>
+    /// Профили, которые открыла Pepa (и ещё не закрыла): профиль → какой запуск браузера (адрес отладки); null — запуск отправлен,
+    /// итог неизвестен.
+    /// </summary>
+    private readonly Dictionary<string, string?> _started;
     private IPlaywright? _playwright;
 
     public BrowserSessions(BrowserModuleOptions options, AdsPowerClient adsPower, ILogger? logger = null)
     {
         _options = options;
         _adsPower = adsPower;
-        _logger = logger ?? NullLogger.Instance;
+        Logger = logger ?? NullLogger.Instance;
         _registryPath = Path.Combine(options.DataDirectory, "browser-sessions.json");
         _registry = LoadRegistry(_registryPath);
         _startedPath = Path.Combine(options.DataDirectory, "adspower-started.json");
@@ -549,7 +565,7 @@ public sealed class BrowserSessions : IAsyncDisposable
             }
 
             var state = await _adsPower.GetStateAsync(profileId, cancellationToken);
-            if (state.Active && !IsPepaProfile(profileId))
+            if (state.Active && !IsPepaProfile(profileId, state.WsEndpoint))
             {
                 if (openedElsewhere == AdsPowerOpenedElsewhere.Stop)
                 {
@@ -563,7 +579,7 @@ public sealed class BrowserSessions : IAsyncDisposable
                 closeOnFinish = false;
             }
 
-            var ownTab = newTab && !closeOnFinish && state.Active && !IsPepaProfile(profileId);
+            var ownTab = newTab && !closeOnFinish && state.Active && !IsPepaProfile(profileId, state.WsEndpoint);
             var info = new BrowserSessionInfo
             {
                 ProcessId = processId, Name = name, Kind = BrowserKind.AdsPower, ProfileId = profileId,
@@ -575,10 +591,11 @@ public sealed class BrowserSessions : IAsyncDisposable
 
             // Что было до этого вызова: отметки прежней попытки (с неизвестным итогом) этот вызов не снимает.
             var hadRecord = FindInfo(processId, name) is not null;
-            bool wasStarted;
+            bool hadMark;
+            string? previousMark;
             lock (_registry)
             {
-                wasStarted = _started.Contains(profileId);
+                hadMark = _started.TryGetValue(profileId, out previousMark);
             }
 
             SaveRegistry(info);
@@ -592,10 +609,7 @@ public sealed class BrowserSessions : IAsyncDisposable
                 catch (AdsPowerException ex) when (!ex.TimedOut && !ex.MayBeStarting)
                 {
                     // Точно не открылся этим запросом — снять то, что отметил он сам.
-                    if (!wasStarted)
-                    {
-                        UnmarkStarted(profileId);
-                    }
+                    RestoreMark(profileId, hadMark, previousMark);
 
                     if (!hadRecord)
                     {
@@ -613,6 +627,9 @@ public sealed class BrowserSessions : IAsyncDisposable
             var session = await ConnectAsync(info, state.WsEndpoint!, newTab);
             _sessions[(processId, name)] = session;
             DropRetired(processId, profileId);
+            // Какой запуск браузера подключён: открытый заново не Pepa (после перезагрузки) процесс потом не примет за свой.
+            RememberConnected(session, state.WsEndpoint);
+            RememberLaunch(profileId, state.WsEndpoint);
             await RememberPageAsync(session);
             return session;
         }
@@ -672,7 +689,7 @@ public sealed class BrowserSessions : IAsyncDisposable
             await CloseQuietlyAsync(live);
         }
 
-        _logger.LogWarning("Процесс {Process} открыл под именем «{Name}» другой профиль; прежний браузер — «{Retired}» до конца процесса.",
+        Logger.LogWarning("Процесс {Process} открыл под именем «{Name}» другой профиль; прежний браузер — «{Retired}» до конца процесса.",
             processId, name, retiredName);
         return retiredName;
     }
@@ -730,6 +747,23 @@ public sealed class BrowserSessions : IAsyncDisposable
     private bool OwnsRecord(BrowserSession session) =>
         !session.Retired && _registry.TryGetValue(Key(session.ProcessId, session.Name), out var record) &&
         record.Kind == session.Kind && record.ProfileId == session.Info.ProfileId;
+
+    private void RememberConnected(BrowserSession session, string? endpoint)
+    {
+        lock (_registry)
+        {
+            if (endpoint is null || session.Info.Endpoint == endpoint)
+            {
+                return;
+            }
+
+            session.Info = session.Info with { Endpoint = endpoint };
+            if (OwnsRecord(session))
+            {
+                SaveRegistry(session.Info);
+            }
+        }
+    }
 
     /// <summary>
     /// Запомнить вкладку процесса (на диске), чтобы после перезапуска Pepa продолжить в ней. Только профили AdsPower: обычный
@@ -847,24 +881,86 @@ public sealed class BrowserSessions : IAsyncDisposable
         }
     }
 
-    /// <summary>Профиль открыла Pepa: запустила сама (и ещё не закрыла) или он записан за процессом Pepa.</summary>
-    private bool IsPepaProfile(string profileId)
+    /// <summary>
+    /// Запуск браузера, а не адрес целиком: идентификатор браузера в адресе отладки (…/devtools/browser/&lt;id&gt;) свой у каждого
+    /// запуска; порт и имя узла AdsPower может отдавать по-разному.
+    /// </summary>
+    internal static string? LaunchOf(string? endpoint)
+    {
+        if (string.IsNullOrEmpty(endpoint))
+        {
+            return null;
+        }
+
+        var at = endpoint.LastIndexOf("/devtools/browser/", StringComparison.Ordinal);
+        return at >= 0 ? endpoint[(at + "/devtools/browser/".Length)..] : endpoint;
+    }
+
+    private static bool SameLaunch(string? recorded, string? active) =>
+        recorded is null || active is null || LaunchOf(recorded) == LaunchOf(active);
+
+    /// <summary>
+    /// Профиль открыла Pepa: запустила сама (и ещё не закрыла) или он записан за процессом Pepa — и это тот же запуск браузера,
+    /// что открыт сейчас. Профиль закрыли (перезагрузка, AdsPower) и владелец открыл его заново — уже не Pepa: отметка снимается.
+    /// </summary>
+    private bool IsPepaProfile(string profileId, string? activeEndpoint)
     {
         lock (_registry)
         {
+            if (_started.TryGetValue(profileId, out var launched))
+            {
+                if (SameLaunch(launched, activeEndpoint))
+                {
+                    return true;
+                }
+
+                _started.Remove(profileId);
+                WriteStarted();
+                Logger.LogWarning("Профиль AdsPower {Profile} открыт заново не Pepa (другой запуск браузера) — отметка «открыла Pepa» снята.", profileId);
+            }
+
             // Своя вкладка процесса в чужом профиле не делает профиль «открытым Pepa».
-            return _started.Contains(profileId) || _registry.Values.Any(i => i.ProfileId == profileId && !i.OwnTab);
+            return _registry.Values.Any(i => i.ProfileId == profileId && !i.OwnTab && SameLaunch(i.Endpoint, activeEndpoint));
         }
     }
 
+    /// <summary>Запуск отправлен (итог неизвестен, пока браузер не подключён).</summary>
     private void MarkStarted(string profileId)
     {
         lock (_registry)
         {
-            if (_started.Add(profileId))
+            _started[profileId] = null;
+            WriteStarted();
+        }
+    }
+
+    /// <summary>Какой запуск браузера Pepa подключила — для профиля, который она открыла.</summary>
+    private void RememberLaunch(string profileId, string? endpoint)
+    {
+        lock (_registry)
+        {
+            if (_started.TryGetValue(profileId, out var known) && known != endpoint)
             {
+                _started[profileId] = endpoint;
                 WriteStarted();
             }
+        }
+    }
+
+    private void RestoreMark(string profileId, bool had, string? previous)
+    {
+        lock (_registry)
+        {
+            if (had)
+            {
+                _started[profileId] = previous;
+            }
+            else
+            {
+                _started.Remove(profileId);
+            }
+
+            WriteStarted();
         }
     }
 
@@ -883,17 +979,23 @@ public sealed class BrowserSessions : IAsyncDisposable
     {
         Directory.CreateDirectory(Path.GetDirectoryName(_startedPath)!);
         var temp = _startedPath + ".tmp";
-        File.WriteAllText(temp, JsonSerializer.Serialize(_started.Order(StringComparer.Ordinal).ToList(), RegistryJson));
+        File.WriteAllText(temp, JsonSerializer.Serialize(new SortedDictionary<string, string?>(_started, StringComparer.Ordinal), RegistryJson));
         File.Move(temp, _startedPath, overwrite: true);
     }
 
-    private static HashSet<string> LoadStarted(string path)
+    private static Dictionary<string, string?> LoadStarted(string path)
     {
         try
         {
             if (File.Exists(path))
             {
-                return new HashSet<string>(JsonSerializer.Deserialize<List<string>>(File.ReadAllText(path), RegistryJson) ?? [], StringComparer.Ordinal);
+                var text = File.ReadAllText(path);
+                // Прежний вид — список профилей без запуска браузера: считаем «итог неизвестен» (как раньше — профиль Pepa).
+                return text.TrimStart().StartsWith('[')
+                    ? (JsonSerializer.Deserialize<List<string>>(text, RegistryJson) ?? []).Distinct(StringComparer.Ordinal)
+                        .ToDictionary(id => id, _ => (string?)null, StringComparer.Ordinal)
+                    : new Dictionary<string, string?>(JsonSerializer.Deserialize<Dictionary<string, string?>>(text, RegistryJson) ?? [],
+                        StringComparer.Ordinal);
             }
         }
         catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
@@ -901,7 +1003,7 @@ public sealed class BrowserSessions : IAsyncDisposable
             // Повреждённый список — профили, оставленные открытыми, будут считаться открытыми не Pepa (осторожно).
         }
 
-        return new HashSet<string>(StringComparer.Ordinal);
+        return new Dictionary<string, string?>(StringComparer.Ordinal);
     }
 
     public static string AdsPowerResourceKey(string profileId) => $"adspower:{profileId}";
@@ -1051,7 +1153,7 @@ public sealed class BrowserSessions : IAsyncDisposable
                 }
             }
 
-            _logger.LogWarning("Вкладка процесса {Process} в профиле AdsPower {Profile} закрыта.", info.ProcessId, info.ProfileId);
+            Logger.LogWarning("Вкладка процесса {Process} в профиле AdsPower {Profile} закрыта.", info.ProcessId, info.ProfileId);
             var replacement = await context.NewPageAsync();
             if (await TargetIdAsync(replacement) is { } replacementId)
             {
@@ -1106,9 +1208,34 @@ public sealed class BrowserSessions : IAsyncDisposable
                     $"Профиль AdsPower {info.ProfileId} закрыт. Откройте его снова блоком «Открыть профиль AdsPower».");
             }
 
+            if (!SameLaunch(info.Endpoint, state.WsEndpoint))
+            {
+                // Профиль закрывался (перезагрузка, AdsPower) и открыт заново не Pepa: это не тот браузер, где работал процесс.
+                // В нём процесс не работает и в конце его не закрывает.
+                lock (_registry)
+                {
+                    if (_registry.ContainsKey(Key(processId, name)))
+                    {
+                        SaveRegistry(info with { CloseOnFinish = false, Endpoint = null, OwnTab = true });
+                    }
+
+                    if (_started.TryGetValue(info.ProfileId!, out var launched) && !SameLaunch(launched, state.WsEndpoint))
+                    {
+                        _started.Remove(info.ProfileId!);
+                        WriteStarted();
+                    }
+                }
+
+                throw new BrowserSessionLostException(
+                    $"Профиль AdsPower {info.ProfileId} закрывался (перезагрузка компьютера или AdsPower) и открыт заново не Pepa — " +
+                    "страница процесса потеряна. В этом окне Pepa не работает и закрывать его не будет. Откройте профиль снова блоком " +
+                    "«Открыть профиль AdsPower» (если окно открыли вы — закройте его или выберите «Работать в новой вкладке»).");
+            }
+
             session = await ConnectAsync(info, state.WsEndpoint, newTab: false);
             _sessions[(processId, name)] = session;
-            _logger.LogInformation("Переподключение к профилю AdsPower {Profile} для процесса {Process}.", info.ProfileId, processId);
+            RememberConnected(session, state.WsEndpoint);
+            Logger.LogInformation("Переподключение к профилю AdsPower {Profile} для процесса {Process}.", info.ProfileId, processId);
             return session;
         }
         finally
@@ -1126,7 +1253,7 @@ public sealed class BrowserSessions : IAsyncDisposable
     // ───────────── Закрытие ─────────────
 
     /// <summary>Закрыть сессию: обычный браузер закрывается; профиль AdsPower — по желанию (иначе только отключение).</summary>
-    public async Task<BrowserSessionInfo?> CloseAsync(string processId, string name, bool stopProfile, CancellationToken cancellationToken)
+    public async Task<BrowserClosed?> CloseAsync(string processId, string name, bool stopProfile, CancellationToken cancellationToken)
     {
         await _lock.WaitAsync(cancellationToken);
         try
@@ -1140,16 +1267,34 @@ public sealed class BrowserSessions : IAsyncDisposable
     }
 
     /// <summary>Закрыть сессию; вызывать под <see cref="_lock"/>.</summary>
-    private async Task<BrowserSessionInfo?> CloseCoreAsync(string processId, string name, bool stopProfile, CancellationToken cancellationToken)
+    private async Task<BrowserClosed?> CloseCoreAsync(string processId, string name, bool stopProfile, CancellationToken cancellationToken)
     {
         _sessions.TryRemove((processId, name), out var session);
         var info = session?.Info ?? _registry.GetValueOrDefault(Key(processId, name));
         if (session is not null)
         {
+            if (info is { OwnTab: true } && !session.Closed)
+            {
+                // Своя вкладка в чужом профиле: закрываются только вкладки процесса, окно владельца остаётся.
+                foreach (var page in session.Pages())
+                {
+                    try
+                    {
+                        await page.CloseAsync();
+                    }
+                    catch (PlaywrightException)
+                    {
+                        // Уже закрыта.
+                    }
+                }
+            }
+
             await CloseQuietlyAsync(session);
         }
 
-        if (info is { Kind: BrowserKind.AdsPower, ProfileId: { } profileId })
+        var stopped = false;
+        string? note = null;
+        if (info is { Kind: BrowserKind.AdsPower, ProfileId: { } profileId } && stopProfile)
         {
             bool usedByOther;
             lock (_registry)
@@ -1157,17 +1302,38 @@ public sealed class BrowserSessions : IAsyncDisposable
                 usedByOther = _registry.Values.Any(i => i.ProfileId == profileId && i.ProcessId != processId);
             }
 
-            if (stopProfile && usedByOther)
+            if (info.OwnTab)
+            {
+                // Профиль открыт не Pepa (вкладка процесса — в окне владельца): его Pepa не закрывает ни при каких условиях.
+                note = $"Профиль AdsPower {profileId} открыт не Pepa — закрыты только вкладки процесса, профиль оставлен открытым.";
+            }
+            else if (usedByOther)
             {
                 // Процесс отпустил профиль раньше («Освободить ресурс»), и он уже у другого процесса: закрыть его значило бы
                 // оборвать чужую работу — один профиль работает на один процесс.
-                _logger.LogWarning("Профиль AdsPower {Profile} процесса {Process} уже у другого процесса — Pepa его не закрывает.",
-                    profileId, processId);
+                note = $"Профиль AdsPower {profileId} уже у другого процесса — Pepa его не закрывает.";
             }
-            else if (stopProfile)
+            else if (info.Endpoint is { } launched &&
+                     await _adsPower.GetStateAsync(profileId, cancellationToken) is var state &&
+                     (!state.Active || !SameLaunch(launched, state.WsEndpoint)))
+            {
+                // Тот запуск браузера уже закрыт: профиль закрыт — или открыт заново не Pepa (тогда это окно владельца).
+                UnmarkStarted(profileId);
+                note = state.Active
+                    ? $"Профиль AdsPower {profileId} закрывался и открыт заново не Pepa — это не окно процесса, Pepa его не закрывает."
+                    : null;
+                stopped = !state.Active;
+            }
+            else
             {
                 await _adsPower.StopAsync(profileId, cancellationToken);
                 UnmarkStarted(profileId);
+                stopped = true;
+            }
+
+            if (note is not null)
+            {
+                Logger.LogWarning("{Note} Процесс {Process}.", note, processId);
             }
         }
 
@@ -1178,7 +1344,7 @@ public sealed class BrowserSessions : IAsyncDisposable
             DropRetired(processId, closed);
         }
 
-        return info;
+        return info is null ? null : new BrowserClosed(info, stopped, note);
     }
 
     /// <summary>Процесс завершился: закрыть его браузеры (профили AdsPower — если так настроено при открытии).</summary>
@@ -1187,7 +1353,36 @@ public sealed class BrowserSessions : IAsyncDisposable
     /// чем движок запустит процесс, получивший профили этого): иначе тот успел бы подключиться к профилю между закрытием двух
     /// браузеров, а закрытие следующего закрыло бы профиль под ним.
     /// </remarks>
-    public async Task ReleaseProcessAsync(string processId)
+    public Task ReleaseProcessAsync(string processId)
+    {
+        var release = ReleaseProcessCoreAsync(processId);
+        // Закрытие идёт после завершения процесса, в фоне: остановка Pepa его дожидается (DisposeAsync), иначе профиль
+        // остался бы открытым, а запись о нём — забыта при следующем запуске.
+        _releases[release] = true;
+        _ = release.ContinueWith(done => _releases.TryRemove(done, out _), TaskScheduler.Default);
+        return release;
+    }
+
+    private readonly ConcurrentDictionary<Task, bool> _releases = new();
+
+    /// <summary>
+    /// Закрыть профиль в конце процесса не удалось (или не удалось бы: Pepa закрылась раньше) — что сказать в журнале процесса.
+    /// </summary>
+    public event Action<string, string>? ReleaseProblem;
+
+    private void ReportReleaseProblem(string processId, string message)
+    {
+        try
+        {
+            ReleaseProblem?.Invoke(processId, message);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Не удалось записать в журнал процесса {Process}: {Message}", processId, message);
+        }
+    }
+
+    private async Task ReleaseProcessCoreAsync(string processId)
     {
         await _lock.WaitAsync(CancellationToken.None);
         try
@@ -1212,11 +1407,23 @@ public sealed class BrowserSessions : IAsyncDisposable
                         continue;
                     }
 
-                    await CloseCoreAsync(processId, name, stopProfile: info?.CloseOnFinish ?? closeOnFinish, CancellationToken.None);
+                    var closed = await CloseCoreAsync(processId, name, stopProfile: info?.CloseOnFinish ?? closeOnFinish, CancellationToken.None);
+                    if (closed?.Note is { } note)
+                    {
+                        ReportReleaseProblem(processId, note);
+                    }
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Не удалось закрыть браузер «{Name}» процесса {Process}.", name, processId);
+                    Logger.LogWarning(ex, "Не удалось закрыть браузер «{Name}» процесса {Process}.", name, processId);
+                    var profile = FindInfo(processId, name)?.ProfileId;
+                    // Процесс завершён: его запись больше не нужна и не должна считаться «профиль у другого процесса» — иначе
+                    // следующий процесс с этим профилем его не закрыл бы. Отметка «открыла Pepa» остаётся: следующий закроет.
+                    RemoveRegistry(processId, name);
+                    ReportReleaseProblem(processId, profile is null
+                        ? $"Не удалось закрыть браузер «{name}»: {ex.Message}"
+                        : $"Не удалось закрыть профиль AdsPower {profile} в конце процесса ({ex.Message}) — он мог остаться открытым. " +
+                          "Закройте его в AdsPower, если он не нужен.");
                 }
             }
         }
@@ -1226,22 +1433,34 @@ public sealed class BrowserSessions : IAsyncDisposable
         }
     }
 
-    /// <summary>При запуске Pepa: забыть сессии процессов, которые уже не активны. Внешних действий не выполняется.</summary>
+    /// <summary>
+    /// При запуске Pepa: забыть сессии процессов, которые уже не активны. Внешних действий не выполняется (после сбоя ничего
+    /// не делается само) — но о профилях AdsPower, которые Pepa должна была закрыть в конце процесса и не успела (закрылась
+    /// раньше), сообщается в журнале процесса.
+    /// </summary>
     public void Prune(IReadOnlyCollection<string> activeProcessIds)
     {
         var active = activeProcessIds.ToHashSet(StringComparer.Ordinal);
+        List<BrowserSessionInfo> stale;
         lock (_registry)
         {
-            var stale = _registry.Where(e => !active.Contains(e.Value.ProcessId)).Select(e => e.Key).ToList();
-            foreach (var key in stale)
+            stale = _registry.Values.Where(i => !active.Contains(i.ProcessId)).ToList();
+            foreach (var info in stale)
             {
-                _registry.Remove(key);
+                _registry.Remove(Key(info.ProcessId, info.Name));
             }
 
             if (stale.Count > 0)
             {
                 WriteRegistry();
             }
+        }
+
+        foreach (var info in stale.Where(i => i is { Kind: BrowserKind.AdsPower, CloseOnFinish: true, OwnTab: false, ProfileId: not null }))
+        {
+            ReportReleaseProblem(info.ProcessId,
+                $"Pepa закрылась раньше, чем закрыла профиль AdsPower {info.ProfileId} в конце процесса, — он мог остаться открытым. " +
+                "Закройте его в AdsPower, если он не нужен (следующий процесс с этим профилем закроет его сам).");
         }
     }
 
@@ -1339,6 +1558,16 @@ public sealed class BrowserSessions : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        // Закрытие браузеров завершившихся процессов — до конца (в разумный срок): иначе профиль остался бы открытым.
+        try
+        {
+            await Task.WhenAll(_releases.Keys).WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Закрытие браузеров завершившихся процессов не закончилось до остановки Pepa.");
+        }
+
         foreach (var session in _sessions.Values)
         {
             await CloseQuietlyAsync(session);

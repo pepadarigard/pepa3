@@ -119,7 +119,7 @@ public sealed class TelegramTests
         var edited = FakeTelegram.Incoming(Bot, "✅ Код 1234", 7, sentAt) with { EditedAt = sentAt.AddSeconds(3) };
         var input = TelegramEvents.ToEvent(edited);
         Assert.Equal(TelegramEvents.EditedType, input.Type);
-        Assert.Equal("0:user:2002:7:edit:" + sentAt.AddSeconds(3).ToUnixTimeSeconds(), input.ExternalId);
+        Assert.StartsWith("0:user:2002:7:edit:" + sentAt.AddSeconds(3).ToUnixTimeSeconds() + ":", input.ExternalId);
         Assert.True(input.Payload!["edited"]!.GetValue<bool>());
         await h.Engine.PublishEventAsync(input);
 
@@ -281,6 +281,35 @@ public sealed class TelegramTests
         Assert.Equal(attempts[0].Checkpoint!["randomId"]!.GetValue<string>(), attempts[1].Checkpoint!["randomId"]!.GetValue<string>());
         Assert.Equal(StepState.Succeeded, attempts[1].State);
         Assert.Equal(t.Sent.Single().Message.MessageId, done.Variables["sent"]!["messageId"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task Send_whose_outcome_is_uncertain_stops_for_a_decision_and_a_retry_keeps_the_same_key()
+    {
+        var (h, t) = await SetupAsync();
+        await using var _ = h;
+        // Библиотека повторила запрос после «-503» (или он ещё в пути), а ответ — отказ: сообщение могло уйти позже.
+        t.Reject = new TelegramSendUncertainException("Итог отправки неизвестен.");
+        var id = await h.RunAsync(new ScenarioBuilder("Неизвестный итог")
+            .Node("start", "start")
+            .Node("send", "telegram.send", new { chat = "@ivan", text = "Один раз" })
+            .Node("end", "end")
+            .Node("failed", "end", new { outcome = "failure", message = "ветка «Ошибка»" })
+            .Chain("start", "send", "end").Edge("send", "failed", Ports.Error).Build());
+        var stopped = await h.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
+
+        // Не «не отправлено»: ни ветки «Ошибка», ни «Исправить и повторить» (новый ключ отправил бы второе сообщение).
+        Assert.Equal(AttentionKind.UnknownStep, stopped.Attention);
+        var allowed = h.Engine.GetAllowedActions(stopped, await h.Store.GetTokensAsync(id));
+        Assert.DoesNotContain(ProcessAction.RetryWithChanges, allowed);
+        Assert.DoesNotContain(ProcessAction.RetryWithNewBlock, allowed);
+
+        t.Reject = null;
+        await h.Engine.ResumeAsync(id, ResumeAction.Retry);
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        var attempts = (await h.StepsAsync(id)).Where(s => s.NodeId == "send").ToList();
+        Assert.Equal(attempts[0].Checkpoint!["randomId"]!.GetValue<string>(), attempts[^1].Checkpoint!["randomId"]!.GetValue<string>());
+        Assert.Single(t.Sent);
     }
 
     [Fact]

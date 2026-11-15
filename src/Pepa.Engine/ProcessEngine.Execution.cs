@@ -365,7 +365,7 @@ public sealed partial class ProcessEngine
             switch (verification.Outcome)
             {
                 case VerificationOutcome.Done:
-                    result = NodeResult.Ok(verification.Port, verification.VariableUpdates ?? EmptyUpdates, verification.Output);
+                    result = Verified(verification);
                     resolution = $"Итог был неизвестен ({unknown.Reason}). Проверка: {verification.Message}";
                     break;
                 case VerificationOutcome.NotDone:
@@ -387,7 +387,7 @@ public sealed partial class ProcessEngine
             var earlier = await SafeVerifyAsync(executor, VerifyContext(process, node, uncertain[0]));
             if (earlier.Outcome == VerificationOutcome.Done)
             {
-                result = NodeResult.Ok(earlier.Port, earlier.VariableUpdates ?? EmptyUpdates, earlier.Output);
+                result = Verified(earlier);
                 resolution = $"Попытка не удалась ({final.Error}), но прошлая выполнилась. Проверка: {earlier.Message}";
             }
             else if (earlier.Outcome == VerificationOutcome.NotDone)
@@ -799,6 +799,11 @@ public sealed partial class ProcessEngine
             case NodeResult.WaitForEvent waitEvent:
             {
                 var spec = waitEvent.Subscription;
+                // Окно «пришедшие раньше» — от того, как процесс дошёл до ожидания (отправил вопрос, закончил предыдущий шаг),
+                // а не от записи подписки: между ними могли быть пауза, перезапуск Pepa, долгий шаг соседней ветви или
+                // проверка неизвестного итога — и ответ, пришедший тогда, иначе был бы потерян.
+                var anchor = await WaitAnchorAsync(p, t, node.Id, now);
+                var lookback = Math.Max(0, spec.LookbackSeconds) + (int)Math.Ceiling((now - anchor).TotalSeconds);
                 var subscriptionId = await write.InsertSubscriptionAsync(new SubscriptionRecord
                 {
                     ProcessId = p.Id,
@@ -810,7 +815,7 @@ public sealed partial class ProcessEngine
                     CorrelationKey = string.IsNullOrEmpty(spec.CorrelationKey) ? null : spec.CorrelationKey,
                     MatchExpression = string.IsNullOrWhiteSpace(spec.MatchExpression) ? null : spec.MatchExpression,
                     Priority = spec.Priority,
-                    LookbackSeconds = Math.Max(0, spec.LookbackSeconds),
+                    LookbackSeconds = lookback,
                     SaveTo = string.IsNullOrEmpty(spec.SaveTo) ? null : spec.SaveTo,
                     Purpose = spec.Purpose,
                     State = SubscriptionState.Active,
@@ -837,7 +842,7 @@ public sealed partial class ProcessEngine
                 effects.Reclaim.Add(new ReclaimRequest(NormalizeSource(spec.Source),
                     string.IsNullOrWhiteSpace(spec.EventType) ? null : spec.EventType,
                     string.IsNullOrEmpty(spec.CorrelationKey) ? null : spec.CorrelationKey,
-                    now - TimeSpan.FromSeconds(Math.Max(0, spec.LookbackSeconds))));
+                    now - TimeSpan.FromSeconds(lookback)));
                 break;
             }
 
@@ -1437,4 +1442,28 @@ public sealed partial class ProcessEngine
 
     private string FormatLocal(DateTimeOffset moment) =>
         TimeZoneInfo.ConvertTime(moment, _time.LocalTimeZone).ToString("dd.MM.yyyy HH:mm:ss");
+
+    /// <summary>
+    /// С какого времени ответ на ожидание мог прийти: начало последнего действия во внешнем мире перед ожиданием (с первой
+    /// попытки того посещения — ответ мог прийти и на неё), иначе конец предыдущего шага, иначе появление маркера. Не позже
+    /// «сейчас».
+    /// </summary>
+    private async Task<DateTimeOffset> WaitAnchorAsync(ProcessRecord process, TokenRecord token, string waitNodeId, DateTimeOffset now)
+    {
+        var visit = await _store.GetLastVisitBeforeAsync(process.Id, token.Id, waitNodeId);
+        DateTimeOffset? anchor = visit.Count == 0
+            ? null
+            : visit.Any(s => s.Effect == NodeEffect.External)
+                ? visit.Select(s => s.StartedAt ?? s.FinishedAt).Where(at => at is not null).Min()
+                : visit[^1].FinishedAt ?? visit[^1].StartedAt;
+        var at = anchor ?? token.CreatedAt;
+        return at < now ? at : now;
+    }
+
+    /// <summary>Проверка подтвердила, что действие выполнено: итог шага — как у выполненного (с освобождением ресурсов).</summary>
+    private static NodeResult.Success Verified(VerificationResult verification) =>
+        NodeResult.Ok(verification.Port, verification.VariableUpdates ?? EmptyUpdates, verification.Output) with
+        {
+            ReleaseResources = verification.ReleaseResources,
+        };
 }

@@ -31,6 +31,13 @@ public interface IPepaStore
     Task<StepRecord?> GetLastCheckpointStepAsync(string processId, string tokenId, string nodeId, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Шаги последнего посещения маркером блока, отличного от <paramref name="exceptNodeId"/> (все попытки того посещения): откуда
+    /// маркер пришёл в ожидание — и с какого времени мог прийти ответ.
+    /// </summary>
+    Task<IReadOnlyList<StepRecord>> GetLastVisitBeforeAsync(string processId, string tokenId, string exceptNodeId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Попытки этого посещения блока, которые могли выполниться (по порядку): с неизвестным итогом или с ошибкой «могло
     /// выполниться, но повтор безопасен» (<see cref="Core.Nodes.NodeResult.Failure.MaybeExecuted"/>).
     /// </summary>

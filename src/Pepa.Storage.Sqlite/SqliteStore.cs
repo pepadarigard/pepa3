@@ -391,6 +391,27 @@ public sealed partial class SqliteStore : IPepaStore
         (await QueryAsync("SELECT * FROM steps WHERE id = $id;", c => c.Parameters.AddWithValue("$id", stepId),
             ReadStep, cancellationToken)).FirstOrDefault();
 
+    public Task<IReadOnlyList<StepRecord>> GetLastVisitBeforeAsync(string processId, string tokenId, string exceptNodeId,
+        CancellationToken cancellationToken = default) =>
+        QueryAsync("""
+                   WITH last AS (SELECT id, node_id FROM steps
+                                 WHERE process_id = $p AND token_id = $t AND node_id <> $n
+                                 ORDER BY id DESC LIMIT 1)
+                   SELECT * FROM steps
+                   WHERE process_id = $p AND token_id = $t AND node_id = (SELECT node_id FROM last)
+                     AND id <= (SELECT id FROM last)
+                     AND id >= (SELECT COALESCE(MAX(s.id), 0) FROM steps s
+                                WHERE s.process_id = $p AND s.token_id = $t AND s.node_id = (SELECT node_id FROM last)
+                                  AND s.attempt = 1 AND s.id <= (SELECT id FROM last))
+                   ORDER BY id;
+                   """,
+            c =>
+            {
+                c.Parameters.AddWithValue("$p", processId);
+                c.Parameters.AddWithValue("$t", tokenId);
+                c.Parameters.AddWithValue("$n", exceptNodeId);
+            }, ReadStep, cancellationToken);
+
     public async Task<StepRecord?> GetLastCheckpointStepAsync(string processId, string tokenId, string nodeId,
         CancellationToken cancellationToken = default) =>
         // Посещение блока начинается шагом с попыткой 1: снимки прежних посещений (цикл) не подходят, а шаг без снимка

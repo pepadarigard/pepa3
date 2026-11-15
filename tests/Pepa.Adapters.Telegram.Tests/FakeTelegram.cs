@@ -25,7 +25,7 @@ internal sealed class FakeTelegram : ITelegramGateway
     public bool FailBeforeSend { get; set; }
 
     /// <summary>Telegram отказывается принять сообщение (например, нет прав писать в чат).</summary>
-    public TelegramSendRejectedException? Reject { get; set; }
+    public Exception? Reject { get; set; }
 
     /// <summary>Входящие и чужие сообщения в истории чатов (для проверки отправки).</summary>
     public ConcurrentQueue<(TelegramPeer Chat, TelegramHistoryMessage Message)> History { get; } = new();

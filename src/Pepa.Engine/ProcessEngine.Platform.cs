@@ -435,9 +435,20 @@ public sealed partial class ProcessEngine
                 : NodeResult.Ok(Ports.Timeout, $"Событие не пришло до {FormatLocal(wakeAt)} — тайм-аут.");
             var applied = await ApplyResultAsync(process, graph, token, node, descriptor, step, timeoutResult, null,
                 decide: async write =>
-                    await write.TrySetSubscriptionStateAsync(subscription.Id, SubscriptionState.Active, SubscriptionState.Expired, null)
+                {
+                    // Ответ, принятый до срока, но ещё не сопоставленный (события сопоставляются по одному, а после обрыва
+                    // связи их может прийти сразу много), не должен проиграть тайм-ауту (D-033, D-080). Читаем под правом
+                    // записи: всё, что принято раньше, уже записано. Тайм-аут проверится снова на следующем шаге времени.
+                    if (!isChild && await UnroutedReplyMayExistAsync(subscription))
+                    {
+                        SignalRouter();
+                        return null;
+                    }
+
+                    return await write.TrySetSubscriptionStateAsync(subscription.Id, SubscriptionState.Active, SubscriptionState.Expired, null)
                         ? timeoutResult
-                        : null);
+                        : null;
+                });
             if (applied && isChild && subscription.CorrelationKey is { } childId)
             {
                 await CancelChildSafelyAsync(childId);
@@ -623,6 +634,37 @@ public sealed partial class ProcessEngine
         {
             _logger.LogError(ex, "Обработчик пробуждения компьютера завершился с ошибкой.");
         }
+    }
+
+    /// <summary>
+    /// Запись в журнал процесса снаружи движка — например, адаптер не смог закрыть профиль после завершения процесса. Ошибка
+    /// записи не мешает вызывающему (журнал — не главное), но пишется в журнал приложения.
+    /// </summary>
+    public async Task AddJournalNoteAsync(string processId, JournalLevel level, string message)
+    {
+        try
+        {
+            await using (var write = await _store.BeginWriteAsync())
+            {
+                await write.AddJournalAsync(Journal(processId, level, message));
+                await write.CommitAsync();
+            }
+
+            Notify(processId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Не удалось записать в журнал процесса {Process}: {Message}", processId, message);
+        }
+    }
+
+    /// <summary>Есть ли принятое, но ещё не сопоставленное событие, которое может быть ответом этому ожиданию.</summary>
+    private async Task<bool> UnroutedReplyMayExistAsync(SubscriptionRecord subscription)
+    {
+        const int Limit = 1000;
+        var pending = await _store.ListEventsAsync(new EventQuery { States = [EventState.Received], Limit = Limit });
+        return pending.Count >= Limit || pending.Any(e => e.Source == subscription.Source &&
+            SubscriptionAccepts(subscription.EventType, subscription.CorrelationKey, e) && WithinWaitWindow(subscription, e));
     }
 
     private async Task<bool> TryResolveResourceWaitAsync(ProcessRecord process, ScenarioGraph graph, TokenRecord token,

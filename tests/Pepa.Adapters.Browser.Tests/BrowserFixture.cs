@@ -1,4 +1,5 @@
 using Pepa.Adapters.FileSystem;
+using Pepa.Engine.Persistence;
 using Pepa.Engine.Tests.Infrastructure;
 
 namespace Pepa.Adapters.Browser.Tests;
@@ -55,7 +56,12 @@ internal sealed class BrowserFixture : IAsyncDisposable
         return Sessions;
     }
 
-    private void Subscribe() => H.Engine.ProcessFinished += id => _ = Sessions.ReleaseProcessAsync(id);
+    private void Subscribe()
+    {
+        H.Engine.ProcessFinished += id => _ = Sessions.ReleaseProcessAsync(id);
+        // Как в Pepa: неудачное закрытие профиля в конце — в журнале процесса.
+        Sessions.ReleaseProblem += (id, message) => _ = H.Engine.AddJournalNoteAsync(id, JournalLevel.Warning, message);
+    }
 
     /// <summary>Закрыть Pepa (браузеры, запущенные ею, закрываются; профили AdsPower остаются открытыми) и открыть снова.</summary>
     public async Task RestartAsync()

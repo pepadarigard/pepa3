@@ -255,6 +255,9 @@ public sealed class PepaHost : IAsyncDisposable
         engine.TriggersChanged += () => events.Publish("triggers");
         // Процесс завершился — закрыть его браузеры (и профили AdsPower, если так настроено в блоке).
         engine.ProcessFinished += processId => _ = browsers.ReleaseProcessAsync(processId);
+        browsers.Logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger<BrowserSessions>();
+        // Профиль не закрылся в конце процесса (или Pepa закрылась раньше) — в журнале процесса, а не только в файле журнала.
+        browsers.ReleaseProblem += (processId, message) => _ = engine.AddJournalNoteAsync(processId, JournalLevel.Warning, message);
 
         // Пока Telegram после запуска догружает пропущенные сообщения, тайм-ауты ожиданий ответа не наступают. Так же — после
         // пропажи связи и сна компьютера (D-080): ответ, пришедший вовремя, не должен проиграть тайм-ауту.

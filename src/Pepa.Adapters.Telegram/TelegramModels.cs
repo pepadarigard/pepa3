@@ -160,6 +160,12 @@ public sealed class TelegramSendRejectedException(string message, bool retryable
     public bool Retryable { get; } = retryable;
 }
 
+/// <summary>
+/// Итог отправки неизвестен: библиотека повторяла запрос (после «-503» или переподключения) или он ещё в пути, а ответ —
+/// отказ, обрыв или тайм-аут. Сообщение могло уйти, в том числе позже, — сразу проверять историю бесполезно.
+/// </summary>
+public sealed class TelegramSendUncertainException(string message) : Exception(message);
+
 /// <summary>Сообщение с этим ключом от повторов уже отправлено раньше (прошлой попыткой шага): Telegram второе не принял.</summary>
 public sealed class TelegramAlreadySentException() : Exception("Telegram сообщает, что это сообщение уже отправлено прошлой попыткой.");
 
@@ -179,9 +185,10 @@ public static class TelegramEvents
     {
         Source = Source,
         Type = message.EditedAt is null ? MessageType : EditedType,
-        // Каждое изменение — своё событие (по времени изменения); то же изменение, пришедшее снова, — повтор.
+        // Каждое изменение — своё событие (по времени изменения и видимому содержимому: время у Telegram — с точностью до
+        // секунды, а бот может изменить сообщение дважды за секунду); то же изменение, пришедшее снова, — повтор.
         ExternalId = $"{message.AccountId}:{message.Chat.Key}:{message.MessageId}" +
-                     (message.EditedAt is { } edited ? $":edit:{edited.ToUnixTimeSeconds()}" : ""),
+                     (message.EditedAt is { } edited ? $":edit:{edited.ToUnixTimeSeconds()}:{EditFingerprint(message)}" : ""),
         CorrelationKey = message.Chat.Key,
         OccurredAt = (message.EditedAt ?? message.Date) + message.ClockOffset,
         Payload = new JsonObject
@@ -198,6 +205,16 @@ public static class TelegramEvents
             ["media"] = message.Media is { } media ? MediaJson(media) : null,
         },
     };
+
+    /// <summary>Отпечаток видимого содержимого (текст, кнопки, вложение) — одинаков после перезапуска (не GetHashCode).</summary>
+    private static string EditFingerprint(TelegramIncomingMessage message)
+    {
+        var visible = new JsonArray(
+            JsonValue.Create(message.Text),
+            new JsonArray(message.Buttons.Select(b => (JsonNode)ButtonJson(b)).ToArray()),
+            message.Media is { } media ? MediaJson(media) : null).ToJsonString();
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(visible)))[..12];
+    }
 
     public static JsonObject ButtonJson(TelegramButton button) => new()
     {

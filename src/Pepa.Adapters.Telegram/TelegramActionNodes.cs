@@ -182,6 +182,11 @@ public sealed class PressTelegramButtonNode(ITelegramGateway telegram) : INodeEx
         {
             return new NodeResult.Unknown(ex.Message);
         }
+        catch (TelegramSendUncertainException ex)
+        {
+            // Текст кнопки клавиатуры мог уйти позже — сразу не проверяем, решает человек.
+            return new NodeResult.Unknown(ex.Message) { AlreadyChecked = true };
+        }
         catch (TelegramAlreadySentException)
         {
             // Текст кнопки уже отправлен прошлой попыткой (Telegram узнал ключ) — второй раз не отправлен.

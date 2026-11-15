@@ -184,7 +184,7 @@ public sealed partial class ProcessEngine
         {
             case VerificationOutcome.Done:
                 await ApplyResultAsync(process, ExecutionGraph(process), token, node, executor.Descriptor, step,
-                    NodeResult.Ok(verification.Port, verification.VariableUpdates ?? EmptyUpdates, verification.Output),
+                    Verified(verification),
                     $"проверено — действие выполнено. {verification.Message}");
                 return new ControlResult($"Проверка подтвердила, что действие выполнено. Процесс продолжен. {verification.Message}");
 
@@ -253,7 +253,7 @@ public sealed partial class ProcessEngine
         {
             case VerificationOutcome.Done:
                 await ApplyResultAsync(process, ExecutionGraph(process), token, node, executor.Descriptor, step,
-                    NodeResult.Ok(verification.Port, verification.VariableUpdates ?? EmptyUpdates, verification.Output),
+                    Verified(verification),
                     $"проверено — прошлая попытка выполнила действие. {verification.Message}",
                     extraWrites: (write, _, _, effects) => ReleaseTokenWaitAsync(write, process.Id, token, effects));
                 return new ControlResult($"Проверка подтвердила, что действие выполнено (прошлой попыткой). Процесс продолжен. {verification.Message}");

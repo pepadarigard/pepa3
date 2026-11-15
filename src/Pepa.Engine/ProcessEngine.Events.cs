@@ -113,6 +113,15 @@ public sealed partial class ProcessEngine
 
     private async Task RouterLoopAsync(CancellationToken stop)
     {
+        try
+        {
+            await ReclaimForActiveWaitsAsync(stop);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex, "Ошибка сопоставления событий, не подошедших никому, с ожиданиями после запуска.");
+        }
+
         while (!stop.IsCancellationRequested)
         {
             try
@@ -441,6 +450,35 @@ public sealed partial class ProcessEngine
     private static bool SubscriptionAccepts(string? eventType, string? correlationKey, EventRecord record) =>
         EventTypes.Accepts(eventType, record.Type) &&
         (correlationKey is null || string.Equals(correlationKey, record.CorrelationKey, StringComparison.Ordinal));
+
+    /// <summary>
+    /// После запуска: необработанные события, которые подходят действующим ожиданиям (в их окне), — им. Ожидание могло
+    /// записаться, а Pepa упасть до того, как ему предложили пришедшее раньше. Применится событие, как и всё после
+    /// перезапуска, только после решения пользователя.
+    /// </summary>
+    private async Task ReclaimForActiveWaitsAsync(CancellationToken cancellationToken)
+    {
+        await _routingLock.WaitAsync(cancellationToken);
+        try
+        {
+            var unmatched = await _store.ListEventsAsync(new EventQuery { States = [EventState.Unmatched], Limit = 500 }, cancellationToken);
+            foreach (var source in unmatched.Select(e => e.Source).Distinct(StringComparer.Ordinal).ToList())
+            {
+                var waits = await _store.GetActiveSubscriptionsAsync(source, cancellationToken);
+                foreach (var record in unmatched
+                             .Where(e => e.Source == source &&
+                                         waits.Any(w => SubscriptionAccepts(w.EventType, w.CorrelationKey, e) && WithinWaitWindow(w, e)))
+                             .OrderBy(e => e.Id))
+                {
+                    await RouteEventAsync(record, RouteMode.Rematch, cancellationToken);
+                }
+            }
+        }
+        finally
+        {
+            _routingLock.Release();
+        }
+    }
 
     /// <summary>Новое ожидание с окном «пришедшие раньше»: какие необработанные события стоит предложить подпискам.</summary>
     private sealed record ReclaimRequest(string Source, string? EventType, string? CorrelationKey, DateTimeOffset Since);

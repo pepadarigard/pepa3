@@ -38,6 +38,9 @@ internal sealed class FakeAdsPower : IDisposable
     /// <summary>Отказ AdsPower при открытии профиля: профиль → текст ответа («code»: -1).</summary>
     public Dictionary<string, string> StartErrors { get; } = new();
 
+    /// <summary>Отказ AdsPower при закрытии профиля: профиль → текст ответа.</summary>
+    public Dictionary<string, string> StopErrors { get; } = new();
+
     public bool IsOpen(string profileId)
     {
         lock (_lock)
@@ -184,6 +187,8 @@ internal sealed class FakeAdsPower : IDisposable
                     : new JsonObject { ["status"] = "Active", ["ws"] = new JsonObject { ["puppeteer"] = ws } });
             }
 
+            case "/api/v2/browser-profile/stop" or "/api/v1/browser/stop" when StopErrors.TryGetValue(profile!, out var stopError):
+                return new JsonObject { ["code"] = -1, ["msg"] = stopError, ["data"] = new JsonObject() };
             case "/api/v2/browser-profile/stop" or "/api/v1/browser/stop":
                 Stop(profile!);
                 return Ok(null);

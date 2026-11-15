@@ -758,7 +758,8 @@ public sealed class ClickNode(BrowserSessions sessions) : INodeExecutor
         ],
     };
 
-    public TimeSpan? ExpectedDuration(JsonObject input) => BrowserNodes.WaitSpan(input) * 2;
+    // Проба, нажатие (с ожиданием начатого перехода) и ожидание «expect» — каждое в свой срок.
+    public TimeSpan? ExpectedDuration(JsonObject input) => BrowserNodes.WaitSpan(input) * 3;
 
     public ValueTask<NodeResult> ExecuteAsync(NodeExecutionContext context, CancellationToken cancellationToken) =>
         BrowserNodes.Run(context, sessions, cancellationToken, async (_, page) =>
@@ -766,32 +767,43 @@ public sealed class ClickNode(BrowserSessions sessions) : INodeExecutor
             var locator = BrowserNodes.Locate(page, context);
             var selector = context.RequireString("selector");
             await BrowserNodes.WaitReadyAsync(locator, BrowserNodes.WaitMs(context), selector);
+            var clicks = context.GetString("clicks");
+            Task Click(bool trial) => clicks switch
+            {
+                "double" => locator.DblClickAsync(new LocatorDblClickOptions { Timeout = BrowserNodes.WaitMs(context), Trial = trial }),
+                "right" => locator.ClickAsync(new LocatorClickOptions { Button = MouseButton.Right, Timeout = BrowserNodes.WaitMs(context), Trial = trial }),
+                _ => locator.ClickAsync(new LocatorClickOptions { Timeout = BrowserNodes.WaitMs(context), Trial = trial }),
+            };
+
+            // Сначала — проба без нажатия: тайм-аут здесь значит «элемент так и не стал доступен», нажатия не было.
             try
             {
-                switch (context.GetString("clicks"))
-                {
-                    case "double":
-                        await locator.DblClickAsync(new LocatorDblClickOptions { Timeout = BrowserNodes.WaitMs(context) });
-                        break;
-                    case "right":
-                        await locator.ClickAsync(new LocatorClickOptions { Button = MouseButton.Right, Timeout = BrowserNodes.WaitMs(context) });
-                        break;
-                    default:
-                        await locator.ClickAsync(new LocatorClickOptions { Timeout = BrowserNodes.WaitMs(context) });
-                        break;
-                }
+                await Click(trial: true);
             }
             catch (PlaywrightTimeout)
             {
-                // Playwright не нажимает, пока элемент не готов: по тайм-ауту нажатия не было.
                 return NodeResult.Fail($"Элемент «{selector}» так и не стал доступен для нажатия (закрыт другим элементом или неактивен).");
+            }
+
+            // Само нажатие: после него Playwright ждёт начатый им переход страницы — в тот же срок. Тайм-аут здесь не значит
+            // «не нажато»: форма могла уже уйти на сервер (оплата, заявка), и повтор нажал бы второй раз.
+            try
+            {
+                await Click(trial: false);
+            }
+            catch (PlaywrightTimeout)
+            {
+                return new NodeResult.Unknown(
+                    $"Нажатие на «{selector}» могло произойти, но страница не ответила за {BrowserNodes.WaitMs(context) / 1000:0} с — неизвестно, сработало ли нажатие.");
             }
 
             if (context.GetString("expect") is { Length: > 0 } expect)
             {
                 try
                 {
-                    await page.Locator(expect).First.WaitForAsync(new LocatorWaitForOptions { Timeout = BrowserNodes.WaitMs(context) });
+                    // Только видимый: скрытая заготовка «Готово» на странице — не признак того, что нажатие сработало.
+                    await page.Locator(expect).Filter(new LocatorFilterOptions { Visible = true }).First
+                        .WaitForAsync(new LocatorWaitForOptions { Timeout = BrowserNodes.WaitMs(context) });
                 }
                 catch (PlaywrightTimeout)
                 {
@@ -815,9 +827,10 @@ public sealed class ClickNode(BrowserSessions sessions) : INodeExecutor
             return VerificationResult.Inconclusive(unavailable);
         }
 
-        return await page.Locator(expect).CountAsync() > 0
+        // Как и при выполнении — только видимый: сайты держат скрытые заготовки сообщений («Сохранено») на странице заранее.
+        return await page.Locator(expect).Filter(new LocatorFilterOptions { Visible = true }).CountAsync() > 0
             ? VerificationResult.Done($"на странице есть «{expect}»")
-            : VerificationResult.Inconclusive($"«{expect}» на странице нет — нажатие могло не сработать или страница изменилась");
+            : VerificationResult.Inconclusive($"«{expect}» на странице не виден — нажатие могло не сработать или страница изменилась");
     }
 }
 
@@ -1221,31 +1234,53 @@ public sealed class CloseBrowserNode(BrowserSessions sessions) : INodeExecutor
     public async ValueTask<NodeResult> ExecuteAsync(NodeExecutionContext context, CancellationToken cancellationToken)
     {
         var name = BrowserNodes.SessionName(context);
-        BrowserSessionInfo? info;
+        BrowserClosed? closed;
         try
         {
-            info = await sessions.CloseAsync(context.ProcessId, name, context.GetBoolean("stopProfile", true), cancellationToken);
+            closed = await sessions.CloseAsync(context.ProcessId, name, context.GetBoolean("stopProfile", true), cancellationToken);
         }
         catch (AdsPowerException ex)
         {
             return NodeResult.Fail($"Pepa отключилась от браузера, но закрыть профиль в AdsPower не удалось: {ex.Message}");
         }
 
-        if (info is null)
+        if (closed is null)
         {
             return new NodeResult.Success(Ports.Out, new Dictionary<string, JsonNode?>(), null,
                 $"Браузер «{name}» уже был закрыт.", MessageLevel.Warning);
         }
 
-        return new NodeResult.Success(Ports.Out, new Dictionary<string, JsonNode?>(), null,
-            info.Kind == BrowserKind.AdsPower ? $"Профиль AdsPower {info.ProfileId} закрыт." : $"Браузер «{name}» закрыт.")
+        var info = closed.Info;
+        // Что сделано на самом деле: профиль, открытый не Pepa (или уже у другого процесса), не закрыт — так и сказано.
+        var message = closed.Note ?? (info.Kind != BrowserKind.AdsPower ? $"Браузер «{name}» закрыт."
+            : closed.ProfileStopped ? $"Профиль AdsPower {info.ProfileId} закрыт."
+            : $"Pepa отключилась от профиля AdsPower {info.ProfileId}, профиль оставлен открытым.");
+        return new NodeResult.Success(Ports.Out, new Dictionary<string, JsonNode?>(), null, message,
+            closed.Note is null ? MessageLevel.Info : MessageLevel.Warning)
         {
             ReleaseResources = info.ResourceKey is { } key ? [key] : null,
         };
     }
 
-    public ValueTask<VerificationResult> VerifyAsync(NodeExecutionContext context, CancellationToken cancellationToken) =>
-        ValueTask.FromResult(sessions.IsOpen(context.ProcessId, BrowserNodes.SessionName(context))
-            ? VerificationResult.NotDone("браузер ещё открыт")
-            : VerificationResult.Done("браузер закрыт"));
+    /// <summary>Что закрывается — для проверки после перезапуска (сессии в памяти тогда нет, а запись о ней — есть).</summary>
+    public ValueTask<JsonObject?> PrepareAsync(NodeExecutionContext context, CancellationToken cancellationToken) =>
+        ValueTask.FromResult(sessions.FindInfo(context.ProcessId, BrowserNodes.SessionName(context)) is { } info
+            ? new JsonObject { ["resourceKey"] = info.ResourceKey, ["profileId"] = info.ProfileId }
+            : null);
+
+    public ValueTask<VerificationResult> VerifyAsync(NodeExecutionContext context, CancellationToken cancellationToken)
+    {
+        var name = BrowserNodes.SessionName(context);
+        // Закрыт, только если нет ни подключения, ни записи о сессии: запись снимается последней — после закрытия профиля.
+        if (sessions.IsOpen(context.ProcessId, name) || sessions.FindInfo(context.ProcessId, name) is not null)
+        {
+            return ValueTask.FromResult(VerificationResult.NotDone("браузер ещё открыт"));
+        }
+
+        return ValueTask.FromResult(VerificationResult.Done("браузер закрыт") with
+        {
+            // Как у выполненного шага: профиль освобождается для следующих процессов.
+            ReleaseResources = context.Checkpoint?.GetString("resourceKey") is { Length: > 0 } key ? [key] : null,
+        });
+    }
 }

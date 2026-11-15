@@ -233,6 +233,9 @@ public sealed record VerificationResult(
     IReadOnlyDictionary<string, JsonNode?>? VariableUpdates = null,
     JsonObject? Output = null)
 {
+    /// <summary>Выполнено — и ресурсы, которые действие освобождает (как у выполненного шага: «Закрыть браузер» — профиль).</summary>
+    public IReadOnlyList<string>? ReleaseResources { get; init; }
+
     public static VerificationResult Done(string message, JsonObject? output = null) =>
         new(VerificationOutcome.Done, message, Output: output);
 

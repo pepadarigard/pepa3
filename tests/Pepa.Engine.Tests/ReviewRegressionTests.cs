@@ -28,6 +28,8 @@ public sealed class HookStore(IPepaStore inner) : IPepaStore
     public Task<IReadOnlyList<TokenRecord>> GetTokensAsync(IReadOnlyCollection<string> p, CancellationToken c = default) => inner.GetTokensAsync(p, c);
     public Task<IReadOnlyList<StepRecord>> GetStepsAsync(string p, CancellationToken c = default) => inner.GetStepsAsync(p, c);
     public Task<StepRecord?> GetStepAsync(long s, CancellationToken c = default) => inner.GetStepAsync(s, c);
+    public Task<IReadOnlyList<StepRecord>> GetLastVisitBeforeAsync(string processId, string tokenId, string exceptNodeId, CancellationToken cancellationToken = default) =>
+        inner.GetLastVisitBeforeAsync(processId, tokenId, exceptNodeId, cancellationToken);
     public Task<StepRecord?> GetLastCheckpointStepAsync(string p, string t, string n, CancellationToken c = default) => inner.GetLastCheckpointStepAsync(p, t, n, c);
     public Task<IReadOnlyList<StepRecord>> GetUncertainAttemptsAsync(string p, string t, string n, CancellationToken c = default) => inner.GetUncertainAttemptsAsync(p, t, n, c);
     public Task<IReadOnlyList<StepRecord>> GetOpenStepsAsync(string p, CancellationToken c = default) => inner.GetOpenStepsAsync(p, c);
@@ -395,17 +397,17 @@ public sealed class ReviewRegressionTests(ITestOutputHelper output)
         var ev = await h.Engine.PublishEventAsync(new EventInput { Source = "manual", Type = "x" });
         await h.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
 
-        // Пользователь решает через минуту: новое ожидание без окна «пришедшие раньше» старое событие не берёт.
+        // Пользователь решает через минуту: событие не застряло за прежней подпиской, а возвращено — и повтор ожидания его
+        // берёт: оно пришло, когда процесс уже ждал (окно ожидания — от того, как процесс до него дошёл), и применено не было.
         h.Time.Advance(TimeSpan.FromMinutes(1));
         await h.Engine.ResumeAsync(id, ResumeAction.Retry);
-        await h.WaitForStatusAsync(id, ProcessStatus.Waiting);
-        await Task.Delay(300);
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
         var rec = (await h.Store.GetEventAsync(ev.EventId))!;
         var subs = await h.Store.GetSubscriptionsAsync(id);
         output.WriteLine($"event={rec.State}; subs: " + string.Join(", ", subs.Select(x => $"#{x.Id}:{x.State}")));
-        Assert.Equal(EventState.Unmatched, rec.State);
-        Assert.Single(subs, x => x.State == SubscriptionState.Active);
+        Assert.Equal(EventState.Delivered, rec.State);
         Assert.Contains(subs, x => x.State == SubscriptionState.Cancelled);
+        Assert.Contains(subs, x => x.State == SubscriptionState.Fulfilled);
     }
 
     [Fact]

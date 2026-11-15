@@ -254,6 +254,97 @@ public sealed class AdsPowerTests
     }
 
     [Fact]
+    public async Task Close_step_in_the_owners_profile_closes_only_the_process_tabs()
+    {
+        TestBrowser.RequireCdpBrowser();
+        await using var f = await BrowserFixture.CreateAsync(withAdsPower: true);
+        await f.Ads!.OpenByOwnerAsync("k1");
+        var id = await f.H.RunAsync(new ScenarioBuilder("Своя вкладка и закрытие")
+            .Node("start", "start")
+            .Node("open", "adspower.open", new { profileId = "k1", url = f.Site.Url("/form"), ifOpen = "tab" })
+            .Node("close", "browser.close", new { stopProfile = true })
+            .Node("end", "end")
+            .Chain("start", "open", "close", "end")
+            .Build());
+        await f.H.WaitForStatusAsync(id, ProcessStatus.Completed);
+
+        // Окно владельца с его вкладками не закрыто; закрыта только вкладка процесса.
+        Assert.True(f.Ads.IsOpen("k1"));
+        Assert.DoesNotContain("POST /api/v2/browser-profile/stop", f.Ads.Requests);
+        Assert.DoesNotContain(await f.Ads.TabUrlsAsync("k1"), url => url.Contains("/form", StringComparison.Ordinal));
+        Assert.Contains(await f.H.Store.GetJournalAsync(id), j => j.Message.Contains("закрыты только вкладки процесса", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Profile_left_open_by_Pepa_closed_and_reopened_by_the_owner_is_not_taken_over()
+    {
+        TestBrowser.RequireCdpBrowser();
+        await using var f = await BrowserFixture.CreateAsync(withAdsPower: true);
+        var first = await f.H.RunAsync(FillInProfile(f, "первый", new { profileId = "k1", url = f.Site.Url("/form"), closeOnFinish = false }));
+        await f.H.WaitForStatusAsync(first, ProcessStatus.Completed);
+
+        // Профиль закрыли без Pepa (перезагрузка, AdsPower), а потом владелец открыл его сам и работает в нём.
+        await f.RestartAsync();
+        f.Ads!.CloseExternally("k1");
+        await f.Ads.OpenByOwnerAsync("k1");
+        await f.Ads.OpenTabAsync("k1", f.Site.Url("/second?owner=1"));
+
+        var second = await f.H.RunAsync(UseProfile(f, "k1", "второй"));
+        var stopped = await f.H.WaitForStatusAsync(second, ProcessStatus.NeedsAttention);
+        Assert.Contains("открыла его не Pepa", stopped.StatusMessage);
+        await f.H.Engine.CancelAsync(second);
+        Assert.True(f.Ads.IsOpen("k1"));
+        Assert.Contains(await f.Ads.TabUrlsAsync("k1"), url => url.Contains("owner=1", StringComparison.Ordinal));
+        Assert.Equal(1, f.Site.Submits);
+    }
+
+    [Fact]
+    public async Task After_a_reboot_the_owners_new_window_is_not_closed_when_the_old_process_is_stopped()
+    {
+        TestBrowser.RequireCdpBrowser();
+        await using var f = await BrowserFixture.CreateAsync(withAdsPower: true);
+        var id = await f.H.RunAsync(UseProfile(f, "k1", "до перезагрузки", holdSeconds: 600));
+        await f.H.WaitForAsync(id, p => p.Status == ProcessStatus.Waiting && p.StepCount >= 3);
+
+        // Перезагрузка: профиль закрылся вместе с Windows, после неё владелец открыл его сам.
+        await f.RestartAsync();
+        f.Ads!.CloseExternally("k1");
+        await f.Ads.OpenByOwnerAsync("k1");
+
+        // «Продолжить» — процесс не работает в окне владельца, а сообщает, что страница потеряна.
+        f.H.Time.Advance(TimeSpan.FromSeconds(601));
+        await f.H.Engine.ResumeAsync(id, ResumeAction.Continue);
+        var lost = await f.H.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
+        Assert.Contains("открыт заново не Pepa", lost.StatusMessage);
+
+        // Остановка процесса окно владельца не закрывает.
+        await f.H.Engine.CancelAsync(id);
+        await f.H.WaitForStatusAsync(id, ProcessStatus.Cancelled);
+        await Task.Delay(1000, TestContext.Current.CancellationToken);
+        Assert.True(f.Ads.IsOpen("k1"));
+        Assert.Equal(0, f.Site.Submits);
+    }
+
+    [Fact]
+    public async Task Failed_close_at_the_end_is_reported_and_the_next_process_really_closes_the_profile()
+    {
+        TestBrowser.RequireCdpBrowser();
+        await using var f = await BrowserFixture.CreateAsync(withAdsPower: true);
+        f.Ads!.StopErrors["k1"] = "Too many request per second, please check";
+        var first = await f.H.RunAsync(FillInProfile(f, "первый", new { profileId = "k1", url = f.Site.Url("/form") }));
+        await f.H.WaitForStatusAsync(first, ProcessStatus.Completed);
+        await f.H.UntilAsync(async () => (await f.H.Store.GetJournalAsync(first)).Any(j => j.Message.Contains("мог остаться открытым", StringComparison.Ordinal)),
+            "о незакрытом профиле сказано в журнале процесса");
+        Assert.True(f.Ads.IsOpen("k1"));
+
+        // Следующий процесс с этим профилем закрывает его по-настоящему, а не «уже у другого процесса».
+        f.Ads.StopErrors.Remove("k1");
+        var second = await f.H.RunAsync(UseProfile(f, "k1", "второй"));
+        await f.H.WaitForStatusAsync(second, ProcessStatus.Completed);
+        Assert.False(f.Ads.IsOpen("k1"));
+    }
+
+    [Fact]
     public async Task Profile_opened_again_under_its_name_has_one_record_and_is_closed_once()
     {
         TestBrowser.RequireCdpBrowser();
