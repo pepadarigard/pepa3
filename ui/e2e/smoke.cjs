@@ -433,6 +433,42 @@ async function main() {
       }
     }
 
+    step("Выбранные процессы: остановить сразу несколько");
+    const waitScenario = await (await fetch(`${base}/api/scenarios`, {
+      method: "POST",
+      headers: { "X-Pepa-Token": token, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "E2E: ждать сигнал",
+        variables: [{ name: "n", type: "text", isInput: true }],
+        nodes: [
+          { id: "start", type: "start", position: { x: 0, y: 0 } },
+          { id: "w", type: "event.wait", position: { x: 260, y: 0 }, config: { source: "manual", eventType: "e2e-never" } },
+          { id: "end", type: "end", position: { x: 520, y: 0 } },
+        ],
+        edges: [
+          { id: "e1", source: "start", sourcePort: "out", target: "w" },
+          { id: "e2", source: "w", sourcePort: "event", target: "end" },
+        ],
+      }),
+    })).json();
+    const waiting = await (await fetch(`${base}/api/scenarios/${waitScenario.id}/run-many`, {
+      method: "POST",
+      headers: { "X-Pepa-Token": token, "Content-Type": "application/json" },
+      body: JSON.stringify({ runs: [{ n: "1" }, { n: "2" }], batchId: "e2ewait01" }),
+    })).json();
+    await page.goto(`${base}/#/runs`);
+    for (const id of waiting.processIds) {
+      await page.getByRole("checkbox", { name: `Выбрать #${id.slice(-6)}` }).check({ timeout: 15000 });
+    }
+    await page.locator('[data-testid="selection-bar"]').getByText("Выбрано: 2").waitFor();
+    await page.locator('[data-testid="selection-bar"]').getByRole("button", { name: "Остановить", exact: true }).click();
+    await page.getByRole("dialog").getByRole("button", { name: "Остановить", exact: true }).click();
+    await page.getByText("Остановить: 2").first().waitFor();
+    for (const id of waiting.processIds) {
+      const p = await (await fetch(`${base}/api/processes/${id}`, { headers: { "X-Pepa-Token": token } })).json();
+      if (p.process.status !== "cancelled") throw new Error(`Процесс ${id} не остановлен: ${p.process.status}`);
+    }
+
     step("Спросить пользователя: вопрос на «Главной» и ответ кнопкой");
     const askScenario = await (await fetch(`${base}/api/scenarios`, {
       method: "POST",

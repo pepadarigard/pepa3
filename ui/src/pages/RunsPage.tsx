@@ -5,6 +5,7 @@ import { EventConflicts, EventsTable, ResourcesCard, useSendEvent } from "../com
 import { GroupActions } from "../components/groupActions";
 import { ProcessActions, ProcessTable } from "../components/process";
 import { QuestionsCard } from "../components/questions";
+import { useProcessSelection } from "../components/selection";
 import { Button, Card, Empty, ErrorState, Loading } from "../components/ui";
 import { formatMoment } from "../lib/format";
 import { attentionAdvice, explainProcess } from "../lib/status";
@@ -15,6 +16,8 @@ export function RunsPage() {
   const resources = useResources();
   const sender = useSendEvent();
   const [eventFilter, setEventFilter] = useState<"recent" | "unmatched">("recent");
+  const running = (active.data ?? []).filter((p) => p.status === "running" || p.status === "waiting" || p.status === "paused");
+  const selection = useProcessSelection(running);
 
   if (active.isLoading) return <div className="page"><Loading /></div>;
   if (active.error) return <div className="page"><ErrorState error={active.error} onRetry={() => active.refetch()} /></div>;
@@ -72,12 +75,16 @@ export function RunsPage() {
       )}
 
       <Card title={`Работают и ждут · ${working.length}`}>
-        {working.length > 0 ? <ProcessTable processes={working} /> : <Empty icon={Activity} title="Сейчас ничего не выполняется" />}
+        {selection.bar}
+        {working.length > 0
+          ? <ProcessTable processes={working} selected={selection.selected} onSelect={selection.onSelect} />
+          : <Empty icon={Activity} title="Сейчас ничего не выполняется" />}
       </Card>
 
       {paused.length > 0 && (
         <Card title={`Приостановлены · ${paused.length}`}>
-          <ProcessTable processes={paused} />
+          {working.length === 0 && selection.bar}
+          <ProcessTable processes={paused} selected={selection.selected} onSelect={selection.onSelect} />
         </Card>
       )}
 

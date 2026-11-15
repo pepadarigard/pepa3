@@ -119,12 +119,23 @@ function confirmationFor(process: ProcessSummary, action: ProcessAction): string
 }
 
 /** Таблица процессов. */
-export function ProcessTable({ processes, showScenario = true, showActions = true }: { processes: ProcessSummary[]; showScenario?: boolean; showActions?: boolean }) {
+export function ProcessTable({ processes, showScenario = true, showActions = true, selected, onSelect }: {
+  processes: ProcessSummary[]; showScenario?: boolean; showActions?: boolean;
+  /** Выбор нескольких процессов (галочки) — для действий над всеми выбранными. */
+  selected?: ReadonlySet<string>; onSelect?: (ids: string[], on: boolean) => void;
+}) {
+  const allSelected = !!selected && processes.length > 0 && processes.every((p) => selected.has(p.id));
   return (
     <div className="table-wrap">
       <table className="table">
         <thead>
           <tr>
+            {onSelect && (
+              <th style={{ width: 28 }}>
+                <input type="checkbox" aria-label="Выбрать все" checked={allSelected}
+                  onChange={(e) => onSelect(processes.map((p) => p.id), e.target.checked)} />
+              </th>
+            )}
             <th>Состояние</th>
             {showScenario && <th>Сценарий</th>}
             <th>Где сейчас / итог</th>
@@ -137,6 +148,12 @@ export function ProcessTable({ processes, showScenario = true, showActions = tru
         <tbody>
           {processes.map((p) => (
             <tr key={p.id} className="clickable" onClick={() => navigate({ page: "process", id: p.id })}>
+              {onSelect && (
+                <td onClick={(e) => e.stopPropagation()}>
+                  <input type="checkbox" aria-label={`Выбрать #${p.shortId}`} checked={selected?.has(p.id) ?? false}
+                    onChange={(e) => onSelect([p.id], e.target.checked)} />
+                </td>
+              )}
               <td>
                 <ProcessStatusBadge status={p.status} />
               </td>
