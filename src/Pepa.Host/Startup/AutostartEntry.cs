@@ -26,6 +26,13 @@ public static class AutostartEntry
     public static string LegacyValueName(string? dataDirectory) =>
         dataDirectory is null ? "Pepa" : $"Pepa ({Path.GetFileName(dataDirectory)})";
 
+    /// <summary>
+    /// Все прежние имена: по имени папки и «Pepa ()» — так прежняя Pepa называла запись папки, указанной с чертой в конце
+    /// («D:\Pepa\data\») или корнем диска (имя папки было пустым).
+    /// </summary>
+    public static IReadOnlyList<string> LegacyValueNames(string? dataDirectory) =>
+        dataDirectory is null ? ["Pepa"] : new[] { LegacyValueName(dataDirectory), "Pepa ()" }.Distinct(StringComparer.Ordinal).ToList();
+
     public static string Hash(string dataDirectory) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(NormalizeDirectory(dataDirectory).ToUpperInvariant())))[..16];
 
@@ -187,7 +194,15 @@ public static class AutostartEntry
         {
             if (arguments[i] == DataDirectoryArgument)
             {
-                return NormalizeDirectory(arguments[i + 1]);
+                // Кавычка в конце — след прежней записи автозапуска: «"D:\Pepa\data\"» Windows читала как «D:\Pepa\data"».
+                // В путях Windows кавычек не бывает, так что это та же папка.
+                var path = arguments[i + 1].TrimEnd('"');
+                if (path.Length == 2 && path[1] == ':')
+                {
+                    path += Path.DirectorySeparatorChar;
+                }
+
+                return path.Length == 0 ? null : NormalizeDirectory(path);
             }
         }
 

@@ -254,6 +254,130 @@ public sealed class AdsPowerTests
     }
 
     [Fact]
+    public async Task Profile_opened_again_under_its_name_has_one_record_and_is_closed_once()
+    {
+        TestBrowser.RequireCdpBrowser();
+        await using var f = await BrowserFixture.CreateAsync(withAdsPower: true);
+        var id = await f.H.RunAsync(new ScenarioBuilder("A, B, снова A")
+            .Node("start", "start")
+            .Node("a", "adspower.open", new { profileId = "k1", url = f.Site.Url("/form") })
+            .Node("b", "adspower.open", new { profileId = "k2", url = f.Site.Url("/form") })
+            .Node("again", "adspower.open", new { profileId = "k1", url = f.Site.Url("/form"), closeOnFinish = false })
+            .Node("w", "wait", new { mode = "duration", amount = 60, unit = "seconds" })
+            .Node("end", "end")
+            .Chain("start", "a", "b", "again", "w", "end")
+            .Build());
+        await f.H.WaitForAsync(id, p => p.Status == ProcessStatus.Waiting && p.StepCount >= 5);
+
+        // Прежняя запись первого профиля снята: последняя настройка («не закрывать») — единственная.
+        Assert.Equal("k1", f.Sessions.FindInfo(id, "main")!.ProfileId);
+        Assert.Null(f.Sessions.FindInfo(id, "main (прежний 1)"));
+        Assert.Equal("k2", f.Sessions.FindInfo(id, "main (прежний 2)")!.ProfileId);
+
+        f.H.Time.Advance(TimeSpan.FromSeconds(61));
+        await f.H.WaitForStatusAsync(id, ProcessStatus.Completed);
+        await f.H.UntilAsync(() => !f.Ads!.IsOpen("k2"), "второй профиль закрыт");
+        Assert.True(f.Ads!.IsOpen("k1"));
+    }
+
+    [Fact]
+    public async Task Profile_released_to_another_process_is_not_closed_when_the_first_process_ends()
+    {
+        TestBrowser.RequireCdpBrowser();
+        await using var f = await BrowserFixture.CreateAsync(withAdsPower: true);
+        var first = await f.H.RunAsync(new ScenarioBuilder("Отдаёт профиль")
+            .Node("start", "start")
+            .Node("a", "adspower.open", new { profileId = "k1", url = f.Site.Url("/form") })
+            .Node("b", "adspower.open", new { profileId = "k2", url = f.Site.Url("/form") })
+            .Node("free", "resource.release", new { key = "adspower:k1" })
+            .Node("w", "wait", new { mode = "duration", amount = 30, unit = "seconds" })
+            .Node("end", "end")
+            .Chain("start", "a", "b", "free", "w", "end")
+            .Build());
+        await f.H.WaitForAsync(first, p => p.Status == ProcessStatus.Waiting && p.StepCount >= 5);
+
+        var second = await f.H.RunAsync(UseProfile(f, "k1", "второй процесс", holdSeconds: 60, close: false));
+        await f.H.WaitForAsync(second, p => p.Status == ProcessStatus.Waiting && p.StepCount >= 3);
+
+        // Первый процесс завершается: его профили закрываются, но не тот, что уже у второго.
+        f.H.Time.Advance(TimeSpan.FromSeconds(31));
+        await f.H.WaitForStatusAsync(first, ProcessStatus.Completed);
+        await f.H.UntilAsync(() => !f.Ads!.IsOpen("k2"), "второй профиль первого процесса закрыт");
+        Assert.True(f.Ads!.IsOpen("k1"));
+
+        f.H.Time.Advance(TimeSpan.FromSeconds(61));
+        await f.H.WaitForStatusAsync(second, ProcessStatus.Completed);
+        Assert.Equal(1, f.Site.Submits);
+        await f.H.UntilAsync(() => !f.Ads.IsOpen("k1"), "профиль закрыт вторым процессом");
+    }
+
+    [Fact]
+    public async Task Process_waiting_for_a_profile_works_in_it_after_the_holder_with_two_profiles_ends()
+    {
+        TestBrowser.RequireCdpBrowser();
+        await using var f = await BrowserFixture.CreateAsync(withAdsPower: true);
+        var first = await f.H.RunAsync(new ScenarioBuilder("Два профиля")
+            .Node("start", "start")
+            .Node("a", "adspower.open", new { profileId = "k1", url = f.Site.Url("/form") })
+            .Node("b", "adspower.open", new { profileId = "k2", url = f.Site.Url("/form") })
+            .Node("w", "wait", new { mode = "duration", amount = 30, unit = "seconds" })
+            .Node("end", "end")
+            .Chain("start", "a", "b", "w", "end")
+            .Build());
+        await f.H.WaitForAsync(first, p => p.Status == ProcessStatus.Waiting && p.StepCount >= 4);
+        var second = await f.H.RunAsync(UseProfile(f, "k2", "после двух", close: false));
+        await f.H.WaitForStatusAsync(second, ProcessStatus.Waiting);
+
+        // Ждущий получает профиль, только когда браузеры первого закрыты все: к закрываемому профилю он не подключается.
+        f.H.Time.Advance(TimeSpan.FromSeconds(31));
+        await f.H.WaitForStatusAsync(first, ProcessStatus.Completed);
+        await f.H.WaitForStatusAsync(second, ProcessStatus.Completed);
+        Assert.Equal(1, f.Site.Submits);
+    }
+
+    [Fact]
+    public async Task Open_browser_after_a_profile_under_the_same_name_opens_a_browser_not_the_profile()
+    {
+        TestBrowser.RequireCdpBrowser();
+        await using var f = await BrowserFixture.CreateAsync(withAdsPower: true);
+        var id = await f.H.RunAsync(new ScenarioBuilder("Профиль, потом браузер")
+            .Node("start", "start")
+            .Node("ads", "adspower.open", new { profileId = "k1", url = f.Site.Url("/controls"), closeOnFinish = false })
+            .Node("open", "browser.open", BrowserFixture.OpenConfig(f.Site.Url("/form")))
+            .Node("fill", "browser.fill", new { selector = "#user", text = "в браузере" })
+            .Node("click", "browser.click", new { selector = "#go", expect = "#done" })
+            .Node("end", "end")
+            .Chain("start", "ads", "open", "fill", "click", "end")
+            .Build());
+        await f.H.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Equal(1, f.Site.Submits);
+        // Аккаунт профиля не тронут: форма открывалась и отправлялась в обычном браузере.
+        Assert.DoesNotContain(await f.Ads!.TabUrlsAsync("k1"), url => url.Contains("/form", StringComparison.Ordinal) ||
+                                                                     url.Contains("/done", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Browser_stays_usable_when_a_profile_opened_under_its_name_fails_to_start()
+    {
+        TestBrowser.RequireCdpBrowser();
+        await using var f = await BrowserFixture.CreateAsync(withAdsPower: true);
+        f.Ads!.StartErrors["k1"] = "user account does not exist";
+        var id = await f.H.RunAsync(new ScenarioBuilder("Браузер, потом неудачный профиль")
+            .Node("start", "start")
+            .Node("open", "browser.open", BrowserFixture.OpenConfig(f.Site.Url("/form")))
+            .Node("ads", "adspower.open", new { profileId = "k1" })
+            .Node("fill", "browser.fill", new { selector = "#user", text = "после ошибки" })
+            .Node("click", "browser.click", new { selector = "#go", expect = "#done" })
+            .Node("end", "end")
+            .Edge("start", "open").Edge("open", "ads").Edge("ads", "fill", Ports.Error).Edge("ads", "end", Ports.Out)
+            .Edge("fill", "click").Edge("click", "end")
+            .Build());
+        // Профиль точно не открылся — браузер снова «main» и работает дальше по ветке «Ошибка».
+        await f.H.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Equal(1, f.Site.Submits);
+    }
+
+    [Fact]
     public async Task In_the_owners_profile_the_process_does_not_switch_to_a_tab_the_owner_opened()
     {
         TestBrowser.RequireCdpBrowser();

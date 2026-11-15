@@ -80,6 +80,13 @@ public sealed partial class ProcessEngine : IAsyncDisposable
     public DateTimeOffset? RestoredFromBackupAt { get; set; }
 
     /// <summary>
+    /// Ресурс, который Pepa держит сама с самого запуска, если условие верно (компьютер заблокирован уже при запуске): заявка
+    /// ставится после восстановления и до того, как движок начнёт что-либо выполнять, — ни расписание, ни событие не успеют
+    /// отдать его процессу. Задаётся до <see cref="StartAsync"/>.
+    /// </summary>
+    public (string Key, string Title, string Holder, Func<bool> When)? StartupClaim { get; set; }
+
+    /// <summary>
     /// Восстановление после прошлого запуска и старт исполнителей. Ничего не продолжается автоматически:
     /// незавершённые процессы приостанавливаются до ручного возобновления.
     /// </summary>
@@ -94,6 +101,12 @@ public sealed partial class ProcessEngine : IAsyncDisposable
         _eventsBeforeStart = (await _store.ListEventsAsync(new EventQuery { Limit = 1 }, cancellationToken)).FirstOrDefault()?.Id ?? 0;
         _startedAt = _time.GetUtcNow();
         var report = await RecoverAsync(cancellationToken);
+        if (StartupClaim is { } claim && ClaimNeeded(claim.When))
+        {
+            await ClaimExternallyAsync(claim.Key, claim.Title, claim.Holder, cancellationToken);
+            _logger.LogInformation("При запуске ресурс «{Key}» занят Pepa ({Holder}).", claim.Key, claim.Holder);
+        }
+
         for (var i = 0; i < Math.Max(1, _options.MaxParallelProcesses); i++)
         {
             _background.Add(Task.Run(() => WorkerLoopAsync(_stop.Token)));
@@ -107,6 +120,19 @@ public sealed partial class ProcessEngine : IAsyncDisposable
         SignalRouter();
         _logger.LogInformation("Движок запущен: {Workers} исполнителей. {Report}", _options.MaxParallelProcesses, report);
         return report;
+    }
+
+    private bool ClaimNeeded(Func<bool> when)
+    {
+        try
+        {
+            return when();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Не удалось узнать, нужно ли занять ресурс при запуске.");
+            return false;
+        }
     }
 
     /// <summary>

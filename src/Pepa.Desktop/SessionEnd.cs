@@ -14,6 +14,7 @@ namespace Pepa.Desktop;
 /// </summary>
 internal sealed class SessionEnd
 {
+    private const uint WM_CLOSE = 0x0010;
     private const uint WM_QUERYENDSESSION = 0x0011;
     private const uint WM_ENDSESSION = 0x0016;
     private const long ENDSESSION_CLOSEAPP = 0x1;
@@ -82,6 +83,10 @@ internal sealed class SessionEnd
                 }
 
                 // wParam = 0: завершение отменили — Pepa работает дальше, как работала.
+                return IntPtr.Zero;
+            case WM_CLOSE:
+                // Скрытое окно приложения WPF не закрывают снаружи (Restart Manager после WM_ENDSESSION шлёт WM_CLOSE всем
+                // окнам): Pepa закрывается сама, когда остановится; WPF уничтожает это окно без WM_CLOSE.
                 return IntPtr.Zero;
         }
 
@@ -192,4 +197,46 @@ internal static class SessionLock
 
     [DllImport("wtsapi32.dll")]
     private static extern void WTSFreeMemory(IntPtr memory);
+}
+
+/// <summary>Вопросы Pepa (MessageBox с заголовком «Pepa») в этом потоке окна — ответить «Нет», когда Pepa закрывают без вопросов.</summary>
+internal static class QuestionBoxes
+{
+    private const uint WM_COMMAND = 0x0111;
+    private const int IDNO = 7;
+
+    public static void AnswerNo()
+    {
+        EnumThreadWindows(GetCurrentThreadId(), (window, parameter) =>
+        {
+            var name = new StringBuilder(64);
+            var title = new StringBuilder(64);
+            if (GetClassName(window, name, name.Capacity) > 0 && name.ToString() == "#32770" &&
+                GetWindowText(window, title, title.Capacity) > 0 && title.ToString() == "Pepa")
+            {
+                _ = PostMessage(window, WM_COMMAND, new IntPtr(IDNO), IntPtr.Zero);
+            }
+
+            return true;
+        }, IntPtr.Zero);
+    }
+
+    private delegate bool EnumWindowsProc(IntPtr window, IntPtr parameter);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EnumThreadWindows(uint threadId, EnumWindowsProc callback, IntPtr parameter);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr window, StringBuilder name, int capacity);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowText(IntPtr window, StringBuilder text, int capacity);
+
+    [DllImport("user32.dll", EntryPoint = "PostMessageW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
 }

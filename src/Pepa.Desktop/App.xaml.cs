@@ -45,10 +45,36 @@ public partial class App : Application
     /// <summary>Аргумент перезапуска: подождать, пока прежняя Pepa (этот номер процесса) закроется совсем.</summary>
     private const string AfterArgument = "--after";
 
+    /// <summary>Запуск платформы (в пуле потоков): завершение сеанса во время запуска дожидается его и останавливает.</summary>
+    private Task<PepaHost>? _starting;
+
+    /// <summary>Сеанс Windows закончился (или Pepa закрыла программа обновления): дальше не запускаться.</summary>
+    private bool _sessionEnded;
+
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
         DispatcherUnhandledException += OnUnhandledException;
+
+        // Первым делом: перехватить вопрос Windows о завершении сеанса раньше WPF — он закрыл бы Pepa на вопросе (и посреди
+        // запуска — без остановки движка). Ожидания ниже (UI Automation, прежняя Pepa) обрабатывают сообщения окна.
+        _sessionEnd = SessionEnd.TryAttach(closeApp =>
+        {
+            if (closeApp)
+            {
+                OnClosedByRestartManager();
+            }
+            else
+            {
+                OnSessionEnded();
+            }
+        });
+        if (_sessionEnd is null)
+        {
+            // Перехватить вопрос не удалось — как раньше: остановиться на вопросе (WPF всё равно закроет Pepa).
+            SessionEnding += (_, _) => OnSessionEnded();
+        }
+
         WaitForPreviousInstance(e.Args);
 
         _customDataDirectory = AutostartEntry.DataDirectoryFrom(e.Args);
@@ -71,16 +97,26 @@ public partial class App : Application
         }
 
         var alerts = new WindowAlerts();
+        if (_sessionEnded)
+        {
+            return;
+        }
+
         try
         {
-            _host = await PepaHost.StartAsync(new PepaHostOptions
+            var options = new PepaHostOptions
             {
                 DataDirectory = _dataDirectory,
                 IsDesktop = true,
                 Desktop = desktop,
                 DesktopInput = desktopInput,
                 DesktopAlerts = alerts,
-            });
+                // Заблокирован уже при запуске — мышь и клавиатура у Pepa раньше, чем движок что-то выполнит.
+                IsSessionLocked = SessionLock.IsLocked,
+            };
+            // В пуле потоков: если сеанс закончится во время запуска, поток окна дождётся запуска и остановит Pepa.
+            _starting = Task.Run(() => PepaHost.StartAsync(options));
+            _host = await _starting;
         }
         catch (InstanceAlreadyRunningException)
         {
@@ -100,6 +136,11 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
+            if (_sessionEnded)
+            {
+                return;
+            }
+
             MessageBox.Show(
                 $"Не удалось запустить Pepa:\n\n{ex.Message}\n\nПодробности — в журнале: {Path.Combine(_dataDirectory, "logs")}",
                 "Pepa", MessageBoxButton.OK, MessageBoxImage.Error);
@@ -107,8 +148,12 @@ public partial class App : Application
             return;
         }
 
-        // До показа окна: перехватить вопрос Windows о завершении сеанса раньше WPF (он закрыл бы Pepa ещё до ответа).
-        _sessionEnd = SessionEnd.TryAttach(closeApp => OnSessionEnded());
+        if (_sessionEnded)
+        {
+            // Сеанс закончился, пока Pepa запускалась: остановку уже сделал обработчик завершения.
+            return;
+        }
+
         SessionEnd.RegisterRestart(AutostartEntry.Arguments(_customDataDirectory));
 
         var settings = _settings = DesktopSettings.Load(_dataDirectory);
@@ -146,12 +191,6 @@ public partial class App : Application
                 Relaunch();
             }
         };
-        if (_sessionEnd is null)
-        {
-            // Перехватить вопрос не удалось — как раньше: остановиться на вопросе (WPF всё равно закроет Pepa).
-            SessionEnding += (_, _) => OnSessionEnded();
-        }
-
         SystemEvents.SessionSwitch += OnSessionSwitch;
         // Компьютер мог быть заблокирован уже при запуске (Windows сама вошла и заблокировала после обновления, автозапуск
         // запустил Pepa) — события блокировки тогда не будет.
@@ -177,24 +216,54 @@ public partial class App : Application
     /// </summary>
     private void OnSessionEnded()
     {
+        _sessionEnded = true;
         // Сеанс заканчивается — открывать Pepa снова некуда.
         _relaunch = false;
         _sessionEnd?.SetBlockReason("Pepa останавливает процессы…");
         (MainWindow as MainWindow)?.AllowClose();
-        if (_host is { } host)
+        var spent = Stopwatch.StartNew();
+        var host = _host;
+        try
         {
-            try
+            // Сеанс закончился посреди запуска — дождаться запуска (он в пуле потоков) и остановить.
+            if (host is null && _starting is { } starting && starting.Wait(SessionEndBudget))
+            {
+                host = starting.Result;
+            }
+
+            if (host is not null)
             {
                 // Остановка идёт в пуле потоков (PepaHost.StopAsync), поток окна только ждёт.
-                host.StopAsync().Wait(SessionEndBudget);
+                var left = SessionEndBudget - spent.Elapsed;
+                host.StopAsync().Wait(left > TimeSpan.Zero ? left : TimeSpan.Zero);
             }
-            catch (Exception)
-            {
-                // Остановка с ошибкой — сеанс всё равно заканчивается; разберёт восстановление.
-            }
+        }
+        catch (Exception)
+        {
+            // Запуск или остановка с ошибкой — сеанс всё равно заканчивается; разберёт восстановление.
         }
 
         Shutdown(0);
+    }
+
+    /// <summary>
+    /// Pepa закрывает программа обновления (Restart Manager): сеанс продолжается, и Windows не обрывает Pepa сразу, — обычный
+    /// выход, с ожиданием выполняющихся шагов, без вопросов. Обработчик окна возвращается сразу. После обновления Windows
+    /// запустит Pepa снова (RegisterApplicationRestart).
+    /// </summary>
+    private void OnClosedByRestartManager()
+    {
+        _relaunch = false;
+        _sessionEnd?.SetBlockReason("Pepa останавливает процессы…");
+        if (MainWindow is MainWindow window)
+        {
+            window.ExitWithoutQuestions();
+        }
+        else
+        {
+            // Окна ещё нет (идёт запуск) — как при завершении сеанса.
+            OnSessionEnded();
+        }
     }
 
     protected override void OnExit(ExitEventArgs e)
@@ -294,11 +363,10 @@ public partial class App : Application
         await _lockGate.WaitAsync();
         try
         {
-            // Под тем же замком, что и события: разблокировка между проверкой и заявкой не потеряется — она придёт следом.
-            if (SessionLock.IsLocked())
-            {
-                await ApplyLockAsync(locked: true);
-            }
+            // Заблокированный при запуске компьютер движок уже отметил сам (до первых шагов). Здесь — сверка в обе стороны:
+            // разблокировку между запуском движка и подпиской на события иначе никто бы не заметил. Под тем же замком, что и
+            // события: разблокировка между проверкой и заявкой придёт следом.
+            await ApplyLockAsync(SessionLock.IsLocked());
         }
         finally
         {

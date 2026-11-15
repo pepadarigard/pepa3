@@ -122,6 +122,31 @@ public sealed class LockedComputerTests
     }
 
     [Fact]
+    public async Task Computer_locked_at_start_holds_the_input_before_any_process_runs()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var locked = true;
+        await h.RestartAsync(beforeStart: engine =>
+            engine.StartupClaim = (Input, "Мышь и клавиатура", ProcessEngine.LockedHolder, () => locked));
+
+        Assert.Equal(ProcessEngine.LockedHolder, await HolderOf(h));
+        Assert.True(h.Engine.HasExternalClaim(Input, ProcessEngine.LockedHolder));
+        var b = await h.RunAsync(User("b"));
+        await h.WaitForStatusAsync(b, ProcessStatus.Waiting);
+        await h.IdleAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(0, h.World.Executions("b"));
+
+        await h.Engine.ReleaseExternalAsync(Input, ProcessEngine.LockedHolder);
+        await h.WaitForStatusAsync(b, ProcessStatus.Completed);
+
+        // Не заблокирован — ничего не занято.
+        locked = false;
+        await h.RestartAsync(beforeStart: engine =>
+            engine.StartupClaim = (Input, "Мышь и клавиатура", ProcessEngine.LockedHolder, () => locked));
+        Assert.Null(await HolderOf(h));
+    }
+
+    [Fact]
     public async Task After_a_restart_the_locked_hold_is_free_and_not_counted_as_a_finished_process_resource()
     {
         await using var h = await EngineHarness.CreateAsync();

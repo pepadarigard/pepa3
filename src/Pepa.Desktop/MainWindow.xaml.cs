@@ -108,6 +108,19 @@ public partial class MainWindow : Window
     public bool IsExiting => _exit is not null;
 
     /// <summary>
+    /// Закрыть Pepa без вопросов (её закрывает программа обновления): обычная остановка с ожиданием выполняющихся шагов.
+    /// Открытые вопросы о закрытии получают «Нет» — после них ничего не сохраняется и не останавливается: выход уже идёт.
+    /// </summary>
+    public void ExitWithoutQuestions()
+    {
+        _exit ??= StopAndShutdownAsync();
+        if (_asking || _askingExit)
+        {
+            QuestionBoxes.AnswerNo();
+        }
+    }
+
+    /// <summary>
     /// Pepa остановлена снаружи (завершение сеанса Windows): окно закрывается без вопросов. Само закрытие делает
     /// Application.Shutdown — Close() здесь не вызывается: окно может быть посреди закрытия (открыт вопрос).
     /// </summary>

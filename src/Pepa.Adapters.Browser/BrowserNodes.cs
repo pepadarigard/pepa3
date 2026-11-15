@@ -497,7 +497,8 @@ public sealed class OpenBrowserNode(BrowserSessions sessions) : INodeExecutor
     }
 
     public ValueTask<VerificationResult> VerifyAsync(NodeExecutionContext context, CancellationToken cancellationToken) =>
-        ValueTask.FromResult(sessions.IsOpen(context.ProcessId, BrowserNodes.SessionName(context))
+        // Обычный браузер: профиль AdsPower под тем же именем — не «браузер открыт».
+        ValueTask.FromResult(sessions.IsOpen(context.ProcessId, BrowserNodes.SessionName(context), BrowserKind.Local)
             ? VerificationResult.Done("браузер открыт")
             : VerificationResult.NotDone("браузер не открыт"));
 

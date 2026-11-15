@@ -313,6 +313,13 @@ public sealed class PepaHost : IAsyncDisposable
         }
 
         engine.RestoredFromBackupAt = store.RestoredFromBackupAt;
+        if (options.IsSessionLocked is { } locked)
+        {
+            // Компьютер заблокирован уже при запуске: мышь и клавиатура — Pepa, пока не разблокируют (D-086).
+            var input = Adapters.Desktop.DesktopNodes.InputResource;
+            engine.StartupClaim = (input.Key, input.Title, ProcessEngine.LockedHolder, locked);
+        }
+
         hostContext.Recovery = await engine.StartAsync(cancellationToken);
         if (store.RestoredFromBackupAt is { } restoredAt)
         {

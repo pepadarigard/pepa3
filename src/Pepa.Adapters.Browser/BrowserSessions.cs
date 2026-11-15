@@ -375,6 +375,12 @@ public sealed record BrowserSessionInfo
 
     /// <summary>Открытые вкладки профиля в порядке открытия (идентификаторы): после перезапуска «новая вкладка» — та же.</summary>
     public IReadOnlyList<string>? TabOrder { get; init; }
+
+    /// <summary>
+    /// Прежний браузер под служебным именем «… (прежний N)»: процесс открыл под его именем другой профиль. Ждёт конца процесса
+    /// (или нового открытия того же профиля, или его закрытия под другим именем).
+    /// </summary>
+    public bool Retired { get; init; }
 }
 
 /// <summary>Что делать, если профиль AdsPower уже открыт не Pepa (например, владельцем вручную).</summary>
@@ -464,7 +470,9 @@ public sealed class BrowserSessions : IAsyncDisposable
         await _lock.WaitAsync(cancellationToken);
         try
         {
-            if (_sessions.TryGetValue((processId, name), out var existing) && !existing.Closed)
+            // Под этим именем открыт профиль AdsPower — это не «уже открытый браузер»: иначе «Открыть браузер» молча работал
+            // бы в аккаунте профиля. Профиль переходит под служебное имя (ниже), браузер открывается.
+            if (_sessions.TryGetValue((processId, name), out var existing) && !existing.Closed && existing.Kind == BrowserKind.Local)
             {
                 return existing;
             }
@@ -604,6 +612,7 @@ public sealed class BrowserSessions : IAsyncDisposable
 
             var session = await ConnectAsync(info, state.WsEndpoint!, newTab);
             _sessions[(processId, name)] = session;
+            DropRetired(processId, profileId);
             await RememberPageAsync(session);
             return session;
         }
@@ -641,7 +650,7 @@ public sealed class BrowserSessions : IAsyncDisposable
                 }
 
                 _registry.Remove(Key(processId, name));
-                _registry[Key(processId, retiredName)] = previous with { Name = retiredName };
+                _registry[Key(processId, retiredName)] = previous with { Name = retiredName, Retired = true };
                 WriteRegistry();
             }
         }
@@ -675,12 +684,44 @@ public sealed class BrowserSessions : IAsyncDisposable
         {
             if (_registry.Remove(Key(processId, retiredName), out var previous))
             {
-                _registry[Key(processId, name)] = previous with { Name = name };
+                _registry[Key(processId, name)] = previous with { Name = name, Retired = false };
                 WriteRegistry();
             }
         }
 
-        _sessions.TryRemove((processId, retiredName), out _);
+        if (_sessions.TryRemove((processId, retiredName), out var live))
+        {
+            live.Retired = false;
+            // Обычный браузер при переносе не отключался — он снова под своим именем. Отключённый профиль AdsPower
+            // подключится заново по записи при следующем шаге.
+            if (!live.Closed)
+            {
+                _sessions[(processId, name)] = live;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Профиль снова открыт (или закрыт) процессом под своим именем — его прежние записи «… (прежний N)» больше не нужны: иначе
+    /// в конце процесса они закрыли бы профиль ещё раз — вопреки последней настройке или уже у другого процесса.
+    /// </summary>
+    private void DropRetired(string processId, string profileId)
+    {
+        lock (_registry)
+        {
+            var stale = _registry.Values.Where(i => i.ProcessId == processId && i.Retired && i.ProfileId == profileId)
+                .Select(i => i.Name).ToList();
+            foreach (var retiredName in stale)
+            {
+                _registry.Remove(Key(processId, retiredName));
+                _sessions.TryRemove((processId, retiredName), out _);
+            }
+
+            if (stale.Count > 0)
+            {
+                WriteRegistry();
+            }
+        }
     }
 
     /// <summary>
@@ -1076,9 +1117,9 @@ public sealed class BrowserSessions : IAsyncDisposable
         }
     }
 
-    /// <summary>Есть ли у процесса живая сессия с таким именем (без переподключения).</summary>
-    public bool IsOpen(string processId, string name) =>
-        _sessions.TryGetValue((processId, name), out var session) && !session.Closed;
+    /// <summary>Есть ли у процесса живая сессия с таким именем (без переподключения); <paramref name="kind"/> — только такого вида.</summary>
+    public bool IsOpen(string processId, string name, BrowserKind? kind = null) =>
+        _sessions.TryGetValue((processId, name), out var session) && !session.Closed && (kind is null || session.Kind == kind);
 
     public BrowserSessionInfo? FindInfo(string processId, string name) => _registry.GetValueOrDefault(Key(processId, name));
 
@@ -1090,21 +1131,7 @@ public sealed class BrowserSessions : IAsyncDisposable
         await _lock.WaitAsync(cancellationToken);
         try
         {
-            _sessions.TryRemove((processId, name), out var session);
-            var info = session?.Info ?? _registry.GetValueOrDefault(Key(processId, name));
-            if (session is not null)
-            {
-                await CloseQuietlyAsync(session);
-            }
-
-            if (info is { Kind: BrowserKind.AdsPower, ProfileId: { } profileId } && stopProfile)
-            {
-                await _adsPower.StopAsync(profileId, cancellationToken);
-                UnmarkStarted(profileId);
-            }
-
-            RemoveRegistry(processId, name);
-            return info;
+            return await CloseCoreAsync(processId, name, stopProfile, cancellationToken);
         }
         finally
         {
@@ -1112,24 +1139,90 @@ public sealed class BrowserSessions : IAsyncDisposable
         }
     }
 
+    /// <summary>Закрыть сессию; вызывать под <see cref="_lock"/>.</summary>
+    private async Task<BrowserSessionInfo?> CloseCoreAsync(string processId, string name, bool stopProfile, CancellationToken cancellationToken)
+    {
+        _sessions.TryRemove((processId, name), out var session);
+        var info = session?.Info ?? _registry.GetValueOrDefault(Key(processId, name));
+        if (session is not null)
+        {
+            await CloseQuietlyAsync(session);
+        }
+
+        if (info is { Kind: BrowserKind.AdsPower, ProfileId: { } profileId })
+        {
+            bool usedByOther;
+            lock (_registry)
+            {
+                usedByOther = _registry.Values.Any(i => i.ProfileId == profileId && i.ProcessId != processId);
+            }
+
+            if (stopProfile && usedByOther)
+            {
+                // Процесс отпустил профиль раньше («Освободить ресурс»), и он уже у другого процесса: закрыть его значило бы
+                // оборвать чужую работу — один профиль работает на один процесс.
+                _logger.LogWarning("Профиль AdsPower {Profile} процесса {Process} уже у другого процесса — Pepa его не закрывает.",
+                    profileId, processId);
+            }
+            else if (stopProfile)
+            {
+                await _adsPower.StopAsync(profileId, cancellationToken);
+                UnmarkStarted(profileId);
+            }
+        }
+
+        RemoveRegistry(processId, name);
+        if (info is { Kind: BrowserKind.AdsPower, ProfileId: { } closed, Retired: false })
+        {
+            // Профиль закрыт (или оставлен открытым) под своим именем — прежняя запись о нём не закроет его ещё раз в конце.
+            DropRetired(processId, closed);
+        }
+
+        return info;
+    }
+
     /// <summary>Процесс завершился: закрыть его браузеры (профили AdsPower — если так настроено при открытии).</summary>
+    /// <remarks>
+    /// Под одной блокировкой от начала до конца, и блокировка берётся сразу при вызове (из события завершения процесса — раньше,
+    /// чем движок запустит процесс, получивший профили этого): иначе тот успел бы подключиться к профилю между закрытием двух
+    /// браузеров, а закрытие следующего закрыло бы профиль под ним.
+    /// </remarks>
     public async Task ReleaseProcessAsync(string processId)
     {
-        var names = _registry.Values.Where(i => i.ProcessId == processId).Select(i => (i.Name, i.CloseOnFinish))
-            .Concat(_sessions.Keys.Where(k => k.Item1 == processId).Select(k => (k.Item2, true)))
-            .DistinctBy(n => n.Item1)
-            .ToList();
-        foreach (var (name, closeOnFinish) in names)
+        await _lock.WaitAsync(CancellationToken.None);
+        try
         {
-            try
+            List<(string Name, bool CloseOnFinish)> names;
+            lock (_registry)
             {
-                var info = FindInfo(processId, name);
-                await CloseAsync(processId, name, stopProfile: info?.CloseOnFinish ?? closeOnFinish, CancellationToken.None);
+                names = _registry.Values.Where(i => i.ProcessId == processId).Select(i => (i.Name, i.CloseOnFinish))
+                    .Concat(_sessions.Keys.Where(k => k.Item1 == processId).Select(k => (k.Item2, true)))
+                    .DistinctBy(n => n.Item1)
+                    .ToList();
             }
-            catch (Exception ex)
+
+            foreach (var (name, closeOnFinish) in names)
             {
-                _logger.LogWarning(ex, "Не удалось закрыть браузер «{Name}» процесса {Process}.", name, processId);
+                try
+                {
+                    var info = FindInfo(processId, name);
+                    // Прежнюю запись могло снять закрытие профиля под другим именем выше по списку.
+                    if (info is null && !_sessions.ContainsKey((processId, name)))
+                    {
+                        continue;
+                    }
+
+                    await CloseCoreAsync(processId, name, stopProfile: info?.CloseOnFinish ?? closeOnFinish, CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Не удалось закрыть браузер «{Name}» процесса {Process}.", name, processId);
+                }
             }
+        }
+        finally
+        {
+            _lock.Release();
         }
     }
 

@@ -62,6 +62,12 @@ public sealed record PepaHostOptions
     /// <summary>Перехват мыши и клавиатуры для записи действий в окнах Windows. null — запись честно сообщает, что недоступна.</summary>
     public Adapters.Desktop.IDesktopInputMonitor? DesktopInput { get; init; }
 
+    /// <summary>
+    /// Заблокирован ли сеанс Windows (оконное приложение): если да уже при запуске, мышь и клавиатура заняты Pepa до
+    /// разблокировки — раньше, чем движок начнёт выполнять процессы.
+    /// </summary>
+    public Func<bool>? IsSessionLocked { get; init; }
+
     /// <summary>Как часто проверять почтовый ящик и сколько ждать сервер. null — обычные значения.</summary>
     public Adapters.Email.EmailServiceOptions? Email { get; init; }
 

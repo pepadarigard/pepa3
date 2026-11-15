@@ -57,6 +57,25 @@ public sealed class AutostartEntryTests
         Assert.Equal("Pepa (data)", AutostartEntry.LegacyValueName(work));
     }
 
+    [Fact]
+    public void Entry_written_by_the_previous_version_for_a_folder_with_a_trailing_separator_is_recognised()
+    {
+        var data = Dir("Pepa", "data");
+        // Прежняя Pepa: папка как её указали (с чертой в конце), в кавычках без удвоения черты — Windows читала «…data"».
+        var old = $"\"C:\\Pepa\\Pepa.exe\" --minimized --data-dir \"{data}{Path.DirectorySeparatorChar}\"";
+        Assert.True(AutostartEntry.Starts(old, data));
+        Assert.False(AutostartEntry.Starts(old, Dir("PepaTest", "data")));
+        Assert.Contains("Pepa ()", AutostartEntry.LegacyValueNames(data));
+        Assert.Equal(["Pepa"], AutostartEntry.LegacyValueNames(null));
+    }
+
+    [Fact]
+    public void Entry_written_by_the_previous_version_for_a_drive_root_is_recognised()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Корень диска — путь Windows.");
+        Assert.True(AutostartEntry.Starts("\"C:\\Pepa\\Pepa.exe\" --minimized --data-dir \"D:\\\"", @"D:\"));
+    }
+
     [Theory]
     [InlineData(null, true)]
     [InlineData(new byte[0], true)]

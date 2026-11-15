@@ -82,7 +82,7 @@ public static class Autostart
             return null;
         }
 
-        foreach (var name in new[] { AutostartEntry.ValueName(dataDirectory), AutostartEntry.LegacyValueName(dataDirectory) })
+        foreach (var name in AutostartEntry.LegacyValueNames(dataDirectory).Prepend(AutostartEntry.ValueName(dataDirectory)))
         {
             if (run.GetValue(name) is string command && AutostartEntry.Starts(command, dataDirectory))
             {
