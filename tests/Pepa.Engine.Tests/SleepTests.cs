@@ -238,6 +238,8 @@ public sealed class SleepTests
 
         // Приостановленный процесс сам не продолжит — будить ради него незачем.
         await h.Engine.PauseAsync(sooner);
+        // Приостановка применяется на границе шагов — дождаться её.
+        await h.WaitForStatusAsync(sooner, ProcessStatus.Paused);
         Assert.Equal((await h.Store.GetTokensAsync(later)).Single(t => t.State == TokenState.Waiting).WakeAt, await h.Store.GetNextWakeAtAsync());
     }
 }
