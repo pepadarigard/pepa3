@@ -221,6 +221,81 @@ public sealed class AdsPowerTests
     }
 
     [Fact]
+    public async Task Dialog_in_a_tab_of_the_owner_is_not_answered_and_does_not_stop_the_process()
+    {
+        TestBrowser.RequireCdpBrowser();
+        await using var f = await BrowserFixture.CreateAsync(withAdsPower: true);
+        await f.Ads!.OpenByOwnerAsync("k1");
+        var id = await f.H.RunAsync(new ScenarioBuilder("Своя вкладка, окно у владельца")
+            .Node("start", "start")
+            .Node("open", "adspower.open", new { profileId = "k1", url = f.Site.Url("/form"), ifOpen = "tab" })
+            .Node("w", "wait", new { mode = "duration", amount = 60, unit = "seconds" })
+            .Node("fill", "browser.fill", new { selector = "#user", text = "своя" })
+            .Node("click", "browser.click", new { selector = "#go", expect = "#done" })
+            .Node("end", "end")
+            .Chain("start", "open", "w", "fill", "click", "end")
+            .Build());
+        await f.H.WaitForAsync(id, p => p.Status == ProcessStatus.Waiting && p.StepCount >= 3);
+
+        // У владельца в его вкладке сайт показал окно: оно не процесса — Pepa на него не отвечает и шаг из-за него не падает.
+        await f.Ads.OpenTabAsync("k1", f.Site.Url("/owner-alert"));
+        await Task.Delay(500, TestContext.Current.CancellationToken);
+        f.H.Time.Advance(TimeSpan.FromSeconds(61));
+        var done = await f.H.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Equal(1, f.Site.Submits);
+        Assert.DoesNotContain(await f.H.Store.GetJournalAsync(id), j => j.Message.Contains("Окно владельца", StringComparison.Ordinal));
+        Assert.NotNull(done);
+    }
+
+    [Fact]
+    public async Task After_restart_a_window_the_process_opened_in_the_owners_profile_is_still_its_own()
+    {
+        TestBrowser.RequireCdpBrowser();
+        await using var f = await BrowserFixture.CreateAsync(withAdsPower: true);
+        await f.Ads!.OpenByOwnerAsync("k1");
+        var id = await f.H.RunAsync(new ScenarioBuilder("Окно процесса")
+            .Node("start", "start")
+            .Node("open", "adspower.open", new { profileId = "k1", url = f.Site.Url("/controls"), ifOpen = "tab" })
+            .Node("popup", "browser.click", new { selector = "#popup" })
+            .Node("w", "wait", new { mode = "duration", amount = 60, unit = "seconds" })
+            // По адресу: после переподключения порядок вкладок уже не тот, что при открытии.
+            .Node("tab", "browser.tab", new { which = "url", urlContains = "from=popup", waitSeconds = 3 })
+            .Node("switched", "end", new { message = "окно процесса" })
+            .Node("none", "end", new { message = "окна нет" })
+            .Chain("start", "open", "popup", "w", "tab")
+            .Edge("tab", "switched", Ports.Out).Edge("tab", "none", Ports.Timeout)
+            .Build());
+        await f.H.WaitForAsync(id, p => p.Status == ProcessStatus.Waiting && p.StepCount >= 4);
+        // Окно открывается уже после нажатия: дождаться, что Pepa запомнила его как вкладку процесса.
+        await f.H.UntilAsync(() => f.Sessions.FindInfo(id, "main")?.OwnedTargets?.Count == 2, "окно процесса запомнено");
+
+        // Pepa перезапущена: запомнена вкладка процесса, а окно, открытое с неё, — тоже процесса (не владельца).
+        await f.RestartAsync();
+        f.H.Time.Advance(TimeSpan.FromSeconds(61));
+        await f.H.Engine.ResumeAsync(id, ResumeAction.Continue);
+        Assert.Equal("окно процесса", (await f.H.WaitForStatusAsync(id, ProcessStatus.Completed)).StatusMessage);
+    }
+
+    [Fact]
+    public async Task Profile_that_adspower_says_is_still_opening_stays_pepas_and_is_used_once_it_opens()
+    {
+        TestBrowser.RequireCdpBrowser();
+        await using var f = await BrowserFixture.CreateAsync(withAdsPower: true);
+        f.Ads!.StartErrors["k1"] = "The browser is opening, please wait";
+        var id = await f.H.RunAsync(UseProfile(f, "k1", "открывается"));
+        // «Ещё открывается» — итог неизвестен; проверка видит, что профиль пока не открыт, и шаг ждёт решения.
+        await f.H.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
+        Assert.Contains(await f.H.Store.GetJournalAsync(id), j => j.Message.Contains("ещё открывает", StringComparison.Ordinal));
+
+        // Профиль открылся от того запроса Pepa: он остаётся профилем Pepa — повтор работает в нём, а не «открыт не Pepa».
+        f.Ads.StartErrors.Remove("k1");
+        await f.Ads.OpenByOwnerAsync("k1");
+        await f.H.Engine.ResumeAsync(id, ResumeAction.Retry);
+        await f.H.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Equal(1, f.Site.Submits);
+    }
+
+    [Fact]
     public async Task Profile_closed_by_user_is_reported_instead_of_reopened_silently()
     {
         TestBrowser.RequireCdpBrowser();

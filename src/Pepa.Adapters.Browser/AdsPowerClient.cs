@@ -26,6 +26,12 @@ public sealed class AdsPowerException(string message, bool notRunning = false, b
     /// человек: профиля нет, AdsPower не вошёл в аккаунт, ключ API неверный.
     /// </summary>
     public bool Retryable { get; init; } = true;
+
+    /// <summary>
+    /// AdsPower ответил, что профиль ещё открывается (или закрывается): возможно, его открывает прежний запрос Pepa — это не
+    /// «не открылся», а «итог неизвестен».
+    /// </summary>
+    public bool MayBeStarting { get; init; }
 }
 
 /// <summary>
@@ -280,7 +286,10 @@ public sealed class AdsPowerClient : IDisposable
 
         if (Has("opening", "starting", "closing", "in progress", "being", "正在"))
         {
-            return new AdsPowerException($"AdsPower ещё открывает или закрывает {profile} {said}. Подождите и выполните шаг ещё раз.");
+            return new AdsPowerException($"AdsPower ещё открывает или закрывает {profile} {said}. Подождите и выполните шаг ещё раз.")
+            {
+                MayBeStarting = true,
+            };
         }
 
         return new AdsPowerException($"AdsPower отказал: «{message}». Запрос не выполнен.");

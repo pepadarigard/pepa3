@@ -63,6 +63,8 @@ internal sealed class TestSite : IDisposable
                            </body></html>
                            """,
                 "/second" => "<!doctype html><html><head><title>Вторая</title></head><body><p id='msg'>Вторая страница</p></body></html>",
+                // Страница владельца профиля, которая сразу показывает окно.
+                "/owner-alert" => "<!doctype html><html><head><title>Владелец</title></head><body><script>alert('Окно владельца')</script></body></html>",
                 // Окна сайта: вопрос, сообщение, запрос текста и сообщение по таймеру (между шагами).
                 "/dialogs" => """
                            <!doctype html><html><head><title>Окна</title></head><body>

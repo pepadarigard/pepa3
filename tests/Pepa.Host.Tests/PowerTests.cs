@@ -120,12 +120,17 @@ public sealed class PowerTests
         DateTimeOffset? due = now.AddHours(4);
         var enabled = true;
         var platform = new FakeWakePlatform();
-        using var waker = new WakeTimer(_ => Task.FromResult(Volatile.Read(ref enabled) ? due : null), () => Volatile.Read(ref enabled),
+        using var waker = new WakeTimer((_, _) => Task.FromResult(Volatile.Read(ref enabled) ? due : null), () => Volatile.Read(ref enabled),
             NullLogger.Instance, platform, time);
         Assert.True(waker.Supported);
 
         // За две минуты до срока: успеют подключиться сеть, Telegram и почта.
         await WaitUntilAsync(() => waker.ArmedAt == now.AddHours(4) - WakeTimer.Lead, "пробуждение не заведено");
+        Assert.Null(waker.Problem);
+        // Windows ответила, что по таймеру этот компьютер не просыпается, — это видно, а не скрыто за «разбудит в …».
+        platform.CannotWake = true;
+        Assert.Contains("не просыпается по таймеру", waker.Problem);
+        platform.CannotWake = false;
 
         // Срок через минуту — будить к самому сроку.
         due = now.AddMinutes(1);

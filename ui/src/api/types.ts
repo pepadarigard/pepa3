@@ -411,6 +411,8 @@ export interface PowerState {
   wakeEnabled?: boolean;
   /** На когда заведено пробуждение компьютера: ближайший запуск по расписанию или срок ожидания. */
   wakeAt?: string | null;
+  /** Почему будить не получится: Windows сообщила, что компьютер по таймеру не просыпается. */
+  wakeProblem?: string | null;
 }
 
 export interface Info {

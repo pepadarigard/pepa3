@@ -1,6 +1,7 @@
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging;
 using Pepa.Core;
+using Pepa.Core.Expressions;
 using Pepa.Core.Model;
 using Pepa.Core.Nodes;
 using Pepa.Core.Serialization;
@@ -307,6 +308,7 @@ public sealed partial class ProcessEngine
         BlockReplacement? block = null)
     {
         // Исправления переменных — до повтора, в той же записи: шаг возьмёт новые значения.
+        var original = process;
         var (changed, changeNotes) = changes is null ? (process, []) : ApplyChanges(process, changes);
         process = changed;
         if (block is not null)
@@ -322,6 +324,10 @@ public sealed partial class ProcessEngine
                     ?? throw new EngineOperationException(tokens.Count(t => t.State != TokenState.Completed) > 1
                         ? "Непонятно, шаг какой ветви повторить. Остановите процесс и запустите заново."
                         : "У процесса нет точки, с которой можно продолжить.");
+        if (fresh)
+        {
+            await EnsureSameResourceAsync(original, process, token);
+        }
         var node = ExecutionGraph(process).FindNode(token.NodeId);
         var label = node is null ? $"«{token.NodeId}»" : Label(node, _registry.FindDescriptor(node.Type));
         var now = _time.GetUtcNow();
@@ -370,6 +376,47 @@ public sealed partial class ProcessEngine
             : changeNotes.Count > 0 ? $"Переменные исправлены ({changeNotes.Count}). {message}" : message);
     }
 
+    /// <summary>
+    /// Исправление не должно менять ресурс шага (например, другой профиль AdsPower), пока процесс держит прежний: прежний
+    /// остался бы занят до конца процесса, а открытый в нём профиль — без хозяина, и у процесса было бы два профиля.
+    /// </summary>
+    private async Task EnsureSameResourceAsync(ProcessRecord before, ProcessRecord after, TokenRecord token)
+    {
+        var beforeGraph = ExecutionGraph(before);
+        var afterGraph = after.DefinitionJson == before.DefinitionJson ? beforeGraph : ParseGraph(after.DefinitionJson);
+        if (beforeGraph.FindNode(token.NodeId) is not { } oldNode || afterGraph.FindNode(token.NodeId) is not { } newNode ||
+            !_registry.TryGet(oldNode.Type, out var executor))
+        {
+            return;
+        }
+
+        ResourceRequirement? Need(ProcessRecord p, NodeDefinition node)
+        {
+            try
+            {
+                return executor.RequiredResource(InputResolver.Resolve(node, executor.Descriptor, Scope(p), _expressions));
+            }
+            catch (Exception ex) when (ex is ExpressionException or NodeInputException)
+            {
+                return null;
+            }
+        }
+
+        var old = Need(before, oldNode);
+        var now = Need(after, newNode);
+        var oldKey = old?.Key.Trim();
+        if (oldKey is not { Length: > 0 } || string.Equals(oldKey, now?.Key.Trim(), StringComparison.Ordinal) ||
+            !await HoldsResourceAsync(before.Id, oldKey))
+        {
+            return;
+        }
+
+        throw new EngineOperationException(
+            $"После исправления шаг {Label(oldNode, executor.Descriptor)} занимал бы другой ресурс ({now?.Title ?? "без ресурса"}) вместо " +
+            $"«{old!.Title}», который процесс уже держит (профиль может быть открыт). Так исправление не применить: верните прежнее " +
+            "значение — или остановите процесс (ресурс освободится, профиль закроется) и запустите заново.");
+    }
+
     /// <summary>Сценарий процесса с заменённым блоком и запись об этом для журнала.</summary>
     private sealed record BlockReplacement(string DefinitionJson, string Note);
 
@@ -399,6 +446,17 @@ public sealed partial class ProcessEngine
             throw new EngineOperationException($"В сохранённом сценарии на месте блока {label} блок другого типа — взять можно только тот же блок.");
         }
 
+        // Блок не должен читать переменную, которой у процесса нет (её добавили в сценарий после запуска): иначе её значение было
+        // бы пустым, а действие всё равно выполнилось бы — с пустым текстом, адресом, полем.
+        var known = graph.Definition.Variables.Select(v => v.Name).ToHashSet(StringComparer.Ordinal);
+        var missing = saved.Variables.Where(v => !known.Contains(v.Name) && Mentions(replacement.Config, v.Name)).Select(v => $"«{v.Name}»").ToList();
+        if (missing.Count > 0)
+        {
+            throw new EngineOperationException(
+                $"Блок {label} из сохранённого сценария использует {(missing.Count == 1 ? "переменную" : "переменные")} {string.Join(", ", missing)}, " +
+                "которой нет в процессе (её добавили в сценарий после запуска). Исправьте блок без неё или запустите процесс заново.");
+        }
+
         var secrets = SecretValues(process, graph.Definition);
         var differences = BlockDifferences(current, replacement, descriptor, secrets);
         if (differences.Count == 0)
@@ -425,6 +483,15 @@ public sealed partial class ProcessEngine
         var note = Redact($"Блок {label} взят из сохранённого сценария (версия {stored.Version}): {string.Join("; ", differences)}.", secrets)!;
         return await RetryCoreAsync(process, tokens, block: new BlockReplacement(PepaJson.Serialize(patched), note));
     }
+
+    /// <summary>Есть ли в параметрах блока (в любой строке, в том числе вложенной) обращение к переменной.</summary>
+    private static bool Mentions(JsonNode? node, string name) => node switch
+    {
+        JsonObject obj => obj.Any(p => Mentions(p.Value, name)),
+        JsonArray array => array.Any(item => Mentions(item, name)),
+        JsonValue value when value.TryGetValue<string>(out var text) => ScenarioValidator.UsesVariable(text, name),
+        _ => false,
+    };
 
     /// <summary>Что изменилось в блоке: подпись, параметры (со значениями, без секретов), настройки повтора.</summary>
     private static List<string> BlockDifferences(NodeDefinition before, NodeDefinition after, NodeTypeDescriptor? descriptor,

@@ -339,7 +339,7 @@ internal static class ApiEndpoints
                 triggers.Where(t => t.MissedRuns > 0).ToList(),
                 triggers.Where(t => t is { Enabled: true, NextRunAt: not null }).OrderBy(t => t.NextRunAt).Take(5).ToList(),
                 new PowerDto(keeper.Supported, settings.Current.KeepAwake, keeper.Active, engine.LastSleep?.From, engine.LastSleep?.To,
-                    waker.Supported, settings.Current.WakeForSchedule, waker.ArmedAt),
+                    waker.Supported, settings.Current.WakeForSchedule, waker.ArmedAt, waker.Problem),
                 // Выключенный пользователем автозапуск ошибку не хранит (сохранение её снимает): здесь и разовые, которые
                 // движок выключил после единственного — неудачного — запуска.
                 triggers.Where(t => t.LastError is not null).ToList());

@@ -236,7 +236,9 @@ public sealed record OverviewDto(
 /// <param name="SleptFrom">Последний замеченный сон компьютера (с какого времени), если был с запуска Pepa.</param>
 /// <param name="WakeAt">На когда Pepa завела пробуждение спящего компьютера (ближайший запуск по расписанию или срок).</param>
 public sealed record PowerDto(bool Supported, bool Enabled, bool KeepingAwake, DateTimeOffset? SleptFrom, DateTimeOffset? WokeAt,
-    bool WakeSupported = false, bool WakeEnabled = false, DateTimeOffset? WakeAt = null);
+    bool WakeSupported = false, bool WakeEnabled = false, DateTimeOffset? WakeAt = null,
+    /// <summary>Почему будить не получится (Windows сообщила, что компьютер по таймеру не просыпается).</summary>
+    string? WakeProblem = null);
 
 public sealed record NodeTypesDto(IReadOnlyList<NodeCategory> Categories, IReadOnlyList<NodeTypeDescriptor> NodeTypes);
 

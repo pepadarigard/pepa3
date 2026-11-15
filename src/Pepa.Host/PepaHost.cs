@@ -196,13 +196,14 @@ public sealed class PepaHost : IAsyncDisposable
             () => settings.Current.KeepAwake, sp.GetRequiredService<ILogger<Power.PowerKeeper>>(), options.KeepAwake));
         // Спящий компьютер будится к ближайшему запуску по расписанию или сроку ожидания (настройка «Будить компьютер»).
         builder.Services.AddSingleton(sp => new Power.WakeTimer(
-            async ct =>
+            async (now, ct) =>
             {
+                // Только будущие сроки: прошедший (тайм-аут, отложенный до решения) не должен скрывать следующий запуск.
                 var schedule = (await store.ListTriggersAsync(null, ct))
-                    .Where(t => t is { Kind: TriggerKind.Schedule, Enabled: true, NextRunAt: not null })
+                    .Where(t => t is { Kind: TriggerKind.Schedule, Enabled: true, NextRunAt: { } next } && next > now)
                     .Select(t => t.NextRunAt)
                     .Min();
-                var wait = await store.GetNextWakeAtAsync(ct);
+                var wait = await store.GetNextWakeAtAsync(now, ct);
                 return schedule is null ? wait : wait is null || schedule < wait ? schedule : wait;
             },
             () => settings.Current.WakeForSchedule, sp.GetRequiredService<ILogger<Power.WakeTimer>>(), options.WakePlatform));

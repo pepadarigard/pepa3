@@ -223,7 +223,7 @@ public sealed class SleepTests
     public async Task Store_reports_the_nearest_due_time_of_waiting_processes_for_waking_the_computer()
     {
         await using var h = await EngineHarness.CreateAsync();
-        Assert.Null(await h.Store.GetNextWakeAtAsync());
+        Assert.Null(await h.Store.GetNextWakeAtAsync(h.Time.GetUtcNow()));
         var later = await h.RunAsync(new ScenarioBuilder("Через час")
             .Node("start", "start").Node("w", "wait", new { mode = "duration", amount = 60, unit = "minutes" }).Node("end", "end")
             .Chain("start", "w", "end").Build());
@@ -234,12 +234,16 @@ public sealed class SleepTests
         await h.WaitForStatusAsync(sooner, ProcessStatus.Waiting);
 
         var soonest = (await h.Store.GetTokensAsync(sooner)).Single(t => t.State == TokenState.Waiting).WakeAt;
-        Assert.Equal(soonest, await h.Store.GetNextWakeAtAsync());
+        Assert.Equal(soonest, await h.Store.GetNextWakeAtAsync(h.Time.GetUtcNow()));
+        // Прошедший срок не скрывает следующий (тайм-аут, отложенный до решения, остаётся «ждёт» с прошедшим сроком).
+        Assert.Equal((await h.Store.GetTokensAsync(later)).Single(t => t.State == TokenState.Waiting).WakeAt,
+            await h.Store.GetNextWakeAtAsync(soonest!.Value));
 
         // Приостановленный процесс сам не продолжит — будить ради него незачем.
         await h.Engine.PauseAsync(sooner);
         // Приостановка применяется на границе шагов — дождаться её.
         await h.WaitForStatusAsync(sooner, ProcessStatus.Paused);
-        Assert.Equal((await h.Store.GetTokensAsync(later)).Single(t => t.State == TokenState.Waiting).WakeAt, await h.Store.GetNextWakeAtAsync());
+        Assert.Equal((await h.Store.GetTokensAsync(later)).Single(t => t.State == TokenState.Waiting).WakeAt,
+            await h.Store.GetNextWakeAtAsync(h.Time.GetUtcNow()));
     }
 }

@@ -290,4 +290,57 @@ public sealed class FixAndRetryTests
         Assert.DoesNotContain(ProcessAction.RetryWithChanges, allowed);
         Assert.DoesNotContain(ProcessAction.RetryWithNewBlock, allowed);
     }
+
+    [Fact]
+    public async Task Block_that_reads_a_variable_added_after_the_start_is_not_taken()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        h.World.Plan("send-@ivn", ActionMode.Fail);
+        var definition = SiteThenSend();
+        var scenarioId = await h.CreateScenarioAsync(definition);
+        var id = await h.Engine.StartProcessAsync(scenarioId);
+        await h.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
+
+        // В новой версии блок использует переменную «order», которой у процесса нет: её значение было бы пустым.
+        var stored = (await h.Store.GetScenarioAsync(scenarioId))!;
+        var withOrder = new ScenarioBuilder("Сайт и сообщение")
+            .Variable("chat", VariableType.Text, "@ivn", isInput: true)
+            .Variable("count", VariableType.Number, 1)
+            .Variable("password", VariableType.Text, "old-secret-1", secret: true)
+            .Variable("order", VariableType.Text, "A-17")
+            .Build();
+        await h.Scenarios.UpdateAsync(scenarioId, definition with
+        {
+            Variables = withOrder.Variables,
+            Nodes = [.. definition.Nodes.Select(n => n.Id == "send" ? n with { Config = new JsonObject { ["key"] = "msg-{{ vars.order }}" } } : n)],
+        }, stored.Version);
+
+        var refused = await Assert.ThrowsAsync<EngineOperationException>(() => h.Engine.ResumeAsync(id, ResumeAction.RetryWithNewBlock));
+        Assert.Contains("«order», которой нет в процессе", refused.Message);
+        Assert.Equal(ProcessStatus.NeedsAttention, (await h.ProcessAsync(id)).Status);
+        Assert.Equal(0, h.World.Executions("msg-"));
+    }
+
+    [Fact]
+    public async Task Fix_that_would_move_the_step_to_another_resource_while_the_old_one_is_held_is_refused()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        h.World.Plan("send-A", ActionMode.Fail);
+        var id = await h.RunAsync(new ScenarioBuilder("Профиль")
+            .Variable("profile", VariableType.Text, "A", isInput: true)
+            .Node("start", "start")
+            .Node("send", Action, new { key = "send-{{ vars.profile }}", resource = "profile:{{ vars.profile }}" })
+            .Node("end", "end")
+            .Chain("start", "send", "end")
+            .Build());
+        await h.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
+        Assert.Equal(id, (await h.Store.ListResourcesAsync()).Single(r => r.Key == "profile:A").HolderProcessId);
+
+        // Другой профиль, пока процесс держит прежний (он может быть открыт), — отказ: у процесса было бы два.
+        var refused = await Assert.ThrowsAsync<EngineOperationException>(() =>
+            h.Engine.ResumeAsync(id, ResumeAction.RetryWithChanges, new JsonObject { ["profile"] = "B" }));
+        Assert.Contains("другой ресурс", refused.Message);
+        Assert.Equal("A", (await h.ProcessAsync(id)).Variables["profile"]!.GetValue<string>());
+        Assert.DoesNotContain(await h.Store.ListResourcesAsync(), r => r.Key == "profile:B" && r.HolderProcessId == id);
+    }
 }

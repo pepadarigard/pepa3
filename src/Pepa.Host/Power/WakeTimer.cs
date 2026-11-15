@@ -23,7 +23,7 @@ public sealed class WakeTimer : IDisposable
     /// <summary>Сколько не давать уснуть после пробуждения (Windows усыпляет «разбуженный таймером» компьютер через пару минут).</summary>
     public static readonly TimeSpan HoldAfterWake = TimeSpan.FromMinutes(5);
 
-    private readonly Func<CancellationToken, Task<DateTimeOffset?>> _nextDue;
+    private readonly Func<DateTimeOffset, CancellationToken, Task<DateTimeOffset?>> _nextDue;
     private readonly Func<bool> _enabled;
     private readonly IWakePlatform _platform;
     private readonly TimeProvider _time;
@@ -36,10 +36,11 @@ public sealed class WakeTimer : IDisposable
     private DateTimeOffset? _holdUntil;
     private int _disposed;
 
-    /// <param name="nextDue">Ближайший момент, когда Pepa должна что-то сделать (запуск по расписанию, срок ожидания).</param>
+    /// <param name="nextDue">Ближайший момент позже заданного, когда Pepa должна что-то сделать (запуск по расписанию, срок
+    /// ожидания).</param>
     /// <param name="enabled">Включена ли настройка «Будить компьютер» (может меняться на ходу).</param>
     /// <param name="platform">Таймер пробуждения; null — Windows (на других системах не поддерживается).</param>
-    public WakeTimer(Func<CancellationToken, Task<DateTimeOffset?>> nextDue, Func<bool> enabled, ILogger logger,
+    public WakeTimer(Func<DateTimeOffset, CancellationToken, Task<DateTimeOffset?>> nextDue, Func<bool> enabled, ILogger logger,
         IWakePlatform? platform = null, TimeProvider? time = null)
     {
         _nextDue = nextDue;
@@ -60,6 +61,14 @@ public sealed class WakeTimer : IDisposable
 
     /// <summary>На когда заведено пробуждение; null — не заведено.</summary>
     public DateTimeOffset? ArmedAt => Interlocked.Read(ref _armedTicks) is var ticks and not 0 ? new DateTimeOffset(ticks, TimeSpan.Zero) : null;
+
+    /// <summary>
+    /// Почему будить не получится, хотя таймер заведён: Windows ответила, что этот компьютер по таймеру не просыпается. null —
+    /// такого ответа не было (запрет таймеров пробуждения в схеме питания Windows не сообщает).
+    /// </summary>
+    public string? Problem => _platform.CannotWake
+        ? "Windows сообщила, что этот компьютер не просыпается по таймеру — Pepa не сможет разбудить его к расписанию."
+        : null;
 
     /// <summary>Пробуждение заведено, отменено или сработало.</summary>
     public event Action? Changed;
@@ -124,7 +133,7 @@ public sealed class WakeTimer : IDisposable
         DateTimeOffset? due;
         try
         {
-            due = _enabled() ? _nextDue(token).GetAwaiter().GetResult() : null;
+            due = _enabled() ? _nextDue(_time.GetUtcNow(), token).GetAwaiter().GetResult() : null;
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
@@ -215,6 +224,9 @@ public interface IWakePlatform : IDisposable
 {
     bool Supported { get; }
 
+    /// <summary>Таймер заводится, но система сообщила, что по нему не просыпается.</summary>
+    bool CannotWake { get; }
+
     /// <summary>Срабатывает, когда наступило заведённое время.</summary>
     WaitHandle Fired { get; }
 
@@ -232,6 +244,7 @@ internal sealed class UnsupportedWakePlatform : IWakePlatform
     public static readonly UnsupportedWakePlatform Instance = new();
 
     public bool Supported => false;
+    public bool CannotWake => false;
     public WaitHandle Fired { get; } = new ManualResetEvent(false);
     public bool Arm(DateTimeOffset at) => false;
     public void Cancel() { }
@@ -250,7 +263,7 @@ internal sealed class WindowsWakePlatform : IWakePlatform
     private readonly SafeWaitHandle _handle;
     private readonly TimerHandle _wait;
     private readonly ILogger _logger;
-    private bool _warnedNotSupported;
+    private volatile bool _cannotWake;
 
     private WindowsWakePlatform(SafeWaitHandle handle, ILogger logger)
     {
@@ -281,6 +294,8 @@ internal sealed class WindowsWakePlatform : IWakePlatform
 
     public WaitHandle Fired => _wait;
 
+    public bool CannotWake => _cannotWake;
+
     public bool Arm(DateTimeOffset at)
     {
         // Положительное значение — абсолютное время (FILETIME, UTC).
@@ -291,11 +306,13 @@ internal sealed class WindowsWakePlatform : IWakePlatform
         }
 
         // Таймер заведён, но система не умеет просыпаться по нему (или это запрещено) — Windows сообщает об этом так.
-        if (Marshal.GetLastWin32Error() == ErrorNotSupported && !_warnedNotSupported)
+        var cannotWake = Marshal.GetLastWin32Error() == ErrorNotSupported;
+        if (cannotWake && !_cannotWake)
         {
-            _warnedNotSupported = true;
             _logger.LogWarning("Windows не поддерживает пробуждение компьютера по таймеру на этом компьютере.");
         }
+
+        _cannotWake = cannotWake;
 
         return true;
     }

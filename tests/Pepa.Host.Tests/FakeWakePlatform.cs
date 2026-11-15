@@ -12,6 +12,9 @@ public sealed class FakeWakePlatform : IWakePlatform
 
     public bool Supported => true;
 
+    /// <summary>Как будто Windows ответила, что по таймеру не просыпается.</summary>
+    public bool CannotWake { get; set; }
+
     public WaitHandle Fired => _fired;
 
     public bool Arm(DateTimeOffset at)

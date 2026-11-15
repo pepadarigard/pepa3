@@ -220,13 +220,19 @@ function Stat({ icon: Icon, tone, value, label, onClick }: { icon: typeof Loader
 /** Сон компьютера: не уснёт ли он сам, и когда спал (тогда тайм-ауты ожиданий ждали, пока Telegram и почта догрузят пропущенное). */
 function PowerNote({ power }: { power: PowerState }) {
   const slept = power.sleptFrom && power.wokeAt ? { from: power.sleptFrom, to: power.wokeAt } : null;
-  const wakeAt = power.wakeEnabled && power.wakeAt ? power.wakeAt : null;
-  if (!power.keepingAwake && !slept && !wakeAt) return null;
+  const wakeAt = power.wakeEnabled && power.wakeAt && !power.wakeProblem ? power.wakeAt : null;
+  const wakeProblem = power.wakeEnabled && power.wakeProblem ? power.wakeProblem : null;
+  if (!power.keepingAwake && !slept && !wakeAt && !wakeProblem) return null;
   return (
     <div className="stack small muted" data-testid="power-note" style={{ gap: 4 }}>
       {power.keepingAwake && (
         <span className="row" style={{ gap: 6 }}>
           <Coffee size={14} /> Компьютер не уснёт по бездействию, пока процессы выполняются или ждут (это можно выключить в «Настройках»).
+        </span>
+      )}
+      {wakeProblem && (
+        <span className="row" style={{ gap: 6 }} data-testid="wake-problem">
+          <AlertTriangle size={14} /> {wakeProblem} Не давайте ему засыпать, пока ждёт запуск по расписанию.
         </span>
       )}
       {wakeAt && (

@@ -86,6 +86,26 @@ public sealed class BrowserSession
         }
 
         page.Popup += (_, popup) => Own(popup);
+        try
+        {
+            PageOwned?.Invoke(page);
+        }
+        catch (Exception)
+        {
+            // Запомнить вкладку на диске не вышло — после перезапуска её найдут по связи «кто кого открыл».
+        }
+    }
+
+    /// <summary>Вкладка стала вкладкой процесса (окно, открытое с его вкладки) — чтобы запомнить её на диске.</summary>
+    internal event Action<IPage>? PageOwned;
+
+    /// <summary>Вкладка процесса, известная по прошлому запуску Pepa.</summary>
+    internal void OwnKnown(IPage page)
+    {
+        if (_own is not null)
+        {
+            Own(page);
+        }
     }
 
     /// <summary>Вкладка — процесса: в профиле, открытом Pepa, — любая; в чужом — своя и открытые с неё.</summary>
@@ -99,6 +119,49 @@ public sealed class BrowserSession
         lock (_own)
         {
             return _own.Contains(page);
+        }
+    }
+
+    /// <summary>
+    /// После переподключения (перезапуска Pepa) вкладки процесса в чужом профиле восстанавливаются по связям «кто кого открыл»:
+    /// найдена одна запомненная вкладка, а процессу принадлежат и вкладка, открывшая её, и окна, открытые с его вкладок.
+    /// </summary>
+    internal async Task AdoptRelatedPagesAsync()
+    {
+        if (_own is null)
+        {
+            return;
+        }
+
+        for (var round = 0; round < 10; round++)
+        {
+            var changed = false;
+            foreach (var candidate in Context.Pages.Where(p => !p.IsClosed).ToList())
+            {
+                IPage? opener;
+                try
+                {
+                    opener = await candidate.OpenerAsync();
+                }
+                catch (PlaywrightException)
+                {
+                    continue;
+                }
+
+                if (opener is null || opener.IsClosed || IsOwn(candidate) == IsOwn(opener))
+                {
+                    continue;
+                }
+
+                // Своя вкладка открыта с другой — та тоже процесса; окно, открытое со своей вкладки, — тоже.
+                Own(IsOwn(candidate) ? opener : candidate);
+                changed = true;
+            }
+
+            if (!changed)
+            {
+                return;
+            }
         }
     }
 
@@ -125,11 +188,13 @@ public sealed class BrowserSession
     /// <summary>Окна отвечает человек (запись действий): Pepa их только видит.</summary>
     internal bool ManualDialogs { get; set; }
 
-    private void WatchDialogs(IPage page) => page.Dialog += (_, dialog) => _ = AnswerAsync(dialog);
+    private void WatchDialogs(IPage page) => page.Dialog += (_, dialog) => _ = AnswerAsync(page, dialog);
 
-    private async Task AnswerAsync(IDialog dialog)
+    private async Task AnswerAsync(IPage page, IDialog dialog)
     {
-        if (ManualDialogs)
+        // Окна во вкладках владельца (в его профиле) — его: Pepa на них не отвечает и не считает их окнами процесса. Обработчик
+        // при этом есть, поэтому браузер не закрывает окно сам — владелец ответит на него в своей вкладке.
+        if (ManualDialogs || !IsOwn(page))
         {
             return;
         }
@@ -244,6 +309,12 @@ public sealed record BrowserSessionInfo
 
     /// <summary>Процесс работает в своей вкладке чужого (открытого не Pepa) профиля: другие вкладки не его ни при каких условиях.</summary>
     public bool OwnTab { get; init; }
+
+    /// <summary>
+    /// Все вкладки процесса в чужом профиле (своя и окна, открытые с неё), идентификаторами вкладок браузера: после перезапуска
+    /// Pepa процесс узнаёт их все, а не только ту, в которой остановился.
+    /// </summary>
+    public IReadOnlyList<string>? OwnedTargets { get; init; }
 }
 
 /// <summary>Что делать, если профиль AdsPower уже открыт не Pepa (например, владельцем вручную).</summary>
@@ -427,6 +498,14 @@ public sealed class BrowserSessions : IAsyncDisposable
                 ProcessId = processId, Name = name, Kind = BrowserKind.AdsPower, ProfileId = profileId,
                 ResourceKey = AdsPowerResourceKey(profileId), CloseOnFinish = closeOnFinish, OwnTab = ownTab,
             };
+            // Что было до этого вызова: отметки прежней попытки (с неизвестным итогом) этот вызов не снимает.
+            var hadRecord = FindInfo(processId, name) is not null;
+            bool wasStarted;
+            lock (_registry)
+            {
+                wasStarted = _started.Contains(profileId);
+            }
+
             SaveRegistry(info);
             if (!state.Active || state.WsEndpoint is null)
             {
@@ -435,11 +514,19 @@ public sealed class BrowserSessions : IAsyncDisposable
                 {
                     state = await _adsPower.StartAsync(profileId, cancellationToken);
                 }
-                catch (AdsPowerException ex) when (!ex.TimedOut)
+                catch (AdsPowerException ex) when (!ex.TimedOut && !ex.MayBeStarting)
                 {
-                    // Точно не открылся — ни сессии, ни отметки.
-                    UnmarkStarted(profileId);
-                    RemoveRegistry(processId, name);
+                    // Точно не открылся этим запросом — снять то, что отметил он сам.
+                    if (!wasStarted)
+                    {
+                        UnmarkStarted(profileId);
+                    }
+
+                    if (!hadRecord)
+                    {
+                        RemoveRegistry(processId, name);
+                    }
+
                     throw;
                 }
             }
@@ -479,14 +566,34 @@ public sealed class BrowserSessions : IAsyncDisposable
             return;
         }
 
-        session.Info = session.Info with { TargetId = targetId };
         lock (_registry)
         {
+            session.Info = session.Info with { TargetId = targetId };
             // Сессию уже закрыли (запись удалена) — не возвращать её в список.
             if (_registry.ContainsKey(Key(session.ProcessId, session.Name)))
             {
                 SaveRegistry(session.Info);
             }
+        }
+    }
+
+    /// <summary>Запомнить на диске ещё одну вкладку процесса в чужом профиле (окно, открытое с его вкладки).</summary>
+    private async Task RecordOwnedAsync(BrowserSession session, IPage page)
+    {
+        if (await TargetIdAsync(page) is not { } targetId)
+        {
+            return;
+        }
+
+        lock (_registry)
+        {
+            if (session.Info.OwnedTargets?.Contains(targetId) == true || !_registry.ContainsKey(Key(session.ProcessId, session.Name)))
+            {
+                return;
+            }
+
+            session.Info = session.Info with { OwnedTargets = [.. session.Info.OwnedTargets ?? [], targetId] };
+            SaveRegistry(session.Info);
         }
     }
 
@@ -595,6 +702,32 @@ public sealed class BrowserSessions : IAsyncDisposable
             if (lost is not null)
             {
                 session.NoteLostTab(lost);
+            }
+
+            if (info.OwnTab)
+            {
+                // Вкладки процесса, запомненные до перезапуска, — снова его; а также связанные с ними «кто кого открыл».
+                if (!newTab && info.OwnedTargets is { Count: > 0 } known)
+                {
+                    foreach (var candidate in context.Pages.Where(p => !p.IsClosed).ToList())
+                    {
+                        if (await TargetIdAsync(candidate) is { } id && known.Contains(id))
+                        {
+                            session.OwnKnown(candidate);
+                        }
+                    }
+                }
+
+                if (!newTab)
+                {
+                    await session.AdoptRelatedPagesAsync();
+                }
+
+                session.PageOwned += page => _ = RecordOwnedAsync(session, page);
+                foreach (var owned in session.Pages())
+                {
+                    await RecordOwnedAsync(session, owned);
+                }
             }
 
             return session;

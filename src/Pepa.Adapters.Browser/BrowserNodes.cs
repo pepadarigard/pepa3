@@ -483,6 +483,8 @@ public sealed class OpenBrowserNode(BrowserSessions sessions) : INodeExecutor
 
         try
         {
+            // Шаг сам открывает страницу во вкладке процесса — пояснение «вкладку закрыли, откройте страницу» больше не нужно.
+            session.TakeLostTabNotice();
             await session.CurrentPage().GotoAsync(url.Trim(), new PageGotoOptions { Timeout = 60_000 }).WaitAsync(cancellationToken);
         }
         catch (PlaywrightException ex)
@@ -575,9 +577,9 @@ public sealed class OpenAdsPowerNode(BrowserSessions sessions) : INodeExecutor
                 context.GetBoolean("newTab"), context.GetBoolean("closeOnFinish", true), cancellationToken,
                 context.GetString("ifOpen") == "tab" ? AdsPowerOpenedElsewhere.NewTab : AdsPowerOpenedElsewhere.Stop);
         }
-        catch (AdsPowerException ex) when (ex.TimedOut)
+        catch (AdsPowerException ex) when (ex.TimedOut || ex.MayBeStarting)
         {
-            // Профиль мог начать открываться: Pepa проверит, открыт ли он, а не будет открывать снова.
+            // Профиль мог начать открываться (в том числе от прежней попытки): Pepa проверит, открыт ли он, а не будет открывать снова.
             return new NodeResult.Unknown($"{ex.Message} Профиль {profileId} мог начать открываться.");
         }
         catch (AdsPowerException ex)
@@ -618,7 +620,13 @@ public sealed class OpenAdsPowerNode(BrowserSessions sessions) : INodeExecutor
 
             var expected = BrowserNodes.NormalizeUrl(url);
             var session = await sessions.GetAsync(context.ProcessId, BrowserNodes.SessionName(context), cancellationToken);
-            return session.Context.Pages.Any(p => !p.IsClosed && BrowserNodes.NormalizeUrl(p.Url).StartsWith(expected, StringComparison.OrdinalIgnoreCase))
+            if (session.TakeLostTabNotice() is { } lost)
+            {
+                return VerificationResult.Inconclusive(lost);
+            }
+
+            // Только вкладка процесса: такая же страница во вкладке владельца — не страница процесса.
+            return BrowserNodes.NormalizeUrl(session.CurrentPage().Url).StartsWith(expected, StringComparison.OrdinalIgnoreCase)
                 ? VerificationResult.Done("профиль открыт, страница открыта")
                 : VerificationResult.NotDone("профиль открыт, но страница не открыта — шаг откроет её, не запуская профиль снова");
         }

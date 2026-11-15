@@ -235,7 +235,8 @@ public sealed partial class ScenarioValidator(NodeRegistry registry, IExpression
     }
 
     /// <summary>Упоминается ли переменная в шаблоне или выражении: vars.имя, vars?.имя, vars["имя"].</summary>
-    private static bool UsesVariable(string text, string name) =>
+    /// <summary>Есть ли в тексте (шаблоне, выражении) обращение к переменной: vars.name, vars?.name, vars["name"].</summary>
+    public static bool UsesVariable(string text, string name) =>
         System.Text.RegularExpressions.Regex.IsMatch(text,
             @"\bvars\s*(?:\?\.|\.)\s*" + System.Text.RegularExpressions.Regex.Escape(name) + @"(?![\p{L}\p{N}_$])|\bvars\s*(?:\?\.)?\[\s*(['""`])" +
             System.Text.RegularExpressions.Regex.Escape(name) + @"\1\s*\]",
