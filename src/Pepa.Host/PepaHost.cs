@@ -39,7 +39,8 @@ public sealed class PepaHost : IAsyncDisposable
 {
     private readonly WebApplication _app;
     private readonly InstanceLock? _lock;
-    private int _stopped;
+    private readonly Lock _stopGate = new();
+    private Task? _stopTask;
 
     private PepaHost(WebApplication app, InstanceLock? instanceLock, Uri baseUrl, string token, string dataDirectory)
     {
@@ -58,6 +59,13 @@ public sealed class PepaHost : IAsyncDisposable
     public Uri LaunchUrl => new($"{BaseUrl.ToString().TrimEnd('/')}/#token={Uri.EscapeDataString(Token)}");
 
     public ProcessEngine Engine => _app.Services.GetRequiredService<ProcessEngine>();
+
+    /// <summary>
+    /// Что сказать при запуске, если процессы остановились, пока Pepa была закрыта (null — нечего): оконное приложение,
+    /// запущенное свёрнутым, показывает это у значка — уведомления в Telegram могут быть выключены.
+    /// </summary>
+    public string? StartupMessage =>
+        Services.GetRequiredService<HostContext>().Recovery is { } recovery ? Notifications.AttentionNotifier.StartupMessage(recovery) : null;
 
     /// <summary>Срабатывает, когда приложение просят завершиться (Ctrl+C, SIGTERM, остановка службы).</summary>
     public CancellationToken ShutdownRequested => _app.Lifetime.ApplicationStopping;
@@ -430,16 +438,22 @@ public sealed class PepaHost : IAsyncDisposable
         logger.LogInformation("Добавлены примеры сценариев: {Count}.", added);
     }
 
-    /// <summary>Сколько процессов работает или ждёт и сколько ждут решения (подсказка значка в области уведомлений).</summary>
-    public async Task<(int Active, int NeedsAttention)> CountsAsync()
+    /// <summary>
+    /// Сколько процессов работает или ждёт, сколько ждут решения и сколько на паузе (подсказка значка в области уведомлений).
+    /// После перезапуска Pepa процессы стоят на паузе до решения пользователя — значок не должен говорить «процессов нет».
+    /// </summary>
+    public async Task<TrayCounts> CountsAsync()
     {
         var store = Services.GetRequiredService<IPepaStore>();
         var processes = await store.ListProcessesAsync(new ProcessQuery
         {
-            Statuses = [ProcessStatus.Running, ProcessStatus.Waiting, ProcessStatus.NeedsAttention],
+            Statuses = [ProcessStatus.Running, ProcessStatus.Waiting, ProcessStatus.NeedsAttention, ProcessStatus.Paused],
             Limit = 10_000,
         });
-        return (processes.Count(p => p.Status != ProcessStatus.NeedsAttention), processes.Count(p => p.Status == ProcessStatus.NeedsAttention));
+        return new TrayCounts(
+            processes.Count(p => p.Status is ProcessStatus.Running or ProcessStatus.Waiting),
+            processes.Count(p => p.Status == ProcessStatus.NeedsAttention),
+            processes.Count(p => p.Status == ProcessStatus.Paused));
     }
 
     /// <summary>Сколько процессов выполняется или ждёт (для предупреждения при закрытии окна).</summary>
@@ -454,30 +468,37 @@ public sealed class PepaHost : IAsyncDisposable
         return active.Count;
     }
 
-    public async Task StopAsync()
+    /// <summary>
+    /// Остановить Pepa. Повторный вызов (выход из меню и одновременно завершение сеанса Windows) не возвращается сразу, а ждёт
+    /// ту же остановку: иначе второй вызывающий решил бы, что движок уже остановлен.
+    /// </summary>
+    public Task StopAsync()
     {
-        if (Interlocked.Exchange(ref _stopped, 1) != 0)
+        lock (_stopGate)
         {
-            return;
+            // В пуле потоков: продолжения остановки не зависят от потока окна (он может быть занят или уже закрыт).
+            return _stopTask ??= Task.Run(StopCoreAsync);
         }
+    }
 
+    private async Task StopCoreAsync()
+    {
         var engine = Engine;
         var events = Services.GetRequiredService<EventHub>();
         var telegram = Services.GetRequiredService<TelegramService>();
+        // Движок останавливается одновременно с сервером: долгий запрос к API (сервер ждёт его до 5 с) не должен съедать
+        // короткое время, которое Windows даёт при завершении сеанса, — выполняющимся шагам оно нужнее.
+        // Сначала прервать ожидание ответа Telegram — иначе запрос входа задержал бы остановку сервера.
+        telegram.BeginShutdown();
+        var engineStop = StopEngineAsync(engine);
         try
         {
-            // Сначала прервать ожидание ответа Telegram — иначе запрос входа задержал бы остановку сервера.
-            telegram.BeginShutdown();
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             await _app.StopAsync(timeout.Token);
         }
         finally
         {
-            // Слежение за папками и почтой — до движка: события после остановки движка не принимаются.
-            await Services.GetRequiredService<FolderWatcher>().DisposeAsync();
-            await Services.GetRequiredService<EmailService>().DisposeAsync();
-            // Сначала движок: он дожидается выполняющихся шагов (отправка в Telegram должна успеть завершиться), потом Telegram.
-            await engine.StopAsync();
+            await engineStop;
             await telegram.DisposeAsync();
             await Services.GetRequiredService<BrowserRecorder>().DisposeAsync();
             await Services.GetRequiredService<Backups.DatabaseBackups>().DisposeAsync();
@@ -499,4 +520,39 @@ public sealed class PepaHost : IAsyncDisposable
     }
 
     public async ValueTask DisposeAsync() => await StopAsync();
+
+    private async Task StopEngineAsync(ProcessEngine engine)
+    {
+        // Слежение за папками и почтой — до движка: события после остановки движка не принимаются.
+        await Services.GetRequiredService<FolderWatcher>().DisposeAsync();
+        await Services.GetRequiredService<EmailService>().DisposeAsync();
+        // Сначала движок: он дожидается выполняющихся шагов (отправка в Telegram должна успеть завершиться), потом Telegram.
+        await engine.StopAsync();
+    }
+}
+
+/// <summary>Процессы для подсказки значка: работают или ждут; ждут решения; на паузе.</summary>
+public sealed record TrayCounts(int Active, int NeedsAttention, int Paused)
+{
+    /// <summary>Текст подсказки (Windows показывает не больше 127 символов — текст короткий).</summary>
+    public string Text()
+    {
+        var parts = new List<string>();
+        if (NeedsAttention > 0)
+        {
+            parts.Add($"ждут решения: {NeedsAttention}");
+        }
+
+        if (Paused > 0)
+        {
+            parts.Add($"на паузе (проверьте и возобновите): {Paused}");
+        }
+
+        if (Active > 0)
+        {
+            parts.Add($"работают или ждут: {Active}");
+        }
+
+        return parts.Count == 0 ? "Pepa — процессов нет" : "Pepa — " + string.Join("; ", parts);
+    }
 }

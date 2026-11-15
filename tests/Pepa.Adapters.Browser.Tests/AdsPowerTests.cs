@@ -196,6 +196,64 @@ public sealed class AdsPowerTests
     }
 
     [Fact]
+    public async Task Restart_after_a_lost_tab_notice_continues_in_the_replacement_tab_without_a_second_notice()
+    {
+        TestBrowser.RequireCdpBrowser();
+        await using var f = await BrowserFixture.CreateAsync(withAdsPower: true);
+        var id = await f.H.RunAsync(UseProfile(f, "k2", "замена вкладки", holdSeconds: 60));
+        await f.H.WaitForAsync(id, p => p.Status == ProcessStatus.Waiting && p.StepCount >= 3);
+
+        await f.RestartAsync();
+        await f.Ads!.CloseTabsAsync("k2", "/form");
+        f.H.Time.Advance(TimeSpan.FromSeconds(61));
+        await f.H.Engine.ResumeAsync(id, ResumeAction.Continue);
+        var lost = await f.H.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
+        Assert.Contains("Вкладку, в которой работал процесс", lost.StatusMessage);
+        var tabs = (await f.Ads.TabUrlsAsync("k2")).Count;
+
+        // Pepa перезапустилась до повтора (человек ещё готовил страницу): процесс знает вкладку-замену, а не закрытую.
+        await f.RestartAsync();
+        await f.H.Engine.ResumeAsync(id, ResumeAction.Retry);
+        var again = await f.H.WaitForAsync(id, p => p.Status == ProcessStatus.NeedsAttention && p.StatusMessage != lost.StatusMessage);
+        Assert.DoesNotContain("Вкладку, в которой работал процесс", again.StatusMessage);
+        Assert.Equal(tabs, (await f.Ads.TabUrlsAsync("k2")).Count);
+    }
+
+    [Fact]
+    public async Task Second_profile_opened_under_the_same_name_does_not_lose_or_overwrite_the_first()
+    {
+        TestBrowser.RequireCdpBrowser();
+        await using var f = await BrowserFixture.CreateAsync(withAdsPower: true);
+        var id = await f.H.RunAsync(new ScenarioBuilder("Два профиля под одним именем")
+            .Node("start", "start")
+            .Node("a", "adspower.open", new { profileId = "k1", url = f.Site.Url("/form") })
+            .Node("b", "adspower.open", new { profileId = "k2", url = f.Site.Url("/form") })
+            .Node("w", "wait", new { mode = "duration", amount = 60, unit = "seconds" })
+            .Node("fill", "browser.fill", new { selector = "#user", text = "второй" })
+            .Node("click", "browser.click", new { selector = "#go", expect = "#done" })
+            .Node("end", "end")
+            .Chain("start", "a", "b", "w", "fill", "click", "end")
+            .Build());
+        await f.H.WaitForAsync(id, p => p.Status == ProcessStatus.Waiting && p.StepCount >= 4);
+        Assert.Equal("k2", f.Sessions.FindInfo(id, "main")!.ProfileId);
+        Assert.Equal("k1", f.Sessions.FindInfo(id, "main (прежний 1)")!.ProfileId);
+
+        // В первом профиле открылась вкладка (сайт или человек): запись «main» — по-прежнему второго профиля.
+        await f.Ads!.OpenTabAsync("k1", "about:blank");
+        await Task.Delay(1000, TestContext.Current.CancellationToken);
+        Assert.Equal("k2", f.Sessions.FindInfo(id, "main")!.ProfileId);
+
+        // После перезапуска процесс продолжает во втором профиле, а в конце закрываются оба (так задано при открытии).
+        await f.RestartAsync();
+        f.H.Time.Advance(TimeSpan.FromSeconds(61));
+        await f.H.Engine.ResumeAsync(id, ResumeAction.Continue);
+        await f.H.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Equal(1, f.Site.Submits);
+        // Браузеры закрываются после завершения процесса, по одному.
+        await f.H.UntilAsync(() => !f.Ads.IsOpen("k1") && !f.Ads.IsOpen("k2"), "оба профиля закрыты");
+    }
+
+    [Fact]
     public async Task In_the_owners_profile_the_process_does_not_switch_to_a_tab_the_owner_opened()
     {
         TestBrowser.RequireCdpBrowser();

@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.Hosting;
 using Pepa.Core;
 using Pepa.Core.Model;
 using Pepa.Core.Nodes;
@@ -817,9 +818,12 @@ internal static class ApiEndpoints
         });
 
         // ───────────── Поток изменений ─────────────
-        api.MapGet("/stream", async (HttpContext http, EventHub hub) =>
+        api.MapGet("/stream", async (HttpContext http, EventHub hub, IHostApplicationLifetime lifetime) =>
         {
-            var cancellation = http.RequestAborted;
+            // Поток заканчивается и при остановке Pepa: иначе сервер ждал бы открытое окно до своего тайм-аута (5 с), и
+            // при завершении сеанса Windows на остановку движка не осталось бы времени.
+            using var stopping = CancellationTokenSource.CreateLinkedTokenSource(http.RequestAborted, lifetime.ApplicationStopping);
+            var cancellation = stopping.Token;
             http.Response.Headers.ContentType = "text/event-stream; charset=utf-8";
             http.Response.Headers.CacheControl = "no-cache";
             http.Response.Headers["X-Accel-Buffering"] = "no";
@@ -849,7 +853,7 @@ internal static class ApiEndpoints
             }
             catch (OperationCanceledException)
             {
-                // Окно закрыто.
+                // Окно закрыто или Pepa останавливается.
             }
             catch (System.Threading.Channels.ChannelClosedException)
             {

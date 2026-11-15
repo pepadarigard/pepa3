@@ -13,16 +13,35 @@ public sealed class TrayIcon : IDisposable
     private readonly Forms.ToolStripMenuItem _closeToTray;
     private readonly Forms.ToolStripMenuItem _autostart;
 
+    /// <summary>
+    /// Отметки меняет код (<see cref="SetChecks"/>): обработчики молчат. Иначе смена отметки снова писала бы в реестр, а при
+    /// ошибке записи возврат отметки снова звал бы запись — и предупреждения шли бы без конца.
+    /// </summary>
+    private bool _suppress;
+    private bool _exiting;
+
     public TrayIcon(Action open, Action exit, Action<bool> closeToTray, Action<bool> startWithWindows)
     {
         var menu = new Forms.ContextMenuStrip();
         menu.Items.Add("Открыть Pepa", null, (_, _) => open());
         menu.Items.Add(new Forms.ToolStripSeparator());
         _closeToTray = new Forms.ToolStripMenuItem("При закрытии окна — сворачивать сюда") { CheckOnClick = true };
-        _closeToTray.CheckedChanged += (_, _) => closeToTray(_closeToTray.Checked);
+        _closeToTray.CheckedChanged += (_, _) =>
+        {
+            if (!_suppress)
+            {
+                closeToTray(_closeToTray.Checked);
+            }
+        };
         menu.Items.Add(_closeToTray);
         _autostart = new Forms.ToolStripMenuItem("Запускать вместе с Windows") { CheckOnClick = true };
-        _autostart.CheckedChanged += (_, _) => startWithWindows(_autostart.Checked);
+        _autostart.CheckedChanged += (_, _) =>
+        {
+            if (!_suppress)
+            {
+                startWithWindows(_autostart.Checked);
+            }
+        };
         menu.Items.Add(_autostart);
         menu.Items.Add(new Forms.ToolStripSeparator());
         menu.Items.Add("Выйти из Pepa", null, (_, _) => exit());
@@ -38,15 +57,39 @@ public sealed class TrayIcon : IDisposable
         _icon.BalloonTipClicked += (_, _) => open();
     }
 
-    /// <summary>Отметки в меню — без вызова обработчиков (при запуске).</summary>
+    /// <summary>Отметки в меню — без вызова обработчиков (при запуске и когда изменение не удалось).</summary>
     public void SetChecks(bool closeToTray, bool startWithWindows)
     {
-        _closeToTray.Checked = closeToTray;
-        _autostart.Checked = startWithWindows;
+        _suppress = true;
+        try
+        {
+            _closeToTray.Checked = closeToTray;
+            _autostart.Checked = startWithWindows;
+        }
+        finally
+        {
+            _suppress = false;
+        }
+    }
+
+    /// <summary>Только отметка «сворачивать при закрытии»: запуск вместе с Windows остаётся, как есть в меню (и в реестре).</summary>
+    public void SetCloseToTray(bool closeToTray) => SetChecks(closeToTray, _autostart.Checked);
+
+    /// <summary>Pepa закрывается: подсказка говорит об этом, а обновления подсказки больше не меняют её.</summary>
+    public void SetExiting()
+    {
+        _exiting = true;
+        _icon.Text = "Pepa закрывается…";
     }
 
     /// <summary>Подсказка над значком: Windows показывает не больше 127 символов.</summary>
-    public void SetText(string text) => _icon.Text = text.Length > 127 ? text[..126] + "…" : text;
+    public void SetText(string text)
+    {
+        if (!_exiting)
+        {
+            _icon.Text = text.Length > 127 ? text[..126] + "…" : text;
+        }
+    }
 
     public void ShowBalloon(string title, string text) =>
         _icon.ShowBalloonTip(10_000, title, text.Length > 250 ? text[..249] + "…" : text, Forms.ToolTipIcon.Info);

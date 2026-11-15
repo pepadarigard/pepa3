@@ -76,6 +76,14 @@ internal sealed class FakeAdsPower : IDisposable
         }
     }
 
+    /// <summary>Адреса открытых вкладок профиля.</summary>
+    public async Task<IReadOnlyList<string>> TabUrlsAsync(string profileId)
+    {
+        using var http = DevToolsClient();
+        var tabs = JsonNode.Parse(await http.GetStringAsync($"{DevTools(profileId)}/json/list"))!.AsArray();
+        return tabs.Where(t => t?["type"]?.GetValue<string>() == "page").Select(t => t!["url"]?.GetValue<string>() ?? "").ToList();
+    }
+
     private static HttpClient DevToolsClient() => new(new HttpClientHandler { UseProxy = false });
 
     private string DevTools(string profileId)

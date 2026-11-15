@@ -16,6 +16,44 @@ public sealed class HostLifecycleTests
     }
 
     [Fact]
+    public async Task Open_change_stream_does_not_hold_up_the_stop()
+    {
+        await using var f = await HostFixture.StartAsync(seedSamples: false);
+        // Окно Pepa держит поток изменений открытым всё время, даже свёрнутое в область уведомлений.
+        using var stream = await f.Client.GetAsync("/api/stream", HttpCompletionOption.ResponseHeadersRead);
+        Assert.Equal(200, (int)stream.StatusCode);
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        await f.Host.StopAsync();
+        // Раньше сервер ждал открытый поток до своего тайм-аута (5 с) — при завершении сеанса Windows движок не успевал
+        // остановиться.
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(3), $"Остановка заняла {watch.Elapsed}.");
+    }
+
+    [Fact]
+    public async Task Second_stop_waits_for_the_same_stop()
+    {
+        await using var f = await HostFixture.StartAsync(seedSamples: false);
+        var first = f.Host.StopAsync();
+        var second = f.Host.StopAsync();
+        Assert.Same(first, second);
+        await second;
+        Assert.True(first.IsCompletedSuccessfully);
+    }
+
+    [Theory]
+    [InlineData(0, 0, 0, "Pepa — процессов нет")]
+    [InlineData(2, 0, 0, "Pepa — работают или ждут: 2")]
+    [InlineData(0, 0, 3, "Pepa — на паузе (проверьте и возобновите): 3")]
+    [InlineData(1, 2, 3, "Pepa — ждут решения: 2; на паузе (проверьте и возобновите): 3; работают или ждут: 1")]
+    public void Tray_text_counts_paused_processes(int active, int attention, int paused, string expected)
+    {
+        var text = new TrayCounts(active, attention, paused).Text();
+        Assert.Equal(expected, text);
+        Assert.True(text.Length <= 127, "Windows показывает в подсказке не больше 127 символов.");
+    }
+
+    [Fact]
     public async Task Settings_are_validated_and_persisted()
     {
         await using var f = await HostFixture.StartAsync(seedSamples: false);
@@ -92,6 +130,8 @@ public sealed class HostLifecycleTests
         Assert.Equal("paused", HostFixture.Status(process));
         Assert.Equal("restart", process["pauseReason"]!.GetValue<string>());
         Assert.Equal(["continue", "cancel"], process["allowedActions"]!.AsArray().Select(a => a!.GetValue<string>()));
+        // Значок в области уведомлений — часто единственное, что видно после автозапуска: «процессов нет» было бы неправдой.
+        Assert.Equal(new TrayCounts(0, 0, 1), await f.Host.CountsAsync());
 
         var (status, _) = await f.SendAsync(HttpMethod.Post, $"/api/processes/{id}/cancel");
         Assert.Equal(200, status);

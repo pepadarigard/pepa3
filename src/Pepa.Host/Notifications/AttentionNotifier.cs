@@ -472,7 +472,7 @@ public sealed class AttentionNotifier : IAsyncDisposable
         return text.ToString();
     }
 
-    internal static string? StartupMessage(RecoveryReport recovery)
+    public static string? StartupMessage(RecoveryReport recovery)
     {
         if (recovery.Paused + recovery.UnknownSteps + recovery.Restored == 0)
         {

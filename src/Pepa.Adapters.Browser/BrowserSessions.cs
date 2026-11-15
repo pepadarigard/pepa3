@@ -233,6 +233,15 @@ public sealed class BrowserSession
     internal IPage? RememberedPage { get; set; }
     public bool Closed { get; private set; }
 
+    /// <summary>
+    /// Под именем сессии процесс открыл другой профиль: эта сессия больше не его «main» — её вкладки и окна не пишутся в запись
+    /// нового профиля.
+    /// </summary>
+    internal bool Retired { get; set; }
+
+    /// <summary>Подключение закончено (порядок вкладок восстановлен) — порядок можно писать на диск.</summary>
+    internal bool OrderReady { get; set; }
+
     /// <summary>Окна отвечает человек (запись действий): Pepa их только видит.</summary>
     internal bool ManualDialogs { get; set; }
 
@@ -499,6 +508,9 @@ public sealed class BrowserSessions : IAsyncDisposable
             {
                 ProcessId = processId, Name = name, Kind = BrowserKind.Local, ResourceKey = resourceKey, CloseOnFinish = closeOnFinish,
             };
+            // Под этим именем был записан профиль AdsPower (например, до перезапуска Pepa): он закроется в конце процесса, как
+            // задано при открытии, а не останется открытым навсегда.
+            await RetireAsync(processId, name, profileId: null, existing);
             var session = new BrowserSession(processId, name, BrowserKind.Local, context, browser, page, info);
             _sessions[(processId, name)] = session;
             SaveRegistry(info);
@@ -549,6 +561,10 @@ public sealed class BrowserSessions : IAsyncDisposable
                 ProcessId = processId, Name = name, Kind = BrowserKind.AdsPower, ProfileId = profileId,
                 ResourceKey = AdsPowerResourceKey(profileId), CloseOnFinish = closeOnFinish, OwnTab = ownTab,
             };
+
+            // Под этим именем у процесса другой браузер (другой профиль, без «Закрыть браузер» между ними): он не теряется.
+            var retired = await RetireAsync(processId, name, profileId, existing);
+
             // Что было до этого вызова: отметки прежней попытки (с неизвестным итогом) этот вызов не снимает.
             var hadRecord = FindInfo(processId, name) is not null;
             bool wasStarted;
@@ -576,6 +592,10 @@ public sealed class BrowserSessions : IAsyncDisposable
                     if (!hadRecord)
                     {
                         RemoveRegistry(processId, name);
+                        if (retired is not null)
+                        {
+                            Unretire(processId, name, retired);
+                        }
                     }
 
                     throw;
@@ -592,6 +612,83 @@ public sealed class BrowserSessions : IAsyncDisposable
             _lock.Release();
         }
     }
+
+    /// <summary>
+    /// Процесс открывает под именем <paramref name="name"/> другой профиль, а прежний браузер под этим именем ещё записан
+    /// (или подключён). Прежний не закрывается сейчас (это было бы действием, которого никто не просил), а переходит под
+    /// служебное имя до конца процесса: тогда он закроется, если так было задано при открытии (а не останется открытым
+    /// навсегда), и его вкладки больше не пишутся в запись нового профиля — иначе после перезапуска Pepa процесс продолжил бы
+    /// в чужом аккаунте. Профиль AdsPower при этом только отключается от Playwright: окна его сайтов Pepa больше не отвечает.
+    /// </summary>
+    /// <returns>Служебное имя, под которым теперь запись прежнего браузера; null — переносить было нечего.</returns>
+    private async Task<string?> RetireAsync(string processId, string name, string? profileId, BrowserSession? live)
+    {
+        BrowserSessionInfo? previous;
+        string? retiredName = null;
+        lock (_registry)
+        {
+            previous = _registry.GetValueOrDefault(Key(processId, name));
+            if (previous is not null && previous.ProfileId != profileId)
+            {
+                for (var n = 1; ; n++)
+                {
+                    var candidate = $"{name} (прежний {n})";
+                    if (!_registry.ContainsKey(Key(processId, candidate)) && !_sessions.ContainsKey((processId, candidate)))
+                    {
+                        retiredName = candidate;
+                        break;
+                    }
+                }
+
+                _registry.Remove(Key(processId, name));
+                _registry[Key(processId, retiredName)] = previous with { Name = retiredName };
+                WriteRegistry();
+            }
+        }
+
+        if (live is null || live.Info.ProfileId == profileId)
+        {
+            return retiredName;
+        }
+
+        live.Retired = true;
+        _sessions.TryRemove((processId, name), out _);
+        if (retiredName is not null)
+        {
+            _sessions[(processId, retiredName)] = live;
+        }
+
+        if (live.Kind == BrowserKind.AdsPower)
+        {
+            await CloseQuietlyAsync(live);
+        }
+
+        _logger.LogWarning("Процесс {Process} открыл под именем «{Name}» другой профиль; прежний браузер — «{Retired}» до конца процесса.",
+            processId, name, retiredName);
+        return retiredName;
+    }
+
+    /// <summary>Новый профиль точно не открылся — прежний браузер снова под своим именем (подключится при следующем шаге).</summary>
+    private void Unretire(string processId, string name, string retiredName)
+    {
+        lock (_registry)
+        {
+            if (_registry.Remove(Key(processId, retiredName), out var previous))
+            {
+                _registry[Key(processId, name)] = previous with { Name = name };
+                WriteRegistry();
+            }
+        }
+
+        _sessions.TryRemove((processId, retiredName), out _);
+    }
+
+    /// <summary>
+    /// Запись на диске — этой сессии: не заменена другим профилем под тем же именем. Вызывать под блокировкой списка.
+    /// </summary>
+    private bool OwnsRecord(BrowserSession session) =>
+        !session.Retired && _registry.TryGetValue(Key(session.ProcessId, session.Name), out var record) &&
+        record.Kind == session.Kind && record.ProfileId == session.Info.ProfileId;
 
     /// <summary>
     /// Запомнить вкладку процесса (на диске), чтобы после перезапуска Pepa продолжить в ней. Только профили AdsPower: обычный
@@ -620,8 +717,8 @@ public sealed class BrowserSessions : IAsyncDisposable
         lock (_registry)
         {
             session.Info = session.Info with { TargetId = targetId };
-            // Сессию уже закрыли (запись удалена) — не возвращать её в список.
-            if (_registry.ContainsKey(Key(session.ProcessId, session.Name)))
+            // Сессию уже закрыли (запись удалена) или заменили другим профилем — не возвращать и не переписывать.
+            if (OwnsRecord(session))
             {
                 SaveRegistry(session.Info);
             }
@@ -641,7 +738,11 @@ public sealed class BrowserSessions : IAsyncDisposable
             session.TabIds[page] = id;
         }
 
-        SaveTabOrder(session);
+        // Пока идёт подключение, порядок ещё не восстановлен — его запишет само подключение.
+        if (session.OrderReady)
+        {
+            SaveTabOrder(session);
+        }
     }
 
     /// <summary>Порядок открытых вкладок — на диск (закрытые выпадают).</summary>
@@ -650,8 +751,7 @@ public sealed class BrowserSessions : IAsyncDisposable
         lock (_registry)
         {
             var order = session.OpenInOrder().Select(p => session.TabIds.GetValueOrDefault(p)).OfType<string>().ToList();
-            if (!_registry.ContainsKey(Key(session.ProcessId, session.Name)) ||
-                (session.Info.TabOrder is { } saved && saved.SequenceEqual(order)))
+            if (!OwnsRecord(session) || (session.Info.TabOrder is { } saved && saved.SequenceEqual(order)))
             {
                 return;
             }
@@ -671,7 +771,7 @@ public sealed class BrowserSessions : IAsyncDisposable
 
         lock (_registry)
         {
-            if (session.Info.OwnedTargets?.Contains(targetId) == true || !_registry.ContainsKey(Key(session.ProcessId, session.Name)))
+            if (session.Info.OwnedTargets?.Contains(targetId) == true || !OwnsRecord(session))
             {
                 return;
             }
@@ -781,20 +881,30 @@ public sealed class BrowserSessions : IAsyncDisposable
         try
         {
             var context = browser.Contexts.FirstOrDefault() ?? await browser.NewContextAsync();
-            var (page, lost) = newTab ? (await context.NewPageAsync(), null) : await FindPageAsync(context, info);
+            // Закрытую вкладку процесса заменила новая — сессия сразу знает её: иначе следующая запись на диск вернула бы
+            // туда закрытую, и каждый перезапуск Pepa открывал бы ещё одну пустую вкладку.
+            var (page, lost, found) = newTab ? (await context.NewPageAsync(), null, info) : await FindPageAsync(context, info);
+            info = found;
             var session = new BrowserSession(info.ProcessId, info.Name, BrowserKind.AdsPower, context, browser, page, info);
             if (lost is not null)
             {
                 session.NoteLostTab(lost);
             }
 
+            // Вкладки, открывшиеся, пока идёт подключение (стартовые страницы, расширения), тоже получают идентификатор:
+            // подписка — до чтения идентификаторов, иначе такая вкладка не попала бы в запомненный порядок.
+            var ids = session.TabIds;
+            session.PageOpened += opened => _ = RecordTabOrderAsync(session, opened);
+
             // Идентификаторы открытых вкладок: по ним — запомненный порядок и вкладки процесса до перезапуска.
-            var ids = new Dictionary<IPage, string>();
             foreach (var open in context.Pages.Where(p => !p.IsClosed).ToList())
             {
                 if (await TargetIdAsync(open) is { } id)
                 {
-                    ids[open] = id;
+                    lock (_registry)
+                    {
+                        ids[open] = id;
+                    }
                 }
             }
 
@@ -807,22 +917,51 @@ public sealed class BrowserSessions : IAsyncDisposable
                     position.TryAdd(order[at], at);
                 }
 
+                Dictionary<IPage, string> known;
+                lock (_registry)
+                {
+                    known = new Dictionary<IPage, string>(ids);
+                }
+
                 session.Arrange([.. context.Pages.Where(p => !p.IsClosed)
-                    .OrderBy(p => ids.TryGetValue(p, out var id) && position.TryGetValue(id, out var at) ? at : int.MaxValue)]);
+                    .OrderBy(p => known.TryGetValue(p, out var id) && position.TryGetValue(id, out var at) ? at : int.MaxValue)]);
             }
 
-            session.TabIds = ids;
-            session.PageOpened += opened => _ = RecordTabOrderAsync(session, opened);
+            // Вкладки, ещё без идентификатора (открылись во время подключения), — до записи порядка.
+            foreach (var open in session.OpenInOrder())
+            {
+                bool missing;
+                lock (_registry)
+                {
+                    missing = !ids.ContainsKey(open);
+                }
+
+                if (missing && await TargetIdAsync(open) is { } id)
+                {
+                    lock (_registry)
+                    {
+                        ids[open] = id;
+                    }
+                }
+            }
+
+            session.OrderReady = true;
             SaveTabOrder(session);
 
             if (info.OwnTab)
             {
                 // Вкладки процесса, запомненные до перезапуска, — снова его; а также связанные с ними «кто кого открыл».
-                if (!newTab && info.OwnedTargets is { Count: > 0 } known)
+                if (!newTab && info.OwnedTargets is { Count: > 0 } ownedBefore)
                 {
-                    foreach (var (candidate, id) in ids)
+                    List<(IPage Page, string Id)> current;
+                    lock (_registry)
                     {
-                        if (known.Contains(id))
+                        current = ids.Select(e => (e.Key, e.Value)).ToList();
+                    }
+
+                    foreach (var (candidate, id) in current)
+                    {
+                        if (ownedBefore.Contains(id))
                         {
                             session.OwnKnown(candidate);
                         }
@@ -857,7 +996,8 @@ public sealed class BrowserSessions : IAsyncDisposable
     /// процесса) и возвращает пояснение — первый шаг после переподключения не выполняется, а сообщает его. Дальше процесс
     /// работает только в новой вкладке: человек может открыть в ней нужную страницу и повторить шаг.
     /// </summary>
-    private async Task<(IPage Page, string? Lost)> FindPageAsync(IBrowserContext context, BrowserSessionInfo info)
+    /// <returns>Вкладка, пояснение о потерянной вкладке и запись сессии — с новой вкладкой, если старую закрыли.</returns>
+    private async Task<(IPage Page, string? Lost, BrowserSessionInfo Info)> FindPageAsync(IBrowserContext context, BrowserSessionInfo info)
     {
         var open = context.Pages.Where(p => !p.IsClosed).ToList();
         if (info.TargetId is { } wanted)
@@ -866,7 +1006,7 @@ public sealed class BrowserSessions : IAsyncDisposable
             {
                 if (await TargetIdAsync(candidate) == wanted)
                 {
-                    return (candidate, null);
+                    return (candidate, null, info);
                 }
             }
 
@@ -874,16 +1014,17 @@ public sealed class BrowserSessions : IAsyncDisposable
             var replacement = await context.NewPageAsync();
             if (await TargetIdAsync(replacement) is { } replacementId)
             {
-                SaveRegistry(info with { TargetId = replacementId });
+                info = info with { TargetId = replacementId };
+                SaveRegistry(info);
             }
 
             return (replacement,
                 $"Вкладку, в которой работал процесс, в профиле AdsPower {info.ProfileId} закрыли — страница, на которой он " +
                 "остановился, потеряна, и в другой вкладке Pepa не продолжает. Pepa открыла вместо неё новую пустую вкладку: " +
-                "откройте в ней нужную страницу и выберите «Выполнить шаг ещё раз» — или остановите процесс.");
+                "откройте в ней нужную страницу и выберите «Выполнить шаг ещё раз» — или остановите процесс.", info);
         }
 
-        return (info.OwnTab || open.Count == 0 ? await context.NewPageAsync() : open[^1], null);
+        return (info.OwnTab || open.Count == 0 ? await context.NewPageAsync() : open[^1], null, info);
     }
 
     // ───────────── Поиск ─────────────

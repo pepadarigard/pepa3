@@ -31,6 +31,9 @@ public sealed partial class ProcessEngine : IAsyncDisposable
     private readonly ConcurrentDictionary<string, ProcessSlot> _slots = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ScenarioGraph> _graphs = new(StringComparer.Ordinal);
 
+    /// <summary>Заявки самой Pepa на ресурсы: ключ ресурса → держатель «pepa:…» (<see cref="ClaimExternallyAsync"/>).</summary>
+    private readonly ConcurrentDictionary<string, string> _externalClaims = new(StringComparer.Ordinal);
+
     /// <summary>Сценарии завершённых процессов для показа — по тексту сценария (у процессов одной версии он один).</summary>
     private readonly ConcurrentDictionary<string, ScenarioGraph> _finishedGraphs = new(StringComparer.Ordinal);
 

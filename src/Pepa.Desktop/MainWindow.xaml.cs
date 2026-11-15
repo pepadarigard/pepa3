@@ -22,11 +22,20 @@ public partial class MainWindow : Window
     private readonly PepaHost _host;
     private readonly DesktopSettings _settings;
     private readonly bool _dark;
-    private bool _closeConfirmed;
-    private bool _stopped;
     private bool _shown;
-    private bool _exitRequested;
     private bool _toldAboutTray;
+
+    /// <summary>Окно можно закрыть: Pepa остановлена (или Windows завершает сеанс и остановку ведёт приложение).</summary>
+    private bool _closeAllowed;
+
+    /// <summary>Идёт вопрос перед закрытием (свернуть ли; закрыть ли при работающих процессах).</summary>
+    private bool _asking;
+
+    /// <summary>Открыт вопрос «Закрыть Pepa?» (о работающих процессах).</summary>
+    private bool _askingExit;
+
+    /// <summary>Выход подтверждён и идёт: остановка движка до закрытия окна.</summary>
+    private Task? _exit;
 
     public MainWindow(PepaHost host, DesktopSettings settings)
     {
@@ -95,12 +104,14 @@ public partial class MainWindow : Window
     /// </summary>
     public async void ExitPepa() => await ExitAsync();
 
-    /// <summary>Закрыть без вопросов (завершение сеанса Windows): движок остановится, остальное доделает восстановление.</summary>
-    public void CloseForSessionEnd()
-    {
-        _closeConfirmed = true;
-        Close();
-    }
+    /// <summary>Pepa закрывается (выход подтверждён): окно не открывается снова — остановка доводится до конца.</summary>
+    public bool IsExiting => _exit is not null;
+
+    /// <summary>
+    /// Pepa остановлена снаружи (завершение сеанса Windows): окно закрывается без вопросов. Само закрытие делает
+    /// Application.Shutdown — Close() здесь не вызывается: окно может быть посреди закрытия (открыт вопрос).
+    /// </summary>
+    public void AllowClose() => _closeAllowed = true;
 
     private void OnNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
     {
@@ -203,24 +214,50 @@ public partial class MainWindow : Window
 
     // ───────────── Закрытие ─────────────
 
-    protected override async void OnClosing(CancelEventArgs e)
+    protected override void OnClosing(CancelEventArgs e)
     {
-        if (_closeConfirmed)
+        if (_closeAllowed)
         {
             base.OnClosing(e);
-            if (!_stopped)
-            {
-                _stopped = true;
-                // Завершение сеанса: ждём движок недолго — незавершённые шаги разберёт восстановление.
-                // В пуле потоков: продолжения не должны возвращаться в заблокированный поток окна.
-                Task.Run(() => _host.StopAsync()).Wait(TimeSpan.FromSeconds(4));
-            }
-
             return;
         }
 
         e.Cancel = true;
-        // Крестик окна (а не «Выйти из Pepa»): по умолчанию — спросить один раз, свернуть ли в область уведомлений.
+        if (_exit is not null)
+        {
+            // Pepa уже закрывается: окно снова скрыть, остановка идёт дальше.
+            Hide();
+            return;
+        }
+
+        // Вопросы — после выхода из закрытия окна: пока окно «закрывается», WPF не даёт вызвать Close(), и завершение сеанса
+        // Windows в этот момент сломалось бы на ошибке.
+        if (!_asking)
+        {
+            _asking = true;
+            // async void (а не Task): ошибка дойдёт до общего обработчика ошибок окна, а не потеряется.
+            Dispatcher.BeginInvoke(new Action(async () =>
+            {
+                try
+                {
+                    await OnCloseRequestedAsync();
+                }
+                finally
+                {
+                    _asking = false;
+                }
+            }));
+        }
+    }
+
+    /// <summary>Крестик окна (а не «Выйти из Pepa»): по умолчанию — спросить один раз, свернуть ли в область уведомлений.</summary>
+    private async Task OnCloseRequestedAsync()
+    {
+        if (_closeAllowed || _exit is not null)
+        {
+            return;
+        }
+
         if (Tray is not null)
         {
             if (_settings.CloseAction == CloseAction.Ask)
@@ -231,14 +268,15 @@ public partial class MainWindow : Window
                     "двойной щелчок по значку.\nНет — закрыть Pepa (работающие процессы приостановятся).\n\n" +
                     "Выбор запомнится; изменить его можно в меню значка Pepa.",
                     "Pepa", MessageBoxButton.YesNoCancel, MessageBoxImage.Question, MessageBoxResult.Yes);
-                if (choice == MessageBoxResult.Cancel)
+                if (choice == MessageBoxResult.Cancel || _closeAllowed || _exit is not null)
                 {
                     return;
                 }
 
                 _settings.CloseAction = choice == MessageBoxResult.Yes ? CloseAction.Tray : CloseAction.Exit;
                 _settings.Save();
-                Tray.SetChecks(_settings.CloseAction == CloseAction.Tray, _settings.StartWithWindows);
+                // Только эта отметка: «Запускать вместе с Windows» — как сейчас в меню (и в реестре).
+                Tray.SetCloseToTray(_settings.CloseAction == CloseAction.Tray);
             }
 
             if (_settings.CloseAction == CloseAction.Tray)
@@ -260,12 +298,19 @@ public partial class MainWindow : Window
     /// <summary>Завершить Pepa: предупредить о работающих процессах, дождаться движка и закрыть приложение.</summary>
     private async Task ExitAsync()
     {
-        if (_exitRequested)
+        if (_exit is not null)
         {
+            await _exit;
             return;
         }
 
-        _exitRequested = true;
+        if (_askingExit)
+        {
+            // Вопрос «Закрыть Pepa?» уже открыт.
+            return;
+        }
+
+        _askingExit = true;
         try
         {
             int active;
@@ -286,34 +331,47 @@ public partial class MainWindow : Window
                 var answer = IsVisible
                     ? MessageBox.Show(this, question, "Pepa", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No)
                     : MessageBox.Show(question, "Pepa", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No);
-                if (answer != MessageBoxResult.Yes)
+                if (answer != MessageBoxResult.Yes || _closeAllowed || _exit is not null)
                 {
                     return;
                 }
             }
-
-            _closeConfirmed = true;
-            _stopped = true;
-            Hide();
-            try
-            {
-                // Дождаться завершения выполняющихся шагов и аккуратно остановить движок.
-                await _host.StopAsync();
-            }
-            finally
-            {
-                Close();
-                Application.Current.Shutdown(0);
-            }
         }
         finally
         {
-            if (!_closeConfirmed)
-            {
-                _exitRequested = false;
-            }
+            _askingExit = false;
+        }
+
+        _exit = StopAndShutdownAsync();
+        await _exit;
+    }
+
+    /// <summary>Остановить движок (дождаться выполняющихся шагов) и закрыть приложение — что бы ни случилось по дороге.</summary>
+    private async Task StopAndShutdownAsync()
+    {
+        Hide();
+        Tray?.SetExiting();
+        try
+        {
+            // Остановка идёт в пуле потоков: её продолжения не зависят от этого окна.
+            await _host.StopAsync();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Pepa закрылась с ошибкой: {ex.Message}\n\nНезавершённые шаги разберёт восстановление при следующем запуске.",
+                "Pepa", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally
+        {
+            _closeAllowed = true;
+            Stopped?.Invoke();
+            // Shutdown сам закрывает окна; Close() здесь не нужен и мог бы упасть, если окно посреди закрытия.
+            Application.Current.Shutdown(0);
         }
     }
+
+    /// <summary>Pepa остановлена выходом из меню или крестиком (перед закрытием приложения).</summary>
+    public event Action? Stopped;
 
     // ───────────── Внешний вид ─────────────
 

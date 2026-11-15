@@ -705,7 +705,24 @@ public sealed partial class ProcessEngine
     /// процесс. После перезапуска такой ресурс свободен (его держатель — не процесс).
     /// </summary>
     /// <returns>null — занят; иначе — процесс, который держит ресурс сейчас (тогда ничего не изменилось).</returns>
-    public async Task<string?> TryHoldExternallyAsync(string key, string title, string holder, CancellationToken cancellationToken = default)
+    public Task<string?> TryHoldExternallyAsync(string key, string title, string holder, CancellationToken cancellationToken = default) =>
+        HoldExternallyAsync(key, title, holder, claim: false, cancellationToken);
+
+    /// <summary>
+    /// Занять ресурс самой Pepa, а если его сейчас держит процесс — забрать, как только тот его отпустит: ресурс не достанется
+    /// ни следующему в очереди, ни новому процессу, пока держатель не вызовет <see cref="ReleaseExternalAsync"/>. Так блокировка
+    /// компьютера остаётся в силе, даже если в момент Win+L мышь и клавиатура были у процесса (D-086). Заявка живёт в памяти:
+    /// после перезапуска её нет, как и самого занятия ресурса Pepa.
+    /// </summary>
+    /// <returns>null — занят сейчас; иначе — процесс, после которого ресурс перейдёт к Pepa.</returns>
+    public Task<string?> ClaimExternallyAsync(string key, string title, string holder, CancellationToken cancellationToken = default) =>
+        HoldExternallyAsync(key, title, holder, claim: true, cancellationToken);
+
+    /// <summary>Есть ли заявка Pepa на ресурс (<see cref="ClaimExternallyAsync"/>), ещё не снятая освобождением.</summary>
+    public bool HasExternalClaim(string key, string holder) =>
+        _externalClaims.TryGetValue(key, out var claimed) && claimed == holder;
+
+    private async Task<string?> HoldExternallyAsync(string key, string title, string holder, bool claim, CancellationToken cancellationToken)
     {
         EnsureRunning();
         if (!IsExternalHolder(holder))
@@ -714,6 +731,14 @@ public sealed partial class ProcessEngine
         }
 
         await using var write = await _store.BeginWriteAsync(cancellationToken);
+
+        // Заявку ставим под правом записи: освобождение ресурса процессом идёт либо целиком до неё (и тогда мы видим, кому он
+        // достался), либо после (и тогда он уже видит заявку).
+        if (claim)
+        {
+            _externalClaims[key] = holder;
+        }
+
         var resource = await write.GetResourceAsync(key);
         if (resource?.HolderProcessId is { } current && current != holder)
         {
@@ -736,6 +761,8 @@ public sealed partial class ProcessEngine
         var effects = new CommitEffects();
         await using (var write = await _store.BeginWriteAsync(cancellationToken))
         {
+            // Заявка снимается и тогда, когда ресурс ещё у процесса: после него ресурс пойдёт в очередь, как обычно.
+            _externalClaims.TryRemove(new KeyValuePair<string, string>(key, holder));
             if (await write.GetResourceAsync(key) is not { } resource || resource.HolderProcessId != holder)
             {
                 return;
@@ -752,9 +779,18 @@ public sealed partial class ProcessEngine
         await ApplyEffectsAsync(effects);
     }
 
-    /// <summary>Освободить ресурс и сразу передать первому в очереди активному процессу. Возвращает получателя.</summary>
-    private static async Task<string?> ReleaseAndGrantAsync(IStoreWrite write, ResourceRecord resource, DateTimeOffset now)
+    /// <summary>
+    /// Освободить ресурс и сразу передать первому в очереди активному процессу. Возвращает получателя-процесс. Если на ресурс
+    /// есть заявка самой Pepa (<see cref="ClaimExternallyAsync"/>), он переходит к ней, а очередь ждёт дальше.
+    /// </summary>
+    private async Task<string?> ReleaseAndGrantAsync(IStoreWrite write, ResourceRecord resource, DateTimeOffset now)
     {
+        if (_externalClaims.TryGetValue(resource.Key, out var claimant) && claimant != resource.HolderProcessId)
+        {
+            await write.UpsertResourceAsync(resource with { HolderProcessId = claimant, AcquiredAt = now, UpdatedAt = now });
+            return null;
+        }
+
         var next = (await write.GetWaitersAsync(resource.Key)).FirstOrDefault(IsActiveWaiter);
         await write.UpsertResourceAsync(resource with
         {
@@ -834,6 +870,14 @@ public sealed partial class ProcessEngine
             }
 
             var now = _time.GetUtcNow();
+
+            // Пользователь сам освобождает ресурс, занятый Pepa (например, заявка блокировки осталась после потерянного
+            // события разблокировки): заявку снимаем, иначе ресурс сразу вернулся бы к ней же.
+            if (IsExternalHolder(holder))
+            {
+                _externalClaims.TryRemove(new KeyValuePair<string, string>(key, holder));
+            }
+
             var granted = await ReleaseAndGrantAsync(write, resource, now);
             if (!IsExternalHolder(holder))
             {
@@ -1196,6 +1240,14 @@ public sealed partial class ProcessEngine
         {
             if (resource.HolderProcessId is not { } holder)
             {
+                continue;
+            }
+
+            // Ресурс самой Pepa (запись действий, блокировка компьютера) после перезапуска свободен: его держатель — не процесс.
+            // Это не «ресурс завершённого процесса» и в отчёт о восстановлении не входит.
+            if (IsExternalHolder(holder))
+            {
+                await write.UpsertResourceAsync(resource with { HolderProcessId = null, AcquiredAt = null, UpdatedAt = now });
                 continue;
             }
 

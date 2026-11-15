@@ -25,14 +25,13 @@ public sealed class DesktopSettings
     {
         _path = path;
         CloseAction = stored.CloseAction;
-        StartWithWindows = stored.StartWithWindows;
     }
 
     public CloseAction CloseAction { get; set; }
 
-    public bool StartWithWindows { get; set; }
-
-    private sealed record Stored(CloseAction CloseAction = CloseAction.Ask, bool StartWithWindows = false);
+    // «Запускать вместе с Windows» здесь не хранится: правда — в реестре (её может изменить и сама Windows), копия здесь
+    // устаревала бы и возвращала выключенный автозапуск.
+    private sealed record Stored(CloseAction CloseAction = CloseAction.Ask);
 
     public static DesktopSettings Load(string dataDirectory)
     {
@@ -58,7 +57,7 @@ public sealed class DesktopSettings
         {
             Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
             var temp = _path + ".tmp";
-            File.WriteAllText(temp, JsonSerializer.Serialize(new Stored(CloseAction, StartWithWindows)));
+            File.WriteAllText(temp, JsonSerializer.Serialize(new Stored(CloseAction)));
             File.Move(temp, _path, overwrite: true);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
@@ -8,6 +9,7 @@ using Pepa.Adapters.Desktop;
 using Pepa.Adapters.Desktop.Windows;
 using Pepa.Engine;
 using Pepa.Host;
+using Pepa.Host.Startup;
 
 namespace Pepa.Desktop;
 
@@ -28,12 +30,28 @@ public partial class App : Application
     private DispatcherTimer? _trayTimer;
     private DesktopSettings? _settings;
 
+    /// <summary>Перехват завершения сеанса Windows; поле держит делегат, который вызывает Windows.</summary>
+    private SessionEnd? _sessionEnd;
+
+    /// <summary>Блокировка и разблокировка компьютера (и проверка при запуске) — по одной, в порядке прихода.</summary>
+    private readonly SemaphoreSlim _lockGate = new(1, 1);
+
+    /// <summary>Пока Pepa закрывалась, её запустили снова (ярлык): после закрытия — открыть заново.</summary>
+    private bool _relaunch;
+
+    /// <summary>Сколько ждать движок при завершении сеанса Windows: дольше Windows не ждёт.</summary>
+    private static readonly TimeSpan SessionEndBudget = TimeSpan.FromSeconds(4);
+
+    /// <summary>Аргумент перезапуска: подождать, пока прежняя Pepa (этот номер процесса) закроется совсем.</summary>
+    private const string AfterArgument = "--after";
+
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
         DispatcherUnhandledException += OnUnhandledException;
+        WaitForPreviousInstance(e.Args);
 
-        _customDataDirectory = ParseDataDirectory(e.Args);
+        _customDataDirectory = AutostartEntry.DataDirectoryFrom(e.Args);
         _dataDirectory = _customDataDirectory ?? _dataDirectory;
         // Запуск вместе с Windows — сразу в область уведомлений, без окна.
         var minimized = e.Args.Contains(Autostart.MinimizedArgument, StringComparer.OrdinalIgnoreCase);
@@ -89,11 +107,15 @@ public partial class App : Application
             return;
         }
 
+        // До показа окна: перехватить вопрос Windows о завершении сеанса раньше WPF (он закрыл бы Pepa ещё до ответа).
+        _sessionEnd = SessionEnd.TryAttach(closeApp => OnSessionEnded());
+        SessionEnd.RegisterRestart(AutostartEntry.Arguments(_customDataDirectory));
+
         var settings = _settings = DesktopSettings.Load(_dataDirectory);
         var window = new MainWindow(_host, settings);
         MainWindow = window;
         var tray = _tray = new TrayIcon(
-            open: () => ShowWindow(window),
+            open: () => ShowWindow(window, relaunchIfExiting: false),
             exit: window.ExitPepa,
             closeToTray: toTray =>
             {
@@ -112,27 +134,67 @@ public partial class App : Application
             // Реестр недоступен — пункт меню просто не отмечен.
         }
 
+        // Отметки — без обработчиков: иначе каждый запуск снова писал бы в реестр (а при ошибке записи — без конца).
         tray.SetChecks(settings.CloseAction == CloseAction.Tray, autostart);
         window.Tray = tray;
         alerts.Attach(window, tray);
         window.Closed += (_, _) => Shutdown(0);
-        SessionEnding += (_, _) =>
+        window.Stopped += () =>
         {
-            window.CloseForSessionEnd();
-            // Окно, свёрнутое при запуске, могло ни разу не открываться — тогда его закрытие движок не останавливает.
-            if (_host is { } host)
+            if (_relaunch)
             {
-                Task.Run(() => host.StopAsync()).Wait(TimeSpan.FromSeconds(4));
+                Relaunch();
             }
         };
+        if (_sessionEnd is null)
+        {
+            // Перехватить вопрос не удалось — как раньше: остановиться на вопросе (WPF всё равно закроет Pepa).
+            SessionEnding += (_, _) => OnSessionEnded();
+        }
+
         SystemEvents.SessionSwitch += OnSessionSwitch;
+        // Компьютер мог быть заблокирован уже при запуске (Windows сама вошла и заблокировала после обновления, автозапуск
+        // запустил Pepa) — события блокировки тогда не будет.
+        await SyncLockAtStartupAsync();
         StartTrayUpdates(tray);
         if (!minimized)
         {
             window.Show();
         }
+        else if (_host.StartupMessage is { } message)
+        {
+            // Свёрнутая при запуске Pepa видна только значком: о процессах, остановившихся без неё, — сообщение у значка
+            // (уведомления в Telegram могут быть выключены).
+            tray.ShowBalloon("Pepa запущена", message);
+        }
 
         ListenForActivation(activationName, window);
+    }
+
+    /// <summary>
+    /// Сеанс Windows действительно заканчивается (WM_ENDSESSION): остановить движок за то время, что даёт Windows, и
+    /// закрыться. Незавершённые шаги разберёт восстановление при следующем запуске.
+    /// </summary>
+    private void OnSessionEnded()
+    {
+        // Сеанс заканчивается — открывать Pepa снова некуда.
+        _relaunch = false;
+        _sessionEnd?.SetBlockReason("Pepa останавливает процессы…");
+        (MainWindow as MainWindow)?.AllowClose();
+        if (_host is { } host)
+        {
+            try
+            {
+                // Остановка идёт в пуле потоков (PepaHost.StopAsync), поток окна только ждёт.
+                host.StopAsync().Wait(SessionEndBudget);
+            }
+            catch (Exception)
+            {
+                // Остановка с ошибкой — сеанс всё равно заканчивается; разберёт восстановление.
+            }
+        }
+
+        Shutdown(0);
     }
 
     protected override void OnExit(ExitEventArgs e)
@@ -145,8 +207,19 @@ public partial class App : Application
         base.OnExit(e);
     }
 
-    private static void ShowWindow(Window window)
+    /// <param name="relaunchIfExiting">Pepa закрывается, а её запустили снова (ярлык) — открыть заново после закрытия.</param>
+    private void ShowWindow(MainWindow window, bool relaunchIfExiting)
     {
+        if (window.IsExiting)
+        {
+            // Окно не возвращается посреди остановки: крестик в нём оборвал бы её на полпути.
+            _relaunch |= relaunchIfExiting;
+            _tray?.ShowBalloon("Pepa закрывается", relaunchIfExiting
+                ? "Подождите несколько секунд: Pepa дожидается выполняющихся шагов и откроется снова."
+                : "Подождите несколько секунд: Pepa дожидается выполняющихся шагов.");
+            return;
+        }
+
         if (!window.IsVisible)
         {
             window.Show();
@@ -168,16 +241,12 @@ public partial class App : Application
         try
         {
             Autostart.Set(enabled, _customDataDirectory);
-            if (_settings is { } settings)
-            {
-                settings.StartWithWindows = enabled;
-                settings.Save();
-            }
         }
         catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException or InvalidOperationException)
         {
-            MessageBox.Show($"Не удалось изменить запуск вместе с Windows: {ex.Message}", "Pepa", MessageBoxButton.OK, MessageBoxImage.Warning);
+            // Сначала вернуть отметку (без обработчиков — реестр больше не трогаем), потом сказать.
             _tray?.SetChecks(_settings?.CloseAction == CloseAction.Tray, !enabled);
+            MessageBox.Show($"Не удалось изменить запуск вместе с Windows: {ex.Message}", "Pepa", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }
 
@@ -194,10 +263,7 @@ public partial class App : Application
 
             try
             {
-                var (active, attention) = await host.CountsAsync();
-                tray.SetText(attention > 0
-                    ? $"Pepa — ждут вашего решения: {attention}; работают или ждут: {active}"
-                    : active > 0 ? $"Pepa — работают или ждут: {active}" : "Pepa — процессов нет");
+                tray.SetText((await host.CountsAsync()).Text());
             }
             catch (Exception)
             {
@@ -212,12 +278,50 @@ public partial class App : Application
 
     /// <summary>
     /// Компьютер заблокирован (Win+L): мышь и клавиатура достаются «Pepa: компьютер заблокирован» — блоки окон ждут
-    /// разблокировки в очереди, а не падают (D-086). Если их сейчас держит процесс, его блоки и так в работе — ничего не
-    /// трогаем.
+    /// разблокировки в очереди, а не падают (D-086). Если их сейчас держит процесс, его начатые блоки идут дальше, а после
+    /// него ввод перейдёт к Pepa (заявка), а не к следующему в очереди — до разблокировки.
     /// </summary>
     private async void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
     {
-        if (_host is not { } host || e.Reason is not (SessionSwitchReason.SessionLock or SessionSwitchReason.SessionUnlock))
+        if (e.Reason is SessionSwitchReason.SessionLock or SessionSwitchReason.SessionUnlock)
+        {
+            await SetLockedAsync(e.Reason == SessionSwitchReason.SessionLock);
+        }
+    }
+
+    private async Task SyncLockAtStartupAsync()
+    {
+        await _lockGate.WaitAsync();
+        try
+        {
+            // Под тем же замком, что и события: разблокировка между проверкой и заявкой не потеряется — она придёт следом.
+            if (SessionLock.IsLocked())
+            {
+                await ApplyLockAsync(locked: true);
+            }
+        }
+        finally
+        {
+            _lockGate.Release();
+        }
+    }
+
+    private async Task SetLockedAsync(bool locked)
+    {
+        await _lockGate.WaitAsync();
+        try
+        {
+            await ApplyLockAsync(locked);
+        }
+        finally
+        {
+            _lockGate.Release();
+        }
+    }
+
+    private async Task ApplyLockAsync(bool locked)
+    {
+        if (_host is not { } host)
         {
             return;
         }
@@ -225,9 +329,9 @@ public partial class App : Application
         var input = DesktopNodes.InputResource;
         try
         {
-            if (e.Reason == SessionSwitchReason.SessionLock)
+            if (locked)
             {
-                await host.Engine.TryHoldExternallyAsync(input.Key, input.Title, ProcessEngine.LockedHolder);
+                await host.Engine.ClaimExternallyAsync(input.Key, input.Title, ProcessEngine.LockedHolder);
             }
             else
             {
@@ -250,7 +354,7 @@ public partial class App : Application
             {
                 while (handle.WaitOne())
                 {
-                    window.Dispatcher.BeginInvoke(() => ShowWindow(window));
+                    window.Dispatcher.BeginInvoke(() => ShowWindow((MainWindow)window, relaunchIfExiting: true));
                 }
             }
             catch (ObjectDisposedException)
@@ -283,17 +387,55 @@ public partial class App : Application
         e.Handled = true;
     }
 
-    private static string? ParseDataDirectory(string[] args)
+    /// <summary>Запустить Pepa снова (её открыли, пока она закрывалась): новая подождёт, пока эта закроется совсем.</summary>
+    private void Relaunch()
     {
-        for (var i = 0; i < args.Length - 1; i++)
+        if (Environment.ProcessPath is not { } exe)
         {
-            if (args[i] == "--data-dir")
-            {
-                return Path.GetFullPath(args[i + 1]);
-            }
+            return;
         }
 
-        return null;
+        try
+        {
+            var start = new ProcessStartInfo(exe) { UseShellExecute = false };
+            start.ArgumentList.Add(AfterArgument);
+            start.ArgumentList.Add(Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            if (_customDataDirectory is { } data)
+            {
+                start.ArgumentList.Add(AutostartEntry.DataDirectoryArgument);
+                start.ArgumentList.Add(data);
+            }
+
+            Process.Start(start);
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or IOException or InvalidOperationException)
+        {
+            MessageBox.Show($"Pepa закрыта, но открыть её снова не удалось: {ex.Message}\n\nЗапустите Pepa ещё раз.", "Pepa",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    /// <summary>
+    /// Перезапуск: прежняя Pepa ещё закрывается (её окно WebView2 держит папку данных интерфейса) — подождать её, но не
+    /// бесконечно.
+    /// </summary>
+    private static void WaitForPreviousInstance(string[] args)
+    {
+        var index = Array.IndexOf(args, AfterArgument);
+        if (index < 0 || index + 1 >= args.Length || !int.TryParse(args[index + 1], out var id))
+        {
+            return;
+        }
+
+        try
+        {
+            using var previous = Process.GetProcessById(id);
+            previous.WaitForExit(TimeSpan.FromSeconds(30));
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            // Уже закрылась.
+        }
     }
 
     private static string Hash(string value) =>
