@@ -74,3 +74,35 @@ public static class EventSources
     /// <summary>Ответы пользователя на вопросы процессов — только из интерфейса Pepa.</summary>
     public const string Question = "pepa.question";
 }
+
+/// <summary>Какие виды событий берёт ожидание или автозапуск (D-077).</summary>
+public static class EventTypes
+{
+    /// <summary>
+    /// Изменение уже пришедшего события (бот поправил своё сообщение) — дополнение, а не новое событие: ожидания и автозапуски
+    /// с любым видом его не берут, только назвавшие его явно. Иначе каждая правка будила бы их как новое сообщение.
+    /// </summary>
+    public const string Edited = "edited";
+
+    /// <summary>
+    /// Подходит ли вид события. <paramref name="wanted"/>: пусто — любой (кроме изменений); один вид или несколько через «|»
+    /// («message|edited»).
+    /// </summary>
+    public static bool Accepts(string? wanted, string actual)
+    {
+        if (string.IsNullOrWhiteSpace(wanted))
+        {
+            return !string.Equals(actual, Edited, StringComparison.OrdinalIgnoreCase);
+        }
+
+        foreach (var type in wanted.Split('|', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (string.Equals(type, actual, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+}

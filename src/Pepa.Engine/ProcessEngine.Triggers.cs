@@ -243,7 +243,7 @@ public sealed partial class ProcessEngine
             var type = trigger.Config.GetString("eventType");
             var key = trigger.Config.GetString("correlationKey");
             if (!string.Equals(source?.Trim(), record.Source, StringComparison.OrdinalIgnoreCase) ||
-                (!string.IsNullOrWhiteSpace(type) && !string.Equals(type, record.Type, StringComparison.OrdinalIgnoreCase)) ||
+                !EventTypes.Accepts(type, record.Type) ||
                 (!string.IsNullOrEmpty(key) && !string.Equals(key, record.CorrelationKey, StringComparison.Ordinal)))
             {
                 continue;

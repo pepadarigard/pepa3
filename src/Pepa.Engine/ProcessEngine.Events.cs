@@ -439,7 +439,7 @@ public sealed partial class ProcessEngine
     }
 
     private static bool SubscriptionAccepts(string? eventType, string? correlationKey, EventRecord record) =>
-        (eventType is null || string.Equals(eventType, record.Type, StringComparison.OrdinalIgnoreCase)) &&
+        EventTypes.Accepts(eventType, record.Type) &&
         (correlationKey is null || string.Equals(correlationKey, record.CorrelationKey, StringComparison.Ordinal));
 
     /// <summary>Новое ожидание с окном «пришедшие раньше»: какие необработанные события стоит предложить подпискам.</summary>

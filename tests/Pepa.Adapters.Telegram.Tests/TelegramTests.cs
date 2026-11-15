@@ -132,6 +132,42 @@ public sealed class TelegramTests
     }
 
     [Fact]
+    public async Task Edit_is_not_a_new_event_for_waits_and_autostarts_of_any_type_but_one_that_names_it_starts()
+    {
+        var (h, _) = await SetupAsync();
+        await using var __ = h;
+        var started = await h.CreateScenarioAsync(new ScenarioBuilder("По сообщению").Node("start", "start").Node("end", "end").Chain("start", "end").Build());
+        TriggerRecord Autostart(string name, string? type) => new()
+        {
+            Id = "", ScenarioId = started, Kind = TriggerKind.Event, Name = name,
+            Config = new JsonObject { ["source"] = TelegramEvents.Source, ["eventType"] = type }, CreatedAt = default, UpdatedAt = default,
+        };
+        var any = await h.Engine.SaveTriggerAsync(Autostart("Любое", null));
+        var editsOnly = await h.Engine.SaveTriggerAsync(Autostart("Правки", TelegramEvents.EditedType));
+        async Task<IReadOnlyList<ProcessRecord>> Runs() => await h.Store.ListProcessesAsync(new ProcessQuery { ScenarioId = started });
+
+        // Новое сообщение — как раньше: его берёт автозапуск с любым видом, а «только правки» — нет.
+        var messageId = await ReceiveAsync(h, FakeTelegram.Incoming(Bot, "Новое", 8));
+        await h.UntilAsync(async () => (await h.Store.GetEventAsync(messageId))?.State == EventState.Delivered, "сообщение запустило процесс");
+        Assert.Single(await Runs());
+
+        var anyEvent = await h.RunAsync(new ScenarioBuilder("Любое событие Telegram")
+            .Node("start", "start").Node("w", "event.wait", new { source = TelegramEvents.Source }).Node("end", "end")
+            .Edge("start", "w").Edge("w", "end", Ports.Event).Build());
+        await h.WaitForStatusAsync(anyEvent, ProcessStatus.Waiting);
+
+        // Изменение сообщения: ожидание и автозапуск с любым видом его не берут, автозапуск, назвавший «edited», — берёт.
+        var edit = FakeTelegram.Incoming(Bot, "✅ Код 1234", 7) with { EditedAt = DateTimeOffset.UtcNow };
+        var editId = (await h.Engine.PublishEventAsync(TelegramEvents.ToEvent(edit))).EventId;
+        await h.UntilAsync(async () => (await h.Store.GetEventAsync(editId))?.State == EventState.Delivered, "правка запустила процесс");
+        Assert.Equal(2, (await Runs()).Count);
+        await h.IdleAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(ProcessStatus.Waiting, (await h.ProcessAsync(anyEvent)).Status);
+        Assert.Null((await h.Store.GetTriggerAsync(any.Id))!.LastError);
+        Assert.Null((await h.Store.GetTriggerAsync(editsOnly.Id))!.LastError);
+    }
+
+    [Fact]
     public async Task Replies_to_different_messages_go_to_their_own_processes_without_a_conflict()
     {
         var (h, _) = await SetupAsync();

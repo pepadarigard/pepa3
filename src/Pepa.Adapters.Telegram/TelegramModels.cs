@@ -173,7 +173,7 @@ public static class TelegramEvents
     /// Изменённое сообщение (D-077): отдельный вид события — ожидания и автозапуски «сообщение» его не берут; «Ждать сообщение»
     /// берёт, только если включено «Изменённые сообщения тоже».
     /// </summary>
-    public const string EditedType = "edited";
+    public const string EditedType = EventTypes.Edited;
 
     public static EventInput ToEvent(TelegramIncomingMessage message) => new()
     {

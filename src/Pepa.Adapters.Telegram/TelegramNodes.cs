@@ -390,13 +390,8 @@ public sealed class WaitTelegramNode(ITelegramGateway telegram) : INodeExecutor
             conditions.Add($"(f => !!f && (String(f.username ?? '').toLowerCase() === {username} || f.key === {JsonSerializer.Serialize(from)}))(event.payload.from)");
         }
 
-        // С изменёнными — подписка на оба вида событий Telegram (новое и изменённое сообщение), но не на другие.
+        // С изменёнными — подписка на оба вида событий Telegram: новое и изменённое сообщение.
         var edits = context.GetBoolean("edits");
-        if (edits)
-        {
-            conditions.Insert(0, $"(event.type === '{TelegramEvents.MessageType}' || event.type === '{TelegramEvents.EditedType}')");
-        }
-
         var match = conditions.Count > 0 ? string.Join(" && ", conditions) : null;
 
         var timeout = context.GetNumber("timeoutSeconds") is { } seconds and > 0
@@ -405,7 +400,7 @@ public sealed class WaitTelegramNode(ITelegramGateway telegram) : INodeExecutor
         return new NodeResult.WaitForEvent(new EventSubscriptionSpec
         {
             Source = TelegramEvents.Source,
-            EventType = edits ? null : TelegramEvents.MessageType,
+            EventType = edits ? $"{TelegramEvents.MessageType}|{TelegramEvents.EditedType}" : TelegramEvents.MessageType,
             CorrelationKey = key,
             MatchExpression = match,
             LookbackSeconds = (int)(context.GetNumber("lookbackSeconds") ?? 30),
