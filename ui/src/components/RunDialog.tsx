@@ -9,7 +9,7 @@ import { Dialog, useFeedback } from "./feedback";
 import { Button, Callout } from "./ui";
 import { AdsPowerPicker } from "../pages/editor/FieldEditor";
 import { newId } from "../lib/graph";
-import { batchRuns, manyCandidates } from "../lib/runMany";
+import { batchRuns, manyCandidates, tableColumns, tableRuns } from "../lib/runMany";
 
 /** Запуск сценария: если есть входные переменные — сначала спросить значения. */
 export function useRunScenario() {
@@ -109,20 +109,39 @@ function RunDialog({ name, inputs, previous, allowMany, onRun, onRunMany, onCanc
   const [many, setMany] = useState(false);
   const [manyVar, setManyVar] = useState(() => candidates[0]?.name ?? "");
   const [lines, setLines] = useState("");
+  // «Таблица»: первая строка — имена переменных, каждая следующая — запуск (можно вставить из Excel).
+  const [manyMode, setManyMode] = useState<"list" | "table">("list");
+  const [table, setTable] = useState("");
   const [batchId] = useState(() => newId("b"));
-  const varying = many ? inputs.find((v) => v.name === manyVar) : undefined;
-  const count = lines.split("\n").filter((l) => l.trim() !== "").length;
+  const byTable = many && manyMode === "table";
+  const varying = many && !byTable ? inputs.find((v) => v.name === manyVar) : undefined;
+  const fromTable = byTable ? tableColumns(table) : [];
+  const count = byTable
+    ? Math.max(0, table.split("\n").filter((l) => l.trim() !== "").length - 1)
+    : lines.split("\n").filter((l) => l.trim() !== "").length;
 
   const submit = async () => {
     const parsed: Record<string, Json> = {};
     for (const variable of inputs) {
-      if (variable === varying) continue;
+      if (variable === varying || fromTable.includes(variable.name)) continue;
       const result = parseInput(variable, values[variable.name]);
       if ("error" in result) {
         setError(`«${variable.name}»: ${result.error}`);
         return;
       }
       parsed[variable.name] = result.value;
+    }
+    if (byTable) {
+      const runs = tableRuns(table, inputs, parsed, parseInput);
+      if ("error" in runs) {
+        setError(runs.error);
+        return;
+      }
+      setError(null);
+      setBusy(true);
+      await onRunMany(runs.runs, batchId);
+      setBusy(false);
+      return;
     }
     if (varying) {
       const runs = batchRuns(varying, lines, parsed, parseInput);
@@ -172,6 +191,27 @@ function RunDialog({ name, inputs, previous, allowMany, onRun, onRunMany, onCanc
         </label>
       )}
       {many && (
+        <div className="row small" style={{ gap: 12 }}>
+          <label className="row" style={{ gap: 6 }}>
+            <input type="radio" checked={manyMode === "list"} onChange={() => setManyMode("list")} /> Значения одной переменной
+          </label>
+          <label className="row" style={{ gap: 6 }}>
+            <input type="radio" checked={manyMode === "table"} onChange={() => setManyMode("table")} /> Таблица: строка — запуск
+          </label>
+        </div>
+      )}
+      {byTable && (
+        <label className="field">
+          <span className="field-label">Таблица · запусков: {count}</span>
+          <textarea className="textarea mono" data-testid="run-many-table" value={table}
+            placeholder={`${inputs.slice(0, 2).map((v) => v.name).join("\t")}\n…`} onChange={(e) => setTable(e.target.value)} />
+          <span className="field-help">
+            Первая строка — имена входных переменных ({inputs.map((v) => v.name).join(", ")}), каждая следующая — отдельный процесс.
+            Можно скопировать из Excel; разделитель — табуляция, «;» или «,». Переменные, которых нет в таблице, — общие (ниже).
+          </span>
+        </label>
+      )}
+      {many && !byTable && (
         <div className="stack" style={{ gap: 8 }}>
           <label className="field">
             <span className="field-label">Что меняется</span>
@@ -191,7 +231,7 @@ function RunDialog({ name, inputs, previous, allowMany, onRun, onRunMany, onCanc
           </label>
         </div>
       )}
-      {inputs.filter((variable) => variable !== varying).map((variable) => (
+      {inputs.filter((variable) => variable !== varying && !fromTable.includes(variable.name)).map((variable) => (
         <label key={variable.name} className="field">
           <span className="field-label">
             {variable.name}

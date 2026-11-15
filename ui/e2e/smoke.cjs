@@ -152,6 +152,14 @@ async function main() {
     const batchProcesses = await (await fetch(`${base}/api/processes?view=all&limit=50`, { headers: { "X-Pepa-Token": token } })).json();
     const batch = batchProcesses.filter((p) => p.scenarioName === "Пример 1. Привет, файл");
     if (batch.length < 4) throw new Error(`Ожидалось 3 новых процесса примера 1, всего ${batch.length}`);
+    // Таблица: первая строка — имена переменных, каждая следующая — запуск.
+    await page.goto(`${base}/#/scenarios`);
+    await page.locator(".scenario-card", { hasText: "Пример 1. Привет, файл" }).getByRole("button", { name: "Запустить" }).click();
+    await page.getByRole("dialog").locator('[data-testid="run-many"] input').check();
+    await page.getByRole("dialog").getByText("Таблица: строка — запуск").click();
+    await page.getByRole("dialog").locator('[data-testid="run-many-table"]').fill("name\nГалина\nДенис");
+    await page.getByRole("dialog").getByRole("button", { name: "Запустить 2 процесса" }).click();
+    await page.getByText("Запущено процессов: 2").first().waitFor();
 
     step("Новый сценарий в конструкторе");
     await page.goto(`${base}/#/scenarios`);
