@@ -1,6 +1,7 @@
 import { AlarmClock, AlertTriangle, CalendarClock, CheckCircle2, Coffee, FolderOpen, Hourglass, Loader2, Moon, Play, Plus, RotateCcw, Workflow } from "lucide-react";
 import { useInfo, useOverview, useScenarios } from "../api/hooks";
 import type { PowerState } from "../api/types";
+import { GroupActions } from "../components/groupActions";
 import { ProcessActions, ProcessStatusBadge, ProcessTable } from "../components/process";
 import { useRunScenario } from "../components/RunDialog";
 import { Button, Callout, Card, Empty, ErrorState, Loading } from "../components/ui";
@@ -96,6 +97,7 @@ export function HomePage() {
       {data.attention.length > 0 && (
         <Card title={`Требуют решения · ${data.attention.length}`}>
           <div className="stack" style={{ padding: 14 }}>
+            <GroupActions processes={data.attention} />
             {data.attention.slice(0, 5).map((p) => {
               const explanation = explainProcess(p);
               return (
