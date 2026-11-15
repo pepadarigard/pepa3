@@ -42,6 +42,12 @@ public sealed record RunRequest(JsonObject? Inputs, bool? StepMode = null);
 
 public sealed record RunResponse(string ProcessId);
 
+/// <param name="Runs">Входные данные каждого запуска — по процессу на набор.</param>
+/// <param name="BatchId">Ключ отправки: та же отправка ещё раз не запускает процессы второй раз.</param>
+public sealed record RunManyRequest(IReadOnlyList<JsonObject?>? Runs, string? BatchId = null);
+
+public sealed record RunManyResponse(IReadOnlyList<string> ProcessIds);
+
 /// <param name="Variables">Для «Исправить и повторить»: новые значения изменённых переменных.</param>
 public sealed record ResumeRequest(ResumeAction Action, JsonObject? Variables = null);
 

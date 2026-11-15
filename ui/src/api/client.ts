@@ -142,6 +142,9 @@ export const api = {
   validate: (definition: ScenarioDefinition) => request<ValidationReport>("POST", "/scenarios/validate", definition),
   run: (id: string, inputs?: Record<string, Json>, stepMode = false) =>
     request<{ processId: string }>("POST", `/scenarios/${id}/run`, { inputs: inputs ?? null, stepMode }),
+  /** Несколько запусков сразу: все или ни одного; тот же batchId — без повторного запуска. */
+  runMany: (id: string, runs: Record<string, Json>[], batchId: string) =>
+    request<{ processIds: string[] }>("POST", `/scenarios/${id}/run-many`, { runs, batchId }),
 
   processes: (view: "active" | "finished" | "attention" | "all", scenarioId?: string, limit = 200) =>
     request<ProcessSummary[]>(

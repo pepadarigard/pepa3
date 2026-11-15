@@ -140,6 +140,19 @@ async function main() {
     const hello = fs.readFileSync(path.join(workspace, "примеры", "привет.txt"), "utf8");
     if (!hello.startsWith("Привет, Тест!")) throw new Error(`Неожиданное содержимое файла: ${hello}`);
 
+    step("Несколько запусков: по процессу на каждое значение");
+    await page.goto(`${base}/#/scenarios`);
+    await page.locator(".scenario-card", { hasText: "Пример 1. Привет, файл" }).getByRole("button", { name: "Запустить" }).click();
+    const runDialog = page.getByRole("dialog");
+    await runDialog.locator('[data-testid="run-many"] input').check();
+    await runDialog.locator('[data-testid="run-many-values"]').fill("Анна\n\nБорис\nВера");
+    await runDialog.getByRole("button", { name: "Запустить 3 процесса" }).click();
+    await page.getByText("Запущено процессов: 3").first().waitFor();
+    await page.waitForURL(/#\/runs/);
+    const batchProcesses = await (await fetch(`${base}/api/processes?view=all&limit=50`, { headers: { "X-Pepa-Token": token } })).json();
+    const batch = batchProcesses.filter((p) => p.scenarioName === "Пример 1. Привет, файл");
+    if (batch.length < 4) throw new Error(`Ожидалось 3 новых процесса примера 1, всего ${batch.length}`);
+
     step("Новый сценарий в конструкторе");
     await page.goto(`${base}/#/scenarios`);
     await page.getByRole("button", { name: "Новый сценарий" }).click();

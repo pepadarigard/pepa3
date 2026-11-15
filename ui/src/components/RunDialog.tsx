@@ -8,6 +8,8 @@ import { navigate } from "../router";
 import { Dialog, useFeedback } from "./feedback";
 import { Button, Callout } from "./ui";
 import { AdsPowerPicker } from "../pages/editor/FieldEditor";
+import { newId } from "../lib/graph";
+import { batchRuns, manyCandidates } from "../lib/runMany";
 
 /** Запуск сценария: если есть входные переменные — сначала спросить значения. */
 export function useRunScenario() {
@@ -54,14 +56,36 @@ export function useRunScenario() {
     }
   };
 
+  const startMany = async (id: string, runs: Record<string, Json>[], batchId: string) => {
+    try {
+      const result = await api.runMany(id, runs, batchId);
+      queryClient.invalidateQueries({ queryKey: ["processes"] });
+      queryClient.invalidateQueries({ queryKey: ["overview"] });
+      feedback.toast(`Запущено процессов: ${result.processIds.length}`);
+      navigate({ page: "runs" });
+      return true;
+    } catch (e) {
+      if (e instanceof ApiError && e.validation) {
+        feedback.toast(`${e.message} Откройте сценарий в конструкторе: ошибок — ${e.validation.errorCount}.`, "error");
+      } else {
+        feedback.error(e);
+      }
+      return false;
+    }
+  };
+
   const element = dialog && (
     <RunDialog
       name={dialog.name}
       inputs={dialog.inputs}
       previous={dialog.values}
+      allowMany={!dialog.stepMode}
       onCancel={() => setDialog(null)}
       onRun={async (values) => {
         if (await start(dialog.id, values, dialog.stepMode)) setDialog(null);
+      }}
+      onRunMany={async (runs, batchId) => {
+        if (await startMany(dialog.id, runs, batchId)) setDialog(null);
       }}
     />
   );
@@ -69,19 +93,30 @@ export function useRunScenario() {
   return { run, element };
 }
 
-function RunDialog({ name, inputs, previous, onRun, onCancel }: {
-  name: string; inputs: VariableDefinition[]; previous?: Record<string, Json> | null;
-  onRun: (values: Record<string, Json>) => Promise<void>; onCancel: () => void;
+function RunDialog({ name, inputs, previous, allowMany, onRun, onRunMany, onCancel }: {
+  name: string; inputs: VariableDefinition[]; previous?: Record<string, Json> | null; allowMany: boolean;
+  onRun: (values: Record<string, Json>) => Promise<void>;
+  onRunMany: (runs: Record<string, Json>[], batchId: string) => Promise<void>;
+  onCancel: () => void;
 }) {
   const [values, setValues] = useState<Record<string, string | boolean>>(() =>
     Object.fromEntries(inputs.map((v) => [v.name, initialText(v, v.secret ? undefined : previous?.[v.name])])),
   );
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // «Несколько запусков»: одна входная переменная меняется — по процессу на каждое её значение.
+  const candidates = allowMany ? manyCandidates(inputs) : [];
+  const [many, setMany] = useState(false);
+  const [manyVar, setManyVar] = useState(() => candidates[0]?.name ?? "");
+  const [lines, setLines] = useState("");
+  const [batchId] = useState(() => newId("b"));
+  const varying = many ? inputs.find((v) => v.name === manyVar) : undefined;
+  const count = lines.split("\n").filter((l) => l.trim() !== "").length;
 
   const submit = async () => {
     const parsed: Record<string, Json> = {};
     for (const variable of inputs) {
+      if (variable === varying) continue;
       const result = parseInput(variable, values[variable.name]);
       if ("error" in result) {
         setError(`«${variable.name}»: ${result.error}`);
@@ -89,10 +124,27 @@ function RunDialog({ name, inputs, previous, onRun, onCancel }: {
       }
       parsed[variable.name] = result.value;
     }
+    if (varying) {
+      const runs = batchRuns(varying, lines, parsed, parseInput);
+      if ("error" in runs) {
+        setError(runs.error);
+        return;
+      }
+      setError(null);
+      setBusy(true);
+      await onRunMany(runs.runs, batchId);
+      setBusy(false);
+      return;
+    }
     setError(null);
     setBusy(true);
     await onRun(parsed);
     setBusy(false);
+  };
+
+  const addLine = (value: string) => {
+    const existing = lines.split("\n").map((l) => l.trim()).filter((l) => l !== "");
+    if (!existing.includes(value)) setLines([...existing, value].join("\n"));
   };
 
   return (
@@ -102,8 +154,8 @@ function RunDialog({ name, inputs, previous, onRun, onCancel }: {
       footer={
         <>
           <Button onClick={onCancel}>{ru.common.cancel}</Button>
-          <Button variant="primary" icon={Play} busy={busy} onClick={submit}>
-            {ru.common.run}
+          <Button variant="primary" icon={Play} busy={busy} onClick={submit} disabled={many && count === 0}>
+            {many ? `Запустить ${count} ${count === 1 ? "процесс" : count >= 2 && count <= 4 ? "процесса" : "процессов"}` : ru.common.run}
           </Button>
         </>
       }
@@ -113,7 +165,33 @@ function RunDialog({ name, inputs, previous, onRun, onCancel }: {
           ? "Значения — как у прошлого запуска (секретные нужно ввести заново). Каждый запуск — отдельный процесс со своими переменными."
           : "Укажите входные значения. Каждый запуск — отдельный процесс со своими переменными."}
       </p>
-      {inputs.map((variable) => (
+      {candidates.length > 0 && (
+        <label className="row small" style={{ gap: 8 }} data-testid="run-many">
+          <input type="checkbox" checked={many} onChange={(e) => setMany(e.target.checked)} />
+          Несколько запусков — по процессу на каждое значение
+        </label>
+      )}
+      {many && (
+        <div className="stack" style={{ gap: 8 }}>
+          <label className="field">
+            <span className="field-label">Что меняется</span>
+            <select className="select" value={manyVar} onChange={(e) => setManyVar(e.target.value)}>
+              {candidates.map((v) => <option key={v.name} value={v.name}>{v.name}</option>)}
+            </select>
+          </label>
+          <label className="field">
+            <span className="field-label">Значения «{manyVar}» — по одному на строку · {count}</span>
+            <textarea className="textarea mono" data-testid="run-many-values" value={lines} placeholder={"k1a2b3\nk4c5d6"}
+              onChange={(e) => setLines(e.target.value)} />
+            {varying?.lookup === "adspower-profiles" && <AdsPowerPicker onPick={addLine} />}
+            <span className="field-help">
+              Каждое значение — отдельный процесс; остальные входные данные — общие. Одновременно работают не больше процессов,
+              чем разрешено в «Настройках», а один профиль AdsPower — по очереди. Запускаются все или ни один.
+            </span>
+          </label>
+        </div>
+      )}
+      {inputs.filter((variable) => variable !== varying).map((variable) => (
         <label key={variable.name} className="field">
           <span className="field-label">
             {variable.name}

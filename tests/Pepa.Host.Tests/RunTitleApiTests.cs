@@ -160,3 +160,34 @@ public sealed class FixAndRetryApiTests
             j!["message"]!.GetValue<string>() == "Пользователь исправил переменную «file»: «закз.txt» → «заказ.txt».");
     }
 }
+
+/// <summary>«Несколько запусков» через API (D-088).</summary>
+public sealed class RunManyApiTests
+{
+    [Fact]
+    public async Task Each_value_starts_its_own_process_and_the_same_batch_is_not_started_twice()
+    {
+        await using var f = await HostFixture.StartAsync(seedSamples: false);
+        var (_, scenario) = await f.SendAsync(HttpMethod.Post, "/api/scenarios", new
+        {
+            name = "Привет",
+            variables = new object[] { new { name = "who", type = "text", isInput = true } },
+            nodes = new object[] { new { id = "start", type = "start" }, new { id = "end", type = "end", config = new { message = "Привет, {{ vars.who }}" } } },
+            edges = new object[] { new { id = "a", source = "start", sourcePort = "out", target = "end" } },
+        });
+        var id = scenario!["id"]!.GetValue<string>();
+        var body = new { runs = new object[] { new { who = "Анна" }, new { who = "Борис" } }, batchId = "e2ebatch1" };
+
+        var (status, started) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{id}/run-many", body);
+        Assert.Equal(200, status);
+        var ids = started!["processIds"]!.AsArray().Select(p => p!.GetValue<string>()).ToList();
+        Assert.Equal(2, ids.Count);
+        Assert.Equal("Привет, Борис", (await f.WaitForProcessAsync(ids[1], p => HostFixture.Status(p) == "completed"))["process"]!["statusMessage"]!.GetValue<string>());
+
+        var (_, again) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{id}/run-many", body);
+        Assert.Equal(ids, again!["processIds"]!.AsArray().Select(p => p!.GetValue<string>()));
+
+        var (badStatus, _) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{id}/run-many", new { runs = new object[] { new { who = "x" } }, batchId = "../../" });
+        Assert.Equal(400, badStatus);
+    }
+}

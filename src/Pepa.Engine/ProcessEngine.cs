@@ -172,6 +172,63 @@ public sealed partial class ProcessEngine : IAsyncDisposable
         return process.Id;
     }
 
+    /// <summary>Сколько процессов можно запустить одним «Несколько запусков».</summary>
+    public const int MaxBatchRuns = 500;
+
+    /// <summary>
+    /// Несколько запусков одного сценария сразу (D-088): по процессу на каждый набор входных данных. Все наборы проверяются до
+    /// записи, а процессы записываются одной транзакцией — запускаются либо все, либо ни один. <paramref name="batchKey"/>
+    /// защищает от повторной отправки: тот же ключ — те же процессы, новых не создаётся. Дальше процессы идут как обычно:
+    /// одновременно — не больше, чем разрешено в настройках, а общий ресурс (профиль AdsPower) — по очереди.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> StartProcessesAsync(string scenarioId, IReadOnlyList<JsonObject?> runs, string? batchKey,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureRunning();
+        if (runs.Count == 0)
+        {
+            throw new EngineOperationException("Нет ни одного запуска.");
+        }
+
+        if (runs.Count > MaxBatchRuns)
+        {
+            throw new EngineOperationException($"За один раз можно запустить не больше {MaxBatchRuns} процессов (указано {runs.Count}).");
+        }
+
+        var prepared = new List<PreparedStart>(runs.Count);
+        for (var i = 0; i < runs.Count; i++)
+        {
+            try
+            {
+                prepared.Add(await PrepareStartAsync(scenarioId, runs[i], cancellationToken));
+            }
+            catch (EngineOperationException ex)
+            {
+                throw new EngineOperationException($"Запуск {i + 1} из {runs.Count}: {ex.Message} Ни один процесс не запущен.");
+            }
+        }
+
+        var started = new List<(ProcessRecord Process, bool Created)>(runs.Count);
+        await using (var write = await _store.BeginWriteAsync(cancellationToken))
+        {
+            for (var i = 0; i < prepared.Count; i++)
+            {
+                started.Add(await InsertStartedProcessAsync(write, prepared[i], batchKey is null ? null : $"{batchKey}:{i}",
+                    $"запуск {i + 1} из {runs.Count}"));
+            }
+
+            await write.CommitAsync();
+        }
+
+        foreach (var (process, created) in started.Where(s => s.Created))
+        {
+            Notify(process.Id);
+            Enqueue(process.Id);
+        }
+
+        return [.. started.Select(s => s.Process.Id)];
+    }
+
     /// <summary>Записать новый процесс в транзакции. Если процесс с таким ключом происхождения уже есть — вернуть его.</summary>
     private async Task<(ProcessRecord Process, bool Created)> InsertStartedProcessAsync(IStoreWrite write, PreparedStart prepared,
         string? originKey, string? origin, DebugState? debug = null)

@@ -610,6 +610,18 @@ internal static class ApiEndpoints
         api.MapPost("/scenarios/{id}/run", async (string id, RunRequest? request, ProcessEngine engine, CancellationToken ct) =>
             new RunResponse(await engine.StartProcessAsync(id, request?.Inputs, request?.StepMode == true, ct)));
 
+        // Несколько запусков сразу (D-088): все или ни одного.
+        api.MapPost("/scenarios/{id}/run-many", async (string id, RunManyRequest request, ProcessEngine engine, CancellationToken ct) =>
+        {
+            if (request.BatchId is { } batch && !System.Text.RegularExpressions.Regex.IsMatch(batch, "^[A-Za-z0-9_-]{6,64}$"))
+            {
+                return Results.BadRequest(new ErrorDto("Неверный ключ отправки."));
+            }
+
+            var ids = await engine.StartProcessesAsync(id, request.Runs ?? [], request.BatchId is { } key ? $"batch:{id}:{key}" : null, ct);
+            return Results.Ok(new RunManyResponse(ids));
+        });
+
         // ───────────── Процессы ─────────────
         api.MapGet("/processes", async (string? view, string? scenarioId, int? limit, IPepaStore store, ProcessMapper mapper,
             CancellationToken ct) =>
