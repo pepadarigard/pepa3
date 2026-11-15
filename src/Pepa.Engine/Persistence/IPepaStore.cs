@@ -15,6 +15,9 @@ public interface IPepaStore
     // Процессы
     Task<ProcessRecord?> GetProcessAsync(string id, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<ProcessRecord>> ListProcessesAsync(ProcessQuery query, CancellationToken cancellationToken = default);
+
+    /// <summary>Сколько процессов в каждом статусе — без ограничения списка (для счётчиков «Главной»).</summary>
+    Task<IReadOnlyDictionary<ProcessStatus, int>> CountProcessesByStatusAsync(CancellationToken cancellationToken = default);
     Task<IReadOnlyList<ProcessRecord>> GetChildProcessesAsync(string parentProcessId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<TokenRecord>> GetTokensAsync(string processId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<TokenRecord>> GetTokensAsync(IReadOnlyCollection<string> processIds, CancellationToken cancellationToken = default);

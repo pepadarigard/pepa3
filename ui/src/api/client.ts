@@ -41,6 +41,9 @@ const TOKEN_KEY = "pepa.token";
 let memoryToken: string | null = null;
 
 /** Токен приходит во фрагменте адреса (#token=…), который не отправляется на сервер. */
+/** Списки процессов: незавершённые, завершённые, ждущие решения (все), работают/ждут/на паузе, все. */
+export type ProcessView = "active" | "finished" | "attention" | "working" | "all";
+
 export function initToken(): string | null {
   const match = window.location.hash.match(/token=([^&]+)/);
   if (match) {
@@ -146,7 +149,7 @@ export const api = {
   runMany: (id: string, runs: Record<string, Json>[], batchId: string) =>
     request<{ processIds: string[] }>("POST", `/scenarios/${id}/run-many`, { runs, batchId }),
 
-  processes: (view: "active" | "finished" | "attention" | "all", scenarioId?: string, limit = 200) =>
+  processes: (view: ProcessView, scenarioId?: string, limit = 200) =>
     request<ProcessSummary[]>(
       "GET",
       `/processes?view=${view}&limit=${limit}${scenarioId ? `&scenarioId=${encodeURIComponent(scenarioId)}` : ""}`,
@@ -154,8 +157,13 @@ export const api = {
   process: (id: string) => request<ProcessDetails>("GET", `/processes/${id}`),
   pause: (id: string) => request<{ message: string }>("POST", `/processes/${id}/pause`),
   cancel: (id: string) => request<{ message: string }>("POST", `/processes/${id}/cancel`),
-  resume: (id: string, action: ResumeAction, variables?: Record<string, Json>) =>
-    request<{ message: string }>("POST", `/processes/${id}/resume`, variables ? { action, variables } : { action }),
+  /** expectedRevision — каким процесс был, когда решали (его revision): изменился — сервер решение не применит. */
+  resume: (id: string, action: ResumeAction, variables?: Record<string, Json>, expectedRevision?: string) =>
+    request<{ message: string }>("POST", `/processes/${id}/resume`, {
+      action,
+      ...(variables ? { variables } : {}),
+      ...(expectedRevision ? { expectedRevision } : {}),
+    }),
 
   events: (view: "open" | "conflict" | "unmatched" | "all" = "all", limit = 200) =>
     request<PepaEvent[]>("GET", `/events?view=${view}&limit=${limit}`),

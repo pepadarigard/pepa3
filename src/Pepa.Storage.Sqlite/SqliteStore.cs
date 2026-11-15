@@ -331,6 +331,22 @@ public sealed partial class SqliteStore : IPepaStore
         }, ReadProcess, cancellationToken);
     }
 
+    public async Task<IReadOnlyDictionary<ProcessStatus, int>> CountProcessesByStatusAsync(CancellationToken cancellationToken = default)
+    {
+        var rows = await QueryAsync("SELECT status, COUNT(*) AS n FROM processes GROUP BY status;", null,
+            r => (Status: r.GetString(0), Count: r.GetInt32(1)), cancellationToken);
+        var counts = new Dictionary<ProcessStatus, int>();
+        foreach (var (status, count) in rows)
+        {
+            if (Enum.TryParse<ProcessStatus>(status, out var parsed))
+            {
+                counts[parsed] = count;
+            }
+        }
+
+        return counts;
+    }
+
     public Task<IReadOnlyList<ProcessRecord>> GetChildProcessesAsync(string parentProcessId,
         CancellationToken cancellationToken = default) =>
         QueryAsync("SELECT * FROM processes WHERE parent_process_id = $p ORDER BY created_at;",

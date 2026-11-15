@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using Pepa.Core.Model;
+using Pepa.Core.Nodes;
 using Pepa.Engine.Persistence;
 using Pepa.Engine.Tests.Infrastructure;
 
@@ -57,5 +58,34 @@ public sealed class BatchRunTests
         await Assert.ThrowsAsync<EngineOperationException>(() => h.Engine.StartProcessesAsync(scenario, [], null));
         await Assert.ThrowsAsync<EngineOperationException>(() =>
             h.Engine.StartProcessesAsync(scenario, [.. Enumerable.Range(0, ProcessEngine.MaxBatchRuns + 1).Select(_ => (JsonObject?)null)], null));
+    }
+
+    [Fact]
+    public async Task Decision_for_a_process_that_changed_since_it_was_seen_is_refused()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        h.World.Plan("send", ActionMode.Fail, ActionMode.ThrowAfterEffect, ActionMode.Succeed);
+        h.World.ForcedVerification["send"] = VerificationOutcome.Inconclusive;
+        var id = await h.RunAsync(new ScenarioBuilder("Отправка")
+            .Node("start", "start")
+            .Node("act", TestActionNode.TypeName, new { key = "send" })
+            .Node("end", "end")
+            .Chain("start", "act", "end")
+            .Build());
+        var seen = await h.WaitForAsync(id, p => p.Attention == AttentionKind.StepFailed);
+
+        // В другом окне шаг повторили, и итог стал неизвестным; решение «повторить для всех», принятое по прежнему виду
+        // процесса, не применяется — иначе действие выполнилось бы ещё раз.
+        await h.Engine.ResumeAsync(id, ResumeAction.Retry);
+        var now = await h.WaitForAsync(id, p => p.Attention == AttentionKind.UnknownStep);
+        var error = await Assert.ThrowsAsync<EngineOperationException>(() =>
+            h.Engine.ResumeAsync(id, ResumeAction.Retry, null, ProcessEngine.Revision(seen)));
+        Assert.Contains("изменился", error.Message);
+        Assert.Equal(2, h.World.Executions("send"));
+
+        // По нынешнему виду — применяется.
+        await h.Engine.ResumeAsync(id, ResumeAction.Retry, null, ProcessEngine.Revision(now));
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Equal(3, h.World.Executions("send"));
     }
 }

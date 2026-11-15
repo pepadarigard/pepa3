@@ -316,25 +316,31 @@ internal static class ApiEndpoints
         api.MapGet("/overview", async (IPepaStore store, ProcessMapper mapper, ProcessEngine engine, Power.PowerKeeper keeper, Power.WakeTimer waker,
             SettingsService settings, CancellationToken ct) =>
         {
-            var active = await store.ListProcessesAsync(new ProcessQuery { Statuses = ActiveStatuses, Limit = 500 }, ct);
+            // Ждущие решения — все, без ограничения: пакет в 500 запусков (D-088) не должен вытеснить вчерашнюю остановку.
+            // Остальные незавершённые — последние 500; счётчики — по всем.
+            var attention = await store.ListProcessesAsync(new ProcessQuery { Statuses = [ProcessStatus.NeedsAttention], Limit = 100_000 }, ct);
+            var active = await store.ListProcessesAsync(
+                new ProcessQuery { Statuses = [ProcessStatus.Running, ProcessStatus.Waiting, ProcessStatus.Paused], Limit = 500 }, ct);
+            var byStatus = await store.CountProcessesByStatusAsync(ct);
             var today = DateTimeOffset.Now.Date;
             var startOfDay = new DateTimeOffset(today, TimeZoneInfo.Local.GetUtcOffset(today));
             var finishedToday = await store.ListProcessesAsync(
                 new ProcessQuery { Statuses = FinishedStatuses, CreatedAfter = startOfDay, Limit = 10_000 }, ct);
             var recent = await store.ListProcessesAsync(new ProcessQuery { Statuses = FinishedStatuses, Limit = 8 }, ct);
+            var attentionDtos = await mapper.SummariesAsync(attention, ct);
             var activeDtos = await mapper.SummariesAsync(active, ct);
             var conflicts = await store.ListEventsAsync(new EventQuery { States = [EventState.Conflict], Limit = 1000 }, ct);
             var triggers = await mapper.TriggersAsync(await store.ListTriggersAsync(null, ct), ct);
             return new OverviewDto(
                 new OverviewCountsDto(
-                    active.Count(p => p.Status == ProcessStatus.Running),
-                    active.Count(p => p.Status == ProcessStatus.Waiting),
-                    active.Count(p => p.Status == ProcessStatus.Paused),
-                    active.Count(p => p.Status == ProcessStatus.NeedsAttention),
+                    byStatus.GetValueOrDefault(ProcessStatus.Running),
+                    byStatus.GetValueOrDefault(ProcessStatus.Waiting),
+                    byStatus.GetValueOrDefault(ProcessStatus.Paused),
+                    attention.Count,
                     finishedToday.Count(p => p.Status == ProcessStatus.Completed),
                     finishedToday.Count(p => p.Status is ProcessStatus.Failed or ProcessStatus.Cancelled)),
-                activeDtos.Where(p => p.Status == ProcessStatus.NeedsAttention).ToList(),
-                activeDtos.Where(p => p.Status != ProcessStatus.NeedsAttention).ToList(),
+                attentionDtos,
+                activeDtos,
                 await mapper.SummariesAsync(recent, ct),
                 conflicts.Count,
                 triggers.Where(t => t.MissedRuns > 0).ToList(),
@@ -632,13 +638,15 @@ internal static class ApiEndpoints
                 "active" => ActiveStatuses,
                 "finished" => FinishedStatuses,
                 "attention" => [ProcessStatus.NeedsAttention],
+                "working" => [ProcessStatus.Running, ProcessStatus.Waiting, ProcessStatus.Paused],
                 _ => null,
             };
             var processes = await store.ListProcessesAsync(new ProcessQuery
             {
                 Statuses = statuses,
                 ScenarioId = string.IsNullOrWhiteSpace(scenarioId) ? null : scenarioId,
-                Limit = Math.Clamp(limit ?? 200, 1, 1000),
+                // Ждущие решения не обрезаются, как прочие списки: остановка не должна пропасть из виду за пакетом запусков.
+                Limit = view == "attention" ? Math.Clamp(limit ?? 100_000, 1, 100_000) : Math.Clamp(limit ?? 200, 1, 1000),
             }, ct);
             return await mapper.SummariesAsync(processes, ct);
         });
@@ -697,7 +705,7 @@ internal static class ApiEndpoints
             new MessageDto((await engine.CancelAsync(id, ct)).Message));
 
         api.MapPost("/processes/{id}/resume", async (string id, ResumeRequest request, ProcessEngine engine, CancellationToken ct) =>
-            new MessageDto((await engine.ResumeAsync(id, request.Action, request.Variables, ct)).Message));
+            new MessageDto((await engine.ResumeAsync(id, request.Action, request.Variables, request.ExpectedRevision, ct)).Message));
 
         // ───────────── События ─────────────
         api.MapGet("/events", async (string? view, int? limit, IPepaStore store, ProcessMapper mapper, CancellationToken ct) =>

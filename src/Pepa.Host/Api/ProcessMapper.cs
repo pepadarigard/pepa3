@@ -83,7 +83,8 @@ internal sealed class ProcessMapper(ProcessEngine engine, IPepaStore store)
             waiting?.WaitKind ?? WaitKind.None,
             waiting is null || process.IsTerminal ? null : Mask(DescribeWait(process, waiting, subscriptions)),
             process.ParentProcessId,
-            Mask(process.Title));
+            Mask(process.Title),
+            ProcessEngine.Revision(process));
     }
 
     private static string? DescribeWait(ProcessRecord process, TokenRecord token,

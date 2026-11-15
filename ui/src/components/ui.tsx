@@ -10,6 +10,7 @@ export function Button({
   icon: IconComponent,
   iconOnly,
   busy,
+  disabled,
   children,
   className,
   ...rest
@@ -30,7 +31,8 @@ export function Button({
     .filter(Boolean)
     .join(" ");
   return (
-    <button type="button" className={classes} disabled={busy || rest.disabled} {...rest}>
+    // disabled — после остальных свойств: явное disabled={false} не должно снимать блокировку на время выполнения.
+    <button type="button" className={classes} {...rest} disabled={busy || disabled}>
       {busy ? <span className="spinner" /> : IconComponent ? <IconComponent size={size === "small" ? 14 : 16} /> : null}
       {!iconOnly && children}
     </button>

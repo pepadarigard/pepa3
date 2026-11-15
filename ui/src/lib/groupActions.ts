@@ -13,11 +13,21 @@ export interface StopGroup {
 
 /**
  * Действия для всех сразу — только те, что не требуют разбираться в каждом процессе отдельно: проверить (ничего не
- * повторяет), продолжить, взять исправленный блок, остановить и повторить шаг после подтверждённой ошибки. «Повторить» при
- * неизвестном итоге (могло выполниться), «Считать выполненным/невыполненным», «Пропустить» и «Исправить» (свои данные у
- * каждого) — по одному.
+ * повторяет), продолжить, взять исправленный блок, остановить и повторить шаг после подтверждённой ошибки. По одному:
+ * «Повторить», если итог неизвестен или действие шага уже выполнилось (повтор сделал бы его снова), «Продолжить» после
+ * восстановления базы из копии (процесс мог уже сделать следующие шаги — каждый проверяют отдельно), «Считать
+ * выполненным/невыполненным», «Пропустить» и «Исправить» (свои данные у каждого).
  */
 const Groupable: ProcessAction[] = ["verify", "continue", "retryWithNewBlock", "retry", "cancel"];
+
+/** Можно ли это действие для всех процессов группы сразу. */
+function groupable(action: ProcessAction, members: ProcessSummary[]): boolean {
+  if (!members.every((p) => p.allowedActions.includes(action))) return false;
+  // Подтверждённая ошибка, и действие шага не выполнялось, — ровно тогда движок разрешает и «Исправить и повторить».
+  if (action === "retry") return members.every((p) => p.attention === "stepFailed" && p.allowedActions.includes("retryWithChanges"));
+  if (action === "continue") return members.every((p) => p.attention !== "restoredFromBackup");
+  return true;
+}
 
 export function stopGroups(processes: ProcessSummary[]): StopGroup[] {
   const groups = new Map<string, ProcessSummary[]>();
@@ -29,8 +39,7 @@ export function stopGroups(processes: ProcessSummary[]): StopGroup[] {
   const result: StopGroup[] = [];
   for (const [key, members] of groups) {
     if (members.length < 2) continue;
-    const actions = Groupable.filter((action) =>
-      members.every((p) => p.allowedActions.includes(action)) && !(action === "retry" && members[0].attention === "unknownStep"));
+    const actions = Groupable.filter((action) => groupable(action, members));
     if (actions.length === 0) continue;
     result.push({
       key,

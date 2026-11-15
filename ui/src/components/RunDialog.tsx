@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Play } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../api/client";
@@ -9,7 +9,7 @@ import { Dialog, useFeedback } from "./feedback";
 import { Button, Callout } from "./ui";
 import { AdsPowerPicker } from "../pages/editor/FieldEditor";
 import { newId } from "../lib/graph";
-import { batchRuns, manyCandidates, tableColumns, tableRuns } from "../lib/runMany";
+import { batchRuns, manyCandidates, tableColumns, tableRunCount, tableRuns } from "../lib/runMany";
 
 /** Запуск сценария: если есть входные переменные — сначала спросить значения. */
 export function useRunScenario() {
@@ -117,10 +117,26 @@ function RunDialog({ name, inputs, previous, allowMany, onRun, onRunMany, onCanc
   const varying = many && !byTable ? inputs.find((v) => v.name === manyVar) : undefined;
   const fromTable = byTable ? tableColumns(table) : [];
   const count = byTable
-    ? Math.max(0, table.split("\n").filter((l) => l.trim() !== "").length - 1)
+    ? tableRunCount(table)
     : lines.split("\n").filter((l) => l.trim() !== "").length;
+  // Запуск уже отправлен: второй щелчок (двойной щелчок, Enter) не запускает сценарий ещё раз.
+  const sending = useRef(false);
+
+  const send = async (work: () => Promise<void>) => {
+    if (sending.current) return;
+    sending.current = true;
+    setError(null);
+    setBusy(true);
+    try {
+      await work();
+    } finally {
+      sending.current = false;
+      setBusy(false);
+    }
+  };
 
   const submit = async () => {
+    if (sending.current) return;
     const parsed: Record<string, Json> = {};
     for (const variable of inputs) {
       if (variable === varying || fromTable.includes(variable.name)) continue;
@@ -137,10 +153,7 @@ function RunDialog({ name, inputs, previous, allowMany, onRun, onRunMany, onCanc
         setError(runs.error);
         return;
       }
-      setError(null);
-      setBusy(true);
-      await onRunMany(runs.runs, batchId);
-      setBusy(false);
+      await send(() => onRunMany(runs.runs, batchId));
       return;
     }
     if (varying) {
@@ -149,16 +162,10 @@ function RunDialog({ name, inputs, previous, allowMany, onRun, onRunMany, onCanc
         setError(runs.error);
         return;
       }
-      setError(null);
-      setBusy(true);
-      await onRunMany(runs.runs, batchId);
-      setBusy(false);
+      await send(() => onRunMany(runs.runs, batchId));
       return;
     }
-    setError(null);
-    setBusy(true);
-    await onRun(parsed);
-    setBusy(false);
+    await send(() => onRun(parsed));
   };
 
   const addLine = (value: string) => {

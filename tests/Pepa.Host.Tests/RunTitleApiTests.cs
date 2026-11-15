@@ -190,4 +190,55 @@ public sealed class RunManyApiTests
         var (badStatus, _) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{id}/run-many", new { runs = new object[] { new { who = "x" } }, batchId = "../../" });
         Assert.Equal(400, badStatus);
     }
+
+    [Fact]
+    public async Task Stopped_batch_processes_are_listed_and_counted_apart_and_a_stale_decision_is_refused()
+    {
+        await using var f = await HostFixture.StartAsync(seedSamples: false);
+        var (_, scenario) = await f.SendAsync(HttpMethod.Post, "/api/scenarios", new
+        {
+            name = "Чтение",
+            variables = new object[]
+            {
+                new { name = "file", type = "text", isInput = true },
+                new { name = "text", type = "text" },
+            },
+            nodes = new object[]
+            {
+                new { id = "start", type = "start" },
+                new { id = "read", type = "file.read", config = new { path = "{{ vars.file }}", saveTo = "text" } },
+                new { id = "end", type = "end" },
+            },
+            edges = new object[]
+            {
+                new { id = "a", source = "start", sourcePort = "out", target = "read" },
+                new { id = "b", source = "read", sourcePort = "out", target = "end" },
+            },
+        });
+        var id = scenario!["id"]!.GetValue<string>();
+        var (_, started) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{id}/run-many",
+            new { runs = new object[] { new { file = "нет-такого-1.txt" }, new { file = "нет-такого-2.txt" } }, batchId = "stopped01" });
+        var ids = started!["processIds"]!.AsArray().Select(p => p!.GetValue<string>()).ToList();
+        foreach (var process in ids)
+        {
+            await f.WaitForProcessAsync(process, p => HostFixture.Status(p) == "needsAttention");
+        }
+
+        // Ждущие решения — своим списком и счётчиком, а не из обрезанного списка незавершённых.
+        var attention = (await f.GetAsync("/api/processes?view=attention")).AsArray();
+        Assert.Equal(ids.Order(), attention.Select(p => p!["id"]!.GetValue<string>()).Order());
+        Assert.Empty((await f.GetAsync("/api/processes?view=working")).AsArray());
+        var overview = await f.GetAsync("/api/overview");
+        Assert.Equal(2, overview["counts"]!["needsAttention"]!.GetValue<int>());
+        Assert.Equal(2, overview["attention"]!.AsArray().Count);
+
+        // Решение по прежнему виду процесса не применяется; по нынешнему — применяется.
+        var first = attention.First(p => p!["id"]!.GetValue<string>() == ids[0])!;
+        var (stale, error) = await f.SendAsync(HttpMethod.Post, $"/api/processes/{ids[0]}/resume", new { action = "retry", expectedRevision = "0:0:Running:None" });
+        Assert.Equal(409, stale);
+        Assert.Contains("изменился", error!["error"]!.GetValue<string>());
+        var (ok, _) = await f.SendAsync(HttpMethod.Post, $"/api/processes/{ids[0]}/resume",
+            new { action = "retry", expectedRevision = first["revision"]!.GetValue<string>() });
+        Assert.Equal(200, ok);
+    }
 }

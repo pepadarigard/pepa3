@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "./client";
+import { api, type ProcessView } from "./client";
 import type { ResumeAction, NodeTypeDescriptor } from "./types";
 import { useMemo } from "react";
 
@@ -32,11 +32,15 @@ export const useScenario = (id: string | undefined) =>
     refetchOnWindowFocus: false,
   });
 
-export const useProcesses = (view: "active" | "finished" | "attention" | "all", scenarioId?: string) =>
+/** Сколько показывать: ждущие решения — все (их не должен вытеснить пакет запусков), незавершённые — последние 500. */
+export const processListLimit = (view: ProcessView) =>
+  view === "attention" ? 100_000 : view === "active" || view === "working" ? 500 : 300;
+
+export const useProcesses = (view: ProcessView, scenarioId?: string) =>
   useQuery({
     queryKey: ["processes", view, scenarioId ?? ""],
-    queryFn: () => api.processes(view, scenarioId, view === "active" ? 500 : 300),
-    refetchInterval: view === "active" ? 10_000 : false,
+    queryFn: () => api.processes(view, scenarioId, processListLimit(view)),
+    refetchInterval: view === "active" || view === "working" || view === "attention" ? 10_000 : false,
   });
 
 export const useProcess = (id: string | undefined) =>

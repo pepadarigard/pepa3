@@ -213,6 +213,8 @@ export interface ProcessSummary {
   parentProcessId: string | null;
   /** Название запуска: чем этот процесс отличается от других процессов того же сценария (без секретов). */
   title?: string | null;
+  /** Отметка состояния: решение «для всех» передаёт её — изменившийся процесс сервер не тронет. */
+  revision?: string;
 }
 
 export type WaitKind = "none" | "timer" | "retry" | "event" | "resource";

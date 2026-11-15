@@ -49,7 +49,8 @@ public sealed record RunManyRequest(IReadOnlyList<JsonObject?>? Runs, string? Ba
 public sealed record RunManyResponse(IReadOnlyList<string> ProcessIds);
 
 /// <param name="Variables">Для «Исправить и повторить»: новые значения изменённых переменных.</param>
-public sealed record ResumeRequest(ResumeAction Action, JsonObject? Variables = null);
+/// <param name="ExpectedRevision">Каким пользователь видел процесс (его revision): изменился — решение не применяется.</param>
+public sealed record ResumeRequest(ResumeAction Action, JsonObject? Variables = null, string? ExpectedRevision = null);
 
 public sealed record MessageDto(string Message);
 
@@ -75,7 +76,9 @@ public sealed record ProcessSummaryDto(
     string? WaitingFor,
     string? ParentProcessId,
     /// <summary>Название запуска (D-081), без секретов.</summary>
-    string? Title = null);
+    string? Title = null,
+    /// <summary>Отметка состояния (ProcessEngine.Revision): решения «для всех» передают её, чтобы не применяться к изменившемуся.</summary>
+    string Revision = "");
 
 public sealed record StepDto(
     long Id,

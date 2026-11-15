@@ -401,8 +401,25 @@ public sealed partial class ProcessEngine : IAsyncDisposable
         ResumeAsync(processId, action, null, cancellationToken);
 
     /// <param name="variables">Для <see cref="ResumeAction.RetryWithChanges"/>: новые значения переменных (только изменённые).</param>
+    public Task<ControlResult> ResumeAsync(string processId, ResumeAction action, JsonObject? variables,
+        CancellationToken cancellationToken = default) =>
+        ResumeAsync(processId, action, variables, expectedRevision: null, cancellationToken);
+
+    /// <summary>
+    /// Отметка состояния процесса: меняется при каждом его изменении (новый шаг, смена статуса или причины остановки). По ней
+    /// решение, принятое по прежнему виду процесса, не применяется к изменившемуся.
+    /// </summary>
+    public static string Revision(ProcessRecord process) =>
+        string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            $"{process.UpdatedAt.UtcTicks}:{process.StepCount}:{process.Status}:{process.Attention}");
+
+    /// <param name="variables">Для <see cref="ResumeAction.RetryWithChanges"/>: новые значения переменных (только изменённые).</param>
+    /// <param name="expectedRevision">
+    /// Каким пользователь видел процесс, принимая решение (<see cref="Revision"/>). Процесс с тех пор изменился — отказ:
+    /// решение «для всех» не должно, например, повторить шаг, итог которого тем временем стал неизвестным.
+    /// </param>
     public async Task<ControlResult> ResumeAsync(string processId, ResumeAction action, JsonObject? variables,
-        CancellationToken cancellationToken = default)
+        string? expectedRevision, CancellationToken cancellationToken = default)
     {
         if (action == ResumeAction.RetryWithChanges && variables is not { Count: > 0 })
         {
@@ -431,6 +448,11 @@ public sealed partial class ProcessEngine : IAsyncDisposable
         try
         {
             var process = await GetOrThrowAsync(processId, cancellationToken);
+            if (expectedRevision is { } expected && Revision(process) != expected)
+            {
+                throw new EngineOperationException("Процесс изменился после того, как вы приняли решение, — обновите страницу и решите снова.");
+            }
+
             var tokens = await _store.GetTokensAsync(processId, cancellationToken);
             var allowed = GetAllowedActions(process, tokens);
             if (!allowed.Contains(ToProcessAction(action)))

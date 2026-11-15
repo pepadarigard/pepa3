@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Activity, AlertTriangle, Send } from "lucide-react";
-import { useEvents, useProcesses, useResources } from "../api/hooks";
+import { processListLimit, useEvents, useProcesses, useResources } from "../api/hooks";
 import { EventConflicts, EventsTable, ResourcesCard, useSendEvent } from "../components/platform";
 import { GroupActions } from "../components/groupActions";
 import { ProcessActions, ProcessTable } from "../components/process";
@@ -11,7 +11,9 @@ import { formatMoment } from "../lib/format";
 import { attentionAdvice, explainProcess } from "../lib/status";
 
 export function RunsPage() {
-  const active = useProcesses("active");
+  // Ждущие решения — отдельным списком, все: пакет запусков (D-088) не вытесняет их из последних 500 незавершённых.
+  const stopped = useProcesses("attention");
+  const active = useProcesses("working");
   const events = useEvents("all");
   const resources = useResources();
   const sender = useSendEvent();
@@ -19,11 +21,14 @@ export function RunsPage() {
   const running = (active.data ?? []).filter((p) => p.status === "running" || p.status === "waiting" || p.status === "paused");
   const selection = useProcessSelection(running);
 
-  if (active.isLoading) return <div className="page"><Loading /></div>;
+  if (active.isLoading || stopped.isLoading) return <div className="page"><Loading /></div>;
   if (active.error) return <div className="page"><ErrorState error={active.error} onRetry={() => active.refetch()} /></div>;
+  if (stopped.error) return <div className="page"><ErrorState error={stopped.error} onRetry={() => stopped.refetch()} /></div>;
 
   const processes = active.data ?? [];
-  const attention = processes.filter((p) => p.status === "needsAttention");
+  // Список обрезан (показаны последние): «Выбрать все» и числа — только о показанных, об этом и говорим.
+  const cut = processes.length >= processListLimit("working");
+  const attention = (stopped.data ?? []).filter((p) => p.status === "needsAttention");
   const working = processes.filter((p) => p.status === "running" || p.status === "waiting");
   const paused = processes.filter((p) => p.status === "paused");
   const allEvents = events.data ?? [];
@@ -75,6 +80,12 @@ export function RunsPage() {
       )}
 
       <Card title={`Работают и ждут · ${working.length}`}>
+        {cut && (
+          <p className="small muted" style={{ padding: "10px 14px 0" }} data-testid="list-cut">
+            Показаны последние {processes.length} незавершённых процессов (работают, ждут, на паузе) — остальные откройте в «Истории»
+            или дождитесь, пока часть завершится. Требующие решения показаны все.
+          </p>
+        )}
         {selection.bar}
         {working.length > 0
           ? <ProcessTable processes={working} selected={selection.selected} onSelect={selection.onSelect} />

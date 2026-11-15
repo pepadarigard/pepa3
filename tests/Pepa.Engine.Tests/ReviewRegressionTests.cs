@@ -22,6 +22,7 @@ public sealed class HookStore(IPepaStore inner) : IPepaStore
     public Task<StoredScenario?> GetScenarioAsync(string id, CancellationToken c = default) => inner.GetScenarioAsync(id, c);
     public Task<ProcessRecord?> GetProcessAsync(string id, CancellationToken c = default) => inner.GetProcessAsync(id, c);
     public Task<IReadOnlyList<ProcessRecord>> ListProcessesAsync(ProcessQuery q, CancellationToken c = default) => inner.ListProcessesAsync(q, c);
+    public Task<IReadOnlyDictionary<ProcessStatus, int>> CountProcessesByStatusAsync(CancellationToken cancellationToken = default) => inner.CountProcessesByStatusAsync(cancellationToken);
     public Task<IReadOnlyList<ProcessRecord>> GetChildProcessesAsync(string p, CancellationToken c = default) => inner.GetChildProcessesAsync(p, c);
     public Task<IReadOnlyList<TokenRecord>> GetTokensAsync(string p, CancellationToken c = default) => inner.GetTokensAsync(p, c);
     public Task<IReadOnlyList<TokenRecord>> GetTokensAsync(IReadOnlyCollection<string> p, CancellationToken c = default) => inner.GetTokensAsync(p, c);

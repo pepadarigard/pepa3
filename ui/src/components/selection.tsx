@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Pause, Play, Square } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
@@ -12,8 +12,17 @@ export function useProcessSelection(processes: ProcessSummary[]) {
   const feedback = useFeedback();
   const queryClient = useQueryClient();
   const [busy, setBusy] = useState<string | null>(null);
-  // Выбор держится только за процессы, которые ещё в списке.
+  // Выбор держится только за процессы, которые ещё в списке: ушедший (остановился, завершился) снимается навсегда — иначе,
+  // вернувшись в список, он снова оказался бы выбранным, и «Остановить» остановило бы и его.
   const present = new Set(processes.map((p) => p.id));
+  const presentKey = processes.map((p) => p.id).join(",");
+  useEffect(() => {
+    const now = new Set(presentKey ? presentKey.split(",") : []);
+    setIds((previous) => {
+      const next = new Set([...previous].filter((id) => now.has(id)));
+      return next.size === previous.size ? previous : next;
+    });
+  }, [presentKey]);
   const chosen = processes.filter((p) => ids.has(p.id));
 
   const onSelect = (changed: string[], on: boolean) => {
@@ -33,7 +42,7 @@ export function useProcessSelection(processes: ProcessSummary[]) {
     }
     if (action === "cancel" && !(await feedback.confirm({
       title: `${label}: ${targets.length}`,
-      text: `Остановить выбранные процессы (${targets.length})? Они завершатся и не продолжатся.`,
+      text: `Остановить выбранные процессы (${targets.length}): ${targets.map((p) => `#${p.shortId}`).join(", ")}? Они завершатся и не продолжатся.`,
       confirmLabel: label,
       danger: true,
     }))) return;
