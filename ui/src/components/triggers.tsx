@@ -351,6 +351,13 @@ function TriggerEditor({ scenarioId, scenarioName, inputs, trigger, kind, onDone
             </datalist>
             <span className="field-help">Необязательно. Запуск — только для событий с этим ключом (точное совпадение).</span>
           </label>
+          {source.trim().toLowerCase() === "telegram" && (
+            <Callout tone="info">
+              Сообщения Telegram. Вид: <code>message</code> — новое сообщение (пусто — тоже), <code>edited</code> — изменённое
+              (бот поправил своё сообщение: «⏳ Проверяю…» → «✅ Код»; без этого вида изменения автозапуск не запускают). Ключ —
+              чат, например <code>user:123</code>. Во входные значения можно передать <code>event.payload.text</code>.
+            </Callout>
+          )}
           {source.trim().toLowerCase() === "files" && (
             <Callout tone="info">
               Файлы из «Настройки» → «Слежение за папками». Вид: <code>created</code> — новый файл, <code>changed</code> —
