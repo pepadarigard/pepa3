@@ -184,6 +184,28 @@ public sealed class FileNodeTests : IDisposable
         Assert.Equal(4, all.VariableUpdates["files"]!.AsArray().Count);
     }
 
+    [Fact]
+    public async Task List_mask_cannot_reach_outside_the_workspace()
+    {
+        // .NET отделяет из маски путь: «../*» перечислило бы файлы рядом с рабочей папкой.
+        var outside = _root + "-рядом";
+        Directory.CreateDirectory(outside);
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(outside, "passwords.txt"), "");
+            Directory.CreateDirectory(P("in"));
+            var node = new ListFilesNode(_workspace);
+            foreach (var mask in new[] { "../*", $"../{Path.GetFileName(outside)}/*", "..\\*", "sub/*.txt", "C:*" })
+            {
+                await Assert.ThrowsAsync<NodeInputException>(() => Run(node, new { folder = "in", pattern = mask, recursive = false, saveTo = "files" }));
+            }
+        }
+        finally
+        {
+            Directory.Delete(outside, recursive: true);
+        }
+    }
+
     // ───────────── Копирование, перемещение, удаление, папки ─────────────
 
     [Fact]

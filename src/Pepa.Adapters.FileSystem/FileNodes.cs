@@ -599,7 +599,13 @@ public sealed class ListFilesNode(IWorkspace workspace) : INodeExecutor
             return ValueTask.FromResult<NodeResult>(NodeResult.Fail($"Папка «{workspace.ToRelative(folder)}» не найдена."));
         }
 
-        var pattern = string.IsNullOrWhiteSpace(context.GetString("pattern")) ? "*" : context.GetString("pattern")!;
+        var pattern = string.IsNullOrWhiteSpace(context.GetString("pattern")) ? "*" : context.GetString("pattern")!.Trim();
+        // Маска — только имя файла: .NET отделяет из маски путь («../*») и ищет в нём — за пределами рабочей папки.
+        if (pattern.Contains('/') || pattern.Contains('\\') || pattern.Contains("..", StringComparison.Ordinal) || pattern.Contains(':'))
+        {
+            throw new NodeInputException($"Маска «{pattern}» — не имя файла: в ней не может быть папок, «..» и «:». Папку укажите в поле «Папка».");
+        }
+
         var options = new EnumerationOptions
         {
             RecurseSubdirectories = context.GetBoolean("recursive"),
@@ -607,7 +613,9 @@ public sealed class ListFilesNode(IWorkspace workspace) : INodeExecutor
             IgnoreInaccessible = true,
             MatchCasing = MatchCasing.CaseInsensitive,
         };
+        var inside = Path.TrimEndingDirectorySeparator(Path.GetFullPath(folder)) + Path.DirectorySeparatorChar;
         var files = Directory.EnumerateFiles(folder, pattern, options)
+            .Where(f => Path.GetFullPath(f).StartsWith(inside, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
             .Where(f => !Path.GetFileName(f).StartsWith(FileState.TempMarker, StringComparison.Ordinal))
             .Take(MaxEntries + 1)
             .Select(workspace.ToRelative)
