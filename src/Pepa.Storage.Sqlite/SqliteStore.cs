@@ -391,25 +391,22 @@ public sealed partial class SqliteStore : IPepaStore
         (await QueryAsync("SELECT * FROM steps WHERE id = $id;", c => c.Parameters.AddWithValue("$id", stepId),
             ReadStep, cancellationToken)).FirstOrDefault();
 
-    public Task<IReadOnlyList<StepRecord>> GetLastVisitBeforeAsync(string processId, string tokenId, string exceptNodeId,
+    public Task<IReadOnlyList<StepRecord>> GetStepsSincePreviousVisitAsync(string processId, string tokenId, string waitNodeId,
         CancellationToken cancellationToken = default) =>
         QueryAsync("""
-                   WITH last AS (SELECT id, node_id FROM steps
-                                 WHERE process_id = $p AND token_id = $t AND node_id <> $n
-                                 ORDER BY id DESC LIMIT 1)
                    SELECT * FROM steps
-                   WHERE process_id = $p AND token_id = $t AND node_id = (SELECT node_id FROM last)
-                     AND id <= (SELECT id FROM last)
-                     AND id >= (SELECT COALESCE(MAX(s.id), 0) FROM steps s
-                                WHERE s.process_id = $p AND s.token_id = $t AND s.node_id = (SELECT node_id FROM last)
-                                  AND s.attempt = 1 AND s.id <= (SELECT id FROM last))
+                   WHERE process_id = $p
+                     AND id > (SELECT COALESCE(MAX(w.id), 0) FROM steps w
+                               WHERE w.process_id = $p AND w.token_id = $t AND w.node_id = $n
+                                 AND EXISTS (SELECT 1 FROM steps x
+                                             WHERE x.process_id = $p AND x.token_id = $t AND x.node_id <> $n AND x.id > w.id))
                    ORDER BY id;
                    """,
             c =>
             {
                 c.Parameters.AddWithValue("$p", processId);
                 c.Parameters.AddWithValue("$t", tokenId);
-                c.Parameters.AddWithValue("$n", exceptNodeId);
+                c.Parameters.AddWithValue("$n", waitNodeId);
             }, ReadStep, cancellationToken);
 
     public async Task<StepRecord?> GetLastCheckpointStepAsync(string processId, string tokenId, string nodeId,
@@ -517,8 +514,28 @@ public sealed partial class SqliteStore : IPepaStore
             sql.Append(" AND process_id = $process");
         }
 
+        if (query.Source is not null)
+        {
+            sql.Append(" AND source = $source");
+        }
+
+        if (query.CorrelationKey is not null)
+        {
+            sql.Append(" AND correlation_key = $key");
+        }
+
+        if (query.ReceivedSince is not null)
+        {
+            sql.Append(" AND received_at >= $since");
+        }
+
+        if (query.AfterId is not null)
+        {
+            sql.Append(" AND id > $after");
+        }
+
         // Для «необработанных» — в порядке поступления, иначе — сначала новые.
-        sql.Append(query.States is { Count: 1 } single && single.Contains(EventState.Received)
+        sql.Append(query.Ascending || (query.States is { Count: 1 } single && single.Contains(EventState.Received))
             ? " ORDER BY id LIMIT $limit;"
             : " ORDER BY id DESC LIMIT $limit;");
         return QueryAsync(sql.ToString(), command =>
@@ -534,6 +551,26 @@ public sealed partial class SqliteStore : IPepaStore
                 command.Parameters.AddWithValue("$process", query.ProcessId);
             }
 
+            if (query.Source is not null)
+            {
+                command.Parameters.AddWithValue("$source", query.Source);
+            }
+
+            if (query.CorrelationKey is not null)
+            {
+                command.Parameters.AddWithValue("$key", query.CorrelationKey);
+            }
+
+            if (query.ReceivedSince is { } since)
+            {
+                command.Parameters.AddWithValue("$since", Date(since));
+            }
+
+            if (query.AfterId is { } after)
+            {
+                command.Parameters.AddWithValue("$after", after);
+            }
+
             command.Parameters.AddWithValue("$limit", query.Limit);
         }, ReadEvent, cancellationToken);
     }
@@ -541,6 +578,9 @@ public sealed partial class SqliteStore : IPepaStore
     public async Task<SubscriptionRecord?> GetSubscriptionAsync(long id, CancellationToken cancellationToken = default) =>
         (await QueryAsync("SELECT * FROM subscriptions WHERE id = $id;", c => c.Parameters.AddWithValue("$id", id),
             ReadSubscription, cancellationToken)).FirstOrDefault();
+
+    public Task<IReadOnlyList<SubscriptionRecord>> GetAllActiveSubscriptionsAsync(CancellationToken cancellationToken = default) =>
+        QueryAsync("SELECT * FROM subscriptions WHERE state = 'Active' ORDER BY id;", null, ReadSubscription, cancellationToken);
 
     public Task<IReadOnlyList<SubscriptionRecord>> GetActiveSubscriptionsAsync(string source,
         CancellationToken cancellationToken = default) =>

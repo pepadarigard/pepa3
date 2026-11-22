@@ -116,4 +116,70 @@ public sealed class WaitWindowTests
         Assert.Equal(ProcessStatus.Completed, done.Status);
         Assert.Equal(1, h.World.Executions("got"));
     }
+
+    [Fact]
+    public async Task Message_written_after_a_definitely_failed_question_is_not_taken_when_the_question_is_asked_again()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        h.World.Plan("ask", ActionMode.Fail, ActionMode.Succeed);
+        var id = await h.RunAsync(AskAndWait());
+        await h.WaitForAsync(id, p => p.Attention == AttentionKind.StepFailed);
+
+        // Вопрос точно не ушёл; человек пишет «да» о чём-то своём. Через пару часов вопрос задают снова.
+        await h.Engine.PublishEventAsync(new EventInput { Source = "manual", Type = "reply", CorrelationKey = "chat" });
+        h.Time.Advance(TimeSpan.FromHours(2));
+        await h.Engine.ResumeAsync(id, ResumeAction.Retry);
+        await h.WaitForStatusAsync(id, ProcessStatus.Waiting);
+        await h.IdleAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(0, h.World.Executions("got"));
+    }
+
+    [Fact]
+    public async Task Steps_without_actions_between_the_question_and_the_wait_do_not_move_the_window()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        h.World.Block("ask");
+        var id = await h.RunAsync(new ScenarioBuilder("Вопрос, переменная, ответ")
+            .Variable("asked", VariableType.Boolean, false)
+            .Node("start", "start")
+            .Node("ask", TestActionNode.TypeName, new { key = "ask" })
+            .Node("mark", "variable.set", new { variable = "asked", value = "true" })
+            .Node("wait", "event.wait", new { source = "manual", correlationKey = "chat", lookbackSeconds = 30, timeoutSeconds = 1800 })
+            .Node("got", TestActionNode.TypeName, new { key = "got" })
+            .Node("end", "end")
+            .Chain("start", "ask", "mark", "wait").Edge("wait", "got", Ports.Event).Edge("got", "end").Build());
+        await h.World.EnteredAsync("ask");
+        await h.Engine.PauseAsync(id);
+        h.World.Release("ask");
+        await h.WaitForStatusAsync(id, ProcessStatus.Paused);
+
+        await h.Engine.PublishEventAsync(new EventInput { Source = "manual", Type = "reply", CorrelationKey = "chat" });
+        h.Time.Advance(TimeSpan.FromMinutes(5));
+        await h.Engine.ResumeAsync(id, ResumeAction.Continue);
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+    }
+
+    [Fact]
+    public async Task Reply_is_found_among_many_unrelated_unmatched_events()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        h.World.Block("ask");
+        var id = await h.RunAsync(AskAndWait());
+        await h.World.EnteredAsync("ask");
+        await h.Engine.PauseAsync(id);
+        h.World.Release("ask");
+        await h.WaitForStatusAsync(id, ProcessStatus.Paused);
+
+        // Ответ, а за ним — 520 сообщений из других чатов (загруженный аккаунт): никому не подошли.
+        await h.Engine.PublishEventAsync(new EventInput { Source = "manual", Type = "reply", CorrelationKey = "chat" });
+        for (var i = 0; i < 520; i++)
+        {
+            await h.Engine.PublishEventAsync(new EventInput { Source = "manual", Type = "reply", CorrelationKey = $"other-{i}" });
+        }
+
+        await h.UntilAsync(async () => (await h.Store.ListEventsAsync(new EventQuery { States = [EventState.Unmatched], Limit = 1000 })).Count >= 521,
+            "события разобраны");
+        await h.Engine.ResumeAsync(id, ResumeAction.Continue);
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+    }
 }

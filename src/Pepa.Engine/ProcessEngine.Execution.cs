@@ -1444,21 +1444,74 @@ public sealed partial class ProcessEngine
         TimeZoneInfo.ConvertTime(moment, _time.LocalTimeZone).ToString("dd.MM.yyyy HH:mm:ss");
 
     /// <summary>
-    /// С какого времени ответ на ожидание мог прийти: начало последнего действия во внешнем мире перед ожиданием (с первой
-    /// попытки того посещения — ответ мог прийти и на неё), иначе конец предыдущего шага, иначе появление маркера. Не позже
-    /// «сейчас».
+    /// С какого времени ответ на ожидание мог прийти: начало последнего действия во внешнем мире перед ожиданием (вопроса) — с
+    /// первой его попытки, которая могла дойти до адресата (выполнена, итог неизвестен, могла выполниться). Попытки, которые
+    /// точно ничего не сделали (отказ Telegram, нет связи), окно не открывают: сообщение, написанное до вопроса, — не ответ.
+    /// Шаги без внешних действий между вопросом и ожиданием (условие, переменная, параллельный участок, таймер) окно не
+    /// сдвигают. Ничего не нашлось — конец предыдущего шага или появление маркера. Слияние («Соединить») — граница: что было
+    /// в других ветвях, не учитывается (осторожно — окно уже, а не шире). Не позже «сейчас».
     /// </summary>
     private async Task<DateTimeOffset> WaitAnchorAsync(ProcessRecord process, TokenRecord token, string waitNodeId, DateTimeOffset now)
     {
-        var visit = await _store.GetLastVisitBeforeAsync(process.Id, token.Id, waitNodeId);
-        DateTimeOffset? anchor = visit.Count == 0
-            ? null
-            : visit.Any(s => s.Effect == NodeEffect.External)
-                ? visit.Select(s => s.StartedAt ?? s.FinishedAt).Where(at => at is not null).Min()
-                : visit[^1].FinishedAt ?? visit[^1].StartedAt;
-        var at = anchor ?? token.CreatedAt;
+        var timeline = await _store.GetStepsSincePreviousVisitAsync(process.Id, token.Id, waitNodeId);
+        var mine = timeline.Where(s => s.TokenId == token.Id).ToList();
+        var end = mine.Count - 1;
+        while (end >= 0 && mine[end].NodeId == waitNodeId)
+        {
+            end--;
+        }
+
+        var anchor = LineAnchor(mine, end);
+        if (anchor is null)
+        {
+            // Маркер появился в разделении на ветви: вопрос мог быть задан до разделения — шаги до появления маркера.
+            var first = mine.Count > 0 ? mine[0].Id : long.MaxValue;
+            var before = timeline.Where(s => s.Id < first && (s.StartedAt ?? s.PlannedAt) <= token.CreatedAt).ToList();
+            anchor = LineAnchor(before, before.Count - 1);
+        }
+
+        var at = anchor ?? (end >= 0 ? mine[end].FinishedAt ?? mine[end].StartedAt : null) ?? token.CreatedAt;
         return at < now ? at : now;
     }
+
+    /// <summary>Идя назад от шага <paramref name="from"/>: начало вопроса (действия во внешнем мире), конец слияния или null.</summary>
+    private static DateTimeOffset? LineAnchor(IReadOnlyList<StepRecord> steps, int from)
+    {
+        for (var i = from; i >= 0; i--)
+        {
+            var step = steps[i];
+            if (step.NodeType == Nodes.JoinNode.TypeName)
+            {
+                return step.FinishedAt ?? step.StartedAt;
+            }
+
+            if (step.Effect != NodeEffect.External)
+            {
+                continue;
+            }
+
+            // Посещение блока: попытки подряд того же маркера на том же блоке — до первой.
+            var visit = new List<StepRecord>();
+            for (var k = i; k >= 0 && steps[k].NodeId == step.NodeId && steps[k].TokenId == step.TokenId; k--)
+            {
+                visit.Add(steps[k]);
+                if (steps[k].Attempt == 1)
+                {
+                    break;
+                }
+            }
+
+            var reached = visit.Where(MayHaveRun).Select(s => s.StartedAt ?? s.PlannedAt).ToList();
+            // Ни одна попытка не могла дойти (отказ, пропуск): вопроса не было — окно от решения по этому шагу.
+            return reached.Count > 0 ? reached.Min() : step.FinishedAt ?? step.StartedAt;
+        }
+
+        return null;
+    }
+
+    private static bool MayHaveRun(StepRecord step) =>
+        step.State is StepState.Succeeded or StepState.Unknown or StepState.Running ||
+        step.Output?["maybeExecuted"]?.GetValueKind() == System.Text.Json.JsonValueKind.True;
 
     /// <summary>Проверка подтвердила, что действие выполнено: итог шага — как у выполненного (с освобождением ресурсов).</summary>
     private static NodeResult.Success Verified(VerificationResult verification) =>

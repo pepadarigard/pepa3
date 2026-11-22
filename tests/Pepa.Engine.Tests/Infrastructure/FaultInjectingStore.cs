@@ -28,8 +28,8 @@ public sealed class FaultInjectingStore(IPepaStore inner) : IPepaStore
     public Task<IReadOnlyList<TokenRecord>> GetTokensAsync(IReadOnlyCollection<string> processIds, CancellationToken cancellationToken = default) => inner.GetTokensAsync(processIds, cancellationToken);
     public Task<IReadOnlyList<StepRecord>> GetStepsAsync(string processId, CancellationToken cancellationToken = default) => inner.GetStepsAsync(processId, cancellationToken);
     public Task<StepRecord?> GetStepAsync(long stepId, CancellationToken cancellationToken = default) => inner.GetStepAsync(stepId, cancellationToken);
-    public Task<IReadOnlyList<StepRecord>> GetLastVisitBeforeAsync(string processId, string tokenId, string exceptNodeId, CancellationToken cancellationToken = default) =>
-        inner.GetLastVisitBeforeAsync(processId, tokenId, exceptNodeId, cancellationToken);
+    public Task<IReadOnlyList<StepRecord>> GetStepsSincePreviousVisitAsync(string processId, string tokenId, string waitNodeId, CancellationToken cancellationToken = default) =>
+        inner.GetStepsSincePreviousVisitAsync(processId, tokenId, waitNodeId, cancellationToken);
     public Task<StepRecord?> GetLastCheckpointStepAsync(string processId, string tokenId, string nodeId, CancellationToken cancellationToken = default) =>
         inner.GetLastCheckpointStepAsync(processId, tokenId, nodeId, cancellationToken);
 
@@ -46,6 +46,7 @@ public sealed class FaultInjectingStore(IPepaStore inner) : IPepaStore
     public Task<EventRecord?> GetEventAsync(long id, CancellationToken cancellationToken = default) => inner.GetEventAsync(id, cancellationToken);
     public Task<IReadOnlyList<EventRecord>> ListEventsAsync(EventQuery query, CancellationToken cancellationToken = default) => inner.ListEventsAsync(query, cancellationToken);
     public Task<SubscriptionRecord?> GetSubscriptionAsync(long id, CancellationToken cancellationToken = default) => inner.GetSubscriptionAsync(id, cancellationToken);
+    public Task<IReadOnlyList<SubscriptionRecord>> GetAllActiveSubscriptionsAsync(CancellationToken cancellationToken = default) => inner.GetAllActiveSubscriptionsAsync(cancellationToken);
     public Task<IReadOnlyList<SubscriptionRecord>> GetActiveSubscriptionsAsync(string source, CancellationToken cancellationToken = default) => inner.GetActiveSubscriptionsAsync(source, cancellationToken);
     public Task<IReadOnlyList<SubscriptionRecord>> GetSubscriptionsAsync(string processId, CancellationToken cancellationToken = default) => inner.GetSubscriptionsAsync(processId, cancellationToken);
     public Task<IReadOnlyList<ResourceRecord>> ListResourcesAsync(CancellationToken cancellationToken = default) => inner.ListResourcesAsync(cancellationToken);

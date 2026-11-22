@@ -31,10 +31,10 @@ public interface IPepaStore
     Task<StepRecord?> GetLastCheckpointStepAsync(string processId, string tokenId, string nodeId, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Шаги последнего посещения маркером блока, отличного от <paramref name="exceptNodeId"/> (все попытки того посещения): откуда
-    /// маркер пришёл в ожидание — и с какого времени мог прийти ответ.
+    /// Шаги процесса после прошлого посещения маркером блока <paramref name="waitNodeId"/> (в цикле), по порядку: откуда маркер
+    /// пришёл в ожидание — и с какого времени мог прийти ответ.
     /// </summary>
-    Task<IReadOnlyList<StepRecord>> GetLastVisitBeforeAsync(string processId, string tokenId, string exceptNodeId,
+    Task<IReadOnlyList<StepRecord>> GetStepsSincePreviousVisitAsync(string processId, string tokenId, string waitNodeId,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -68,6 +68,7 @@ public interface IPepaStore
     Task<IReadOnlyList<EventRecord>> ListEventsAsync(EventQuery query, CancellationToken cancellationToken = default);
     Task<SubscriptionRecord?> GetSubscriptionAsync(long id, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<SubscriptionRecord>> GetActiveSubscriptionsAsync(string source, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<SubscriptionRecord>> GetAllActiveSubscriptionsAsync(CancellationToken cancellationToken = default);
     Task<IReadOnlyList<SubscriptionRecord>> GetSubscriptionsAsync(string processId, CancellationToken cancellationToken = default);
 
     // Ресурсы

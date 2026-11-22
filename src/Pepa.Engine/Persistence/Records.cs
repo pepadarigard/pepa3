@@ -346,6 +346,21 @@ public sealed record EventQuery
     public IReadOnlyCollection<EventState>? States { get; init; }
     public string? ProcessId { get; init; }
     public int Limit { get; init; } = 200;
+
+    /// <summary>Только этого источника (в нижнем регистре, как хранится).</summary>
+    public string? Source { get; init; }
+
+    /// <summary>Только с этим ключом сопоставления.</summary>
+    public string? CorrelationKey { get; init; }
+
+    /// <summary>Только принятые не раньше этого времени.</summary>
+    public DateTimeOffset? ReceivedSince { get; init; }
+
+    /// <summary>Только с номером больше этого — чтобы пройти все подходящие страницами.</summary>
+    public long? AfterId { get; init; }
+
+    /// <summary>По порядку поступления (иначе — сначала новые).</summary>
+    public bool Ascending { get; init; }
 }
 
 public enum SubscriptionState

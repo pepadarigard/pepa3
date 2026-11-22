@@ -776,6 +776,7 @@ public sealed class ClickNode(BrowserSessions sessions) : INodeExecutor
             };
 
             // Сначала — проба без нажатия: тайм-аут здесь значит «элемент так и не стал доступен», нажатия не было.
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 await Click(trial: true);
@@ -784,6 +785,10 @@ public sealed class ClickNode(BrowserSessions sessions) : INodeExecutor
             {
                 return NodeResult.Fail($"Элемент «{selector}» так и не стал доступен для нажатия (закрыт другим элементом или неактивен).");
             }
+
+            // Шаг уже брошен (тайм-аут шага, остановка): не нажимать позже — иначе после «Выполнить шаг ещё раз» нажатий было
+            // бы два.
+            cancellationToken.ThrowIfCancellationRequested();
 
             // Само нажатие: после него Playwright ждёт начатый им переход страницы — в тот же срок. Тайм-аут здесь не значит
             // «не нажато»: форма могла уже уйти на сервер (оплата, заявка), и повтор нажал бы второй раз.

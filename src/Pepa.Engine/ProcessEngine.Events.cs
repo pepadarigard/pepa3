@@ -461,22 +461,52 @@ public sealed partial class ProcessEngine
         await _routingLock.WaitAsync(cancellationToken);
         try
         {
-            var unmatched = await _store.ListEventsAsync(new EventQuery { States = [EventState.Unmatched], Limit = 500 }, cancellationToken);
-            foreach (var source in unmatched.Select(e => e.Source).Distinct(StringComparer.Ordinal).ToList())
+            var waits = await _store.GetAllActiveSubscriptionsAsync(cancellationToken);
+            foreach (var bySource in waits.GroupBy(w => w.Source, StringComparer.Ordinal))
             {
-                var waits = await _store.GetActiveSubscriptionsAsync(source, cancellationToken);
-                foreach (var record in unmatched
-                             .Where(e => e.Source == source &&
-                                         waits.Any(w => SubscriptionAccepts(w.EventType, w.CorrelationKey, e) && WithinWaitWindow(w, e)))
-                             .OrderBy(e => e.Id))
+                var since = bySource.Min(w => w.CreatedAt - TimeSpan.FromSeconds(w.LookbackSeconds));
+                await ForEachUnmatchedAsync(bySource.Key, null, since, cancellationToken, async record =>
                 {
-                    await RouteEventAsync(record, RouteMode.Rematch, cancellationToken);
-                }
+                    if (bySource.Any(w => SubscriptionAccepts(w.EventType, w.CorrelationKey, record) && WithinWaitWindow(w, record)))
+                    {
+                        await RouteEventAsync(record, RouteMode.Rematch, cancellationToken);
+                    }
+                });
             }
         }
         finally
         {
             _routingLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Все необработанные события источника (и ключа) с этого времени — по порядку поступления, страницами: окно ожидания
+    /// может быть длинным, а в загруженном аккаунте Telegram за это время приходят сотни сообщений из других чатов.
+    /// </summary>
+    private async Task ForEachUnmatchedAsync(string source, string? correlationKey, DateTimeOffset since,
+        CancellationToken cancellationToken, Func<EventRecord, Task> handle)
+    {
+        const int Page = 500;
+        long after = 0;
+        while (true)
+        {
+            var page = await _store.ListEventsAsync(new EventQuery
+            {
+                States = [EventState.Unmatched], Source = source, CorrelationKey = correlationKey, ReceivedSince = since,
+                AfterId = after, Ascending = true, Limit = Page,
+            }, cancellationToken);
+            foreach (var record in page)
+            {
+                await handle(record);
+            }
+
+            if (page.Count < Page)
+            {
+                return;
+            }
+
+            after = page[^1].Id;
         }
     }
 
@@ -492,14 +522,13 @@ public sealed partial class ProcessEngine
         await _routingLock.WaitAsync();
         try
         {
-            var unmatched = await _store.ListEventsAsync(new EventQuery { States = [EventState.Unmatched], Limit = 500 });
-            foreach (var record in unmatched
-                         .Where(e => e.Source == request.Source && e.ReceivedAt >= request.Since &&
-                                     SubscriptionAccepts(request.EventType, request.CorrelationKey, e))
-                         .OrderBy(e => e.Id))
+            await ForEachUnmatchedAsync(request.Source, request.CorrelationKey, request.Since, CancellationToken.None, async record =>
             {
-                await RouteEventAsync(record, RouteMode.Rematch, CancellationToken.None);
-            }
+                if (SubscriptionAccepts(request.EventType, request.CorrelationKey, record))
+                {
+                    await RouteEventAsync(record, RouteMode.Rematch, CancellationToken.None);
+                }
+            });
         }
         finally
         {

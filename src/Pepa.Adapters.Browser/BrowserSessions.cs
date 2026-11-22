@@ -589,8 +589,9 @@ public sealed class BrowserSessions : IAsyncDisposable
             // Под этим именем у процесса другой браузер (другой профиль, без «Закрыть браузер» между ними): он не теряется.
             var retired = await RetireAsync(processId, name, profileId, existing);
 
-            // Что было до этого вызова: отметки прежней попытки (с неизвестным итогом) этот вызов не снимает.
-            var hadRecord = FindInfo(processId, name) is not null;
+            // Что было до этого вызова: отметки прежней попытки (с неизвестным итогом) этот вызов не снимает, а прежнюю запись
+            // (её запуск браузера, вкладку) возвращает, если этот запуск точно не удался.
+            var previousRecord = FindInfo(processId, name);
             bool hadMark;
             string? previousMark;
             lock (_registry)
@@ -611,13 +612,19 @@ public sealed class BrowserSessions : IAsyncDisposable
                     // Точно не открылся этим запросом — снять то, что отметил он сам.
                     RestoreMark(profileId, hadMark, previousMark);
 
-                    if (!hadRecord)
+                    if (previousRecord is null)
                     {
                         RemoveRegistry(processId, name);
                         if (retired is not null)
                         {
                             Unretire(processId, name, retired);
                         }
+                    }
+                    else
+                    {
+                        // Этот вызов ничего не открыл: прежняя запись — по-прежнему правда (иначе без запуска браузера в
+                        // записи окно, которое потом откроет владелец, сошло бы за окно процесса).
+                        SaveRegistry(previousRecord);
                     }
 
                     throw;
@@ -1216,7 +1223,9 @@ public sealed class BrowserSessions : IAsyncDisposable
                 {
                     if (_registry.ContainsKey(Key(processId, name)))
                     {
-                        SaveRegistry(info with { CloseOnFinish = false, Endpoint = null, OwnTab = true });
+                        // Запуск, в котором работал процесс, остаётся в записи: и следующие шаги, повтор и «Проверить» так же
+                        // откажутся, а не подключатся к окну владельца.
+                        SaveRegistry(info with { CloseOnFinish = false, OwnTab = true });
                     }
 
                     if (_started.TryGetValue(info.ProfileId!, out var launched) && !SameLaunch(launched, state.WsEndpoint))
@@ -1271,24 +1280,18 @@ public sealed class BrowserSessions : IAsyncDisposable
     {
         _sessions.TryRemove((processId, name), out var session);
         var info = session?.Info ?? _registry.GetValueOrDefault(Key(processId, name));
+        // Своя вкладка в чужом профиле — закрывается, только когда закрыть просят («Закрыть браузер» с закрытием профиля):
+        // в конце процесса, при остановке и после записи действий вкладка остаётся (на ней видно, где процесс остановился).
+        bool? tabsClosed = null;
+        if (stopProfile && info is { Kind: BrowserKind.AdsPower, OwnTab: true })
+        {
+            tabsClosed = session is { Closed: false }
+                ? await CloseOwnTabsAsync(session.Pages())
+                : await CloseOwnTabsAfterRestartAsync(info, cancellationToken);
+        }
+
         if (session is not null)
         {
-            if (info is { OwnTab: true } && !session.Closed)
-            {
-                // Своя вкладка в чужом профиле: закрываются только вкладки процесса, окно владельца остаётся.
-                foreach (var page in session.Pages())
-                {
-                    try
-                    {
-                        await page.CloseAsync();
-                    }
-                    catch (PlaywrightException)
-                    {
-                        // Уже закрыта.
-                    }
-                }
-            }
-
             await CloseQuietlyAsync(session);
         }
 
@@ -1305,7 +1308,10 @@ public sealed class BrowserSessions : IAsyncDisposable
             if (info.OwnTab)
             {
                 // Профиль открыт не Pepa (вкладка процесса — в окне владельца): его Pepa не закрывает ни при каких условиях.
-                note = $"Профиль AdsPower {profileId} открыт не Pepa — закрыты только вкладки процесса, профиль оставлен открытым.";
+                note = tabsClosed == true
+                    ? $"Профиль AdsPower {profileId} открыт не Pepa — закрыты только вкладки процесса, профиль оставлен открытым."
+                    : $"Профиль AdsPower {profileId} открыт не Pepa — профиль оставлен открытым; вкладки процесса закрыть не удалось " +
+                      "(окно закрывали или открыли заново) — закройте их сами, если они не нужны.";
             }
             else if (usedByOther)
             {
@@ -1345,6 +1351,75 @@ public sealed class BrowserSessions : IAsyncDisposable
         }
 
         return info is null ? null : new BrowserClosed(info, stopped, note);
+    }
+
+    private static async Task<bool> CloseOwnTabsAsync(IEnumerable<IPage> pages)
+    {
+        foreach (var page in pages.ToList())
+        {
+            try
+            {
+                await page.CloseAsync();
+            }
+            catch (PlaywrightException)
+            {
+                // Уже закрыта.
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// После перезапуска Pepa подключения нет: вкладки процесса находятся по запомненным идентификаторам — только в том же
+    /// запуске браузера, в котором процесс их открыл (окно, открытое владельцем заново, Pepa не трогает).
+    /// </summary>
+    private async Task<bool> CloseOwnTabsAfterRestartAsync(BrowserSessionInfo info, CancellationToken cancellationToken)
+    {
+        var targets = new HashSet<string>(info.OwnedTargets ?? [], StringComparer.Ordinal);
+        if (info.TargetId is { } target)
+        {
+            targets.Add(target);
+        }
+
+        if (targets.Count == 0 || info.ProfileId is null || info.Endpoint is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            var state = await _adsPower.GetStateAsync(info.ProfileId, cancellationToken);
+            if (!state.Active || state.WsEndpoint is null || !SameLaunch(info.Endpoint, state.WsEndpoint))
+            {
+                return false;
+            }
+
+            var playwright = await PlaywrightAsync();
+            var browser = await playwright.Chromium.ConnectOverCDPAsync(state.WsEndpoint, new BrowserTypeConnectOverCDPOptions { Timeout = 30_000 });
+            try
+            {
+                foreach (var page in browser.Contexts.SelectMany(c => c.Pages).Where(p => !p.IsClosed).ToList())
+                {
+                    if (await TargetIdAsync(page) is { } id && targets.Contains(id))
+                    {
+                        await page.CloseAsync();
+                    }
+                }
+
+                return true;
+            }
+            finally
+            {
+                // Только отключение: окно владельца остаётся.
+                await browser.CloseAsync();
+            }
+        }
+        catch (Exception ex) when (ex is PlaywrightException or AdsPowerException)
+        {
+            Logger.LogWarning(ex, "Не удалось закрыть вкладки процесса {Process} в профиле AdsPower {Profile}.", info.ProcessId, info.ProfileId);
+            return false;
+        }
     }
 
     /// <summary>Процесс завершился: закрыть его браузеры (профили AdsPower — если так настроено при открытии).</summary>

@@ -276,6 +276,52 @@ public sealed class AdsPowerTests
     }
 
     [Fact]
+    public async Task Process_tab_in_the_owners_profile_stays_when_the_process_just_ends()
+    {
+        TestBrowser.RequireCdpBrowser();
+        await using var f = await BrowserFixture.CreateAsync(withAdsPower: true);
+        await f.Ads!.OpenByOwnerAsync("k1");
+        var id = await f.H.RunAsync(new ScenarioBuilder("Своя вкладка без закрытия")
+            .Node("start", "start")
+            .Node("open", "adspower.open", new { profileId = "k1", url = f.Site.Url("/second"), ifOpen = "tab" })
+            .Node("end", "end")
+            .Chain("start", "open", "end")
+            .Build());
+        await f.H.WaitForStatusAsync(id, ProcessStatus.Completed);
+        await Task.Delay(1500, TestContext.Current.CancellationToken);
+
+        // «Не закрывать в конце»: вкладка процесса остаётся, на ней видно, где он остановился.
+        Assert.Contains(await f.Ads.TabUrlsAsync("k1"), url => url.Contains("/second", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Close_step_after_a_restart_closes_the_process_tab_in_the_owners_profile()
+    {
+        TestBrowser.RequireCdpBrowser();
+        await using var f = await BrowserFixture.CreateAsync(withAdsPower: true);
+        await f.Ads!.OpenByOwnerAsync("k1");
+        var id = await f.H.RunAsync(new ScenarioBuilder("Своя вкладка, перезапуск, закрытие")
+            .Node("start", "start")
+            .Node("open", "adspower.open", new { profileId = "k1", url = f.Site.Url("/second"), ifOpen = "tab" })
+            .Node("w", "wait", new { mode = "duration", amount = 60, unit = "seconds" })
+            .Node("close", "browser.close", new { stopProfile = true })
+            .Node("end", "end")
+            .Chain("start", "open", "w", "close", "end")
+            .Build());
+        await f.H.WaitForAsync(id, p => p.Status == ProcessStatus.Waiting && p.StepCount >= 3);
+        await f.H.UntilAsync(() => f.Sessions.FindInfo(id, "main")?.Endpoint is not null, "запуск браузера запомнен");
+
+        await f.RestartAsync();
+        f.H.Time.Advance(TimeSpan.FromSeconds(61));
+        await f.H.Engine.ResumeAsync(id, ResumeAction.Continue);
+        await f.H.WaitForStatusAsync(id, ProcessStatus.Completed);
+
+        Assert.True(f.Ads.IsOpen("k1"));
+        Assert.DoesNotContain(await f.Ads.TabUrlsAsync("k1"), url => url.Contains("/second", StringComparison.Ordinal));
+        Assert.Contains(await f.H.Store.GetJournalAsync(id), j => j.Message.Contains("закрыты только вкладки процесса", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Profile_left_open_by_Pepa_closed_and_reopened_by_the_owner_is_not_taken_over()
     {
         TestBrowser.RequireCdpBrowser();
@@ -311,11 +357,21 @@ public sealed class AdsPowerTests
         f.Ads!.CloseExternally("k1");
         await f.Ads.OpenByOwnerAsync("k1");
 
-        // «Продолжить» — процесс не работает в окне владельца, а сообщает, что страница потеряна.
+        // «Продолжить» — процесс не работает в окне владельца, а сообщает, что страница потеряна. И при повторе — так же:
+        // ни вкладки в окне владельца, ни работы в нём.
         f.H.Time.Advance(TimeSpan.FromSeconds(601));
         await f.H.Engine.ResumeAsync(id, ResumeAction.Continue);
         var lost = await f.H.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
         Assert.Contains("открыт заново не Pepa", lost.StatusMessage);
+        var tabs = (await f.Ads.TabUrlsAsync("k1")).Count;
+        for (var retry = 0; retry < 2; retry++)
+        {
+            await f.H.Engine.ResumeAsync(id, ResumeAction.Retry);
+            var again = await f.H.WaitForAsync(id, p => p.Status == ProcessStatus.NeedsAttention && p.StepCount > lost.StepCount + retry);
+            Assert.Contains("открыт заново не Pepa", again.StatusMessage);
+        }
+
+        Assert.Equal(tabs, (await f.Ads.TabUrlsAsync("k1")).Count);
 
         // Остановка процесса окно владельца не закрывает.
         await f.H.Engine.CancelAsync(id);
@@ -323,6 +379,40 @@ public sealed class AdsPowerTests
         await Task.Delay(1000, TestContext.Current.CancellationToken);
         Assert.True(f.Ads.IsOpen("k1"));
         Assert.Equal(0, f.Site.Submits);
+    }
+
+    [Fact]
+    public async Task Failed_reopen_keeps_the_old_launch_so_the_owners_window_is_not_taken_over()
+    {
+        TestBrowser.RequireCdpBrowser();
+        await using var f = await BrowserFixture.CreateAsync(withAdsPower: true);
+        var id = await f.H.RunAsync(new ScenarioBuilder("Открыть снова")
+            .Node("start", "start")
+            .Node("a", "adspower.open", new { profileId = "k1", url = f.Site.Url("/form") })
+            .Node("w", "wait", new { mode = "duration", amount = 60, unit = "seconds" })
+            .Node("b", "adspower.open", new { profileId = "k1", url = f.Site.Url("/form") })
+            .Node("fill", "browser.fill", new { selector = "#user", text = "в чужом окне" })
+            .Node("end", "end")
+            .Chain("start", "a", "w", "b", "fill", "end")
+            .Build());
+        await f.H.WaitForAsync(id, p => p.Status == ProcessStatus.Waiting && p.StepCount >= 3);
+
+        // Профиль закрыли без Pepa; повторное открытие не удаётся (прокси) — а потом владелец открывает профиль сам.
+        f.Ads!.CloseExternally("k1");
+        f.Ads.StartErrors["k1"] = "proxy check failed";
+        f.H.Time.Advance(TimeSpan.FromSeconds(61));
+        await f.H.WaitForAsync(id, p => p.Status == ProcessStatus.NeedsAttention);
+        f.Ads.StartErrors.Remove("k1");
+        await f.Ads.OpenByOwnerAsync("k1");
+        await f.Ads.OpenTabAsync("k1", f.Site.Url("/second?owner=1"));
+
+        await f.H.Engine.ResumeAsync(id, ResumeAction.Retry);
+        var refused = await f.H.WaitForAsync(id, p => p.Status == ProcessStatus.NeedsAttention && p.StatusMessage!.Contains("открыла его не Pepa"));
+        Assert.NotNull(refused);
+        Assert.Contains(await f.Ads.TabUrlsAsync("k1"), url => url.Contains("owner=1", StringComparison.Ordinal));
+        await f.H.Engine.CancelAsync(id);
+        await Task.Delay(1000, TestContext.Current.CancellationToken);
+        Assert.True(f.Ads.IsOpen("k1"));
     }
 
     [Fact]
