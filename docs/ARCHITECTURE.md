@@ -214,8 +214,14 @@ TimeoutAt)`, `AcquireResource(Key, Title, TimeoutAt)` (`RepeatNode` — повт
 
 | Где | Блоки |
 |---|---|
-| `Engine/Nodes/LogicNodes.cs` | `start`, `end`, `condition`, `choice` (D-083), `variable.set`, `log`, `wait`, `loop.forEach` (D-021), `text.find` |
-| `Engine/Nodes/FlowNodes.cs` и соседние | `event.wait`, `event.send`, `resource.acquire`, `resource.release`, `scenario.call` (ждёт итог), `scenario.run` (не ждёт), `parallel`, `join` (D-036), `user.ask` (D-060) |
+| `Engine/Nodes/LogicNodes.cs` и соседние | `start`, `end`, `condition`, `choice` (D-083), `variable.set`, `log`, `wait`, `text.find` |
+| `Engine/Nodes/FlowNodes.cs` и соседние | `event.wait`, `event.send`, `resource.acquire`, `resource.release`, `scenario.call` (ждёт итог), `scenario.run` (не ждёт), `loop.forEach` (D-021), `parallel`, `join` (D-036), `user.ask` (D-060) |
+
+«Для каждого» (`ForEachNode`) хранит список и позицию в памяти блока. Продолжает ли вход перебор, решает
+`ForEachNode.Continues`: возврат из тела цикла — да; вход тем же путём, что и в первый раз, — новый перебор, только если до
+этого пути можно дойти и после «Готово» (внешний цикл), иначе (пауза или проверка перед каждым элементом) — продолжение.
+Движок спрашивает об этом до вычисления параметров: продолжение не вычисляет и не сохраняет список заново
+(`InputResolver.Resolve(skipField: "items")`), поэтому хранилище растёт линейно от длины списка (D-021, D-090).
 | адаптеры | раздел 5 |
 
 ## 3. Движок
@@ -451,6 +457,11 @@ TimeoutAt)`, `AcquireResource(Key, Title, TimeoutAt)` (`RepeatNode` — повт
   `TriggerFailed` (уведомление, D-082).
 - Пропущенное, пока Pepa была закрыта, — только счётчик (`RecordMissedSchedulesAsync` при запуске).
 - По событию — из маршрутизатора (3.8), источники `pepa.question` запрещены.
+- Цепочки (D-090): событие помнит процесс-отправитель (`EventRecord.SenderProcessId`; «Отправить событие» и событие о
+  завершении вызванного сценария). `EventChainAsync` идёт вверх по цепочке (отправитель → его родитель или отправитель
+  события, которым он запущен): сценарий автозапуска уже в цепочке → запуск не делается («запустил бы сам себя»,
+  `LastError` и `TriggerFailed`); глубина больше 8 — тоже. Запущенный процесс получает `Depth` отправителя + 1. События
+  извне начинают новую цепочку.
 
 ### 3.13. Решения пользователя
 
@@ -532,8 +543,10 @@ TimeoutAt)`, `AcquireResource(Key, Title, TimeoutAt)` (`RepeatNode` — повт
 ### 4.2. Схема и миграции
 
 `SqliteStore.Schema.cs`: массив `Migrations`, только дописывается; номер миграции = `PRAGMA user_version` после неё.
-Сейчас версия схемы **8**. База более новой версии не открывается («создана более новой версией Pepa»). Перед
-обновлением схемы `SqliteStore.InitializeAsync` сам делает копию `backups/pepa-migration<N>-*.db`.
+Сейчас версия схемы **9**. База более новой версии не открывается («создана более новой версией Pepa»). Перед
+обновлением схемы `SqliteStore.InitializeAsync` сам делает копию `backups/pepa-migration<N>-*.db`. Ещё раньше он
+откладывает журнал прежней базы, если на место базы положили копию (база в режиме копии, рядом `pepa.db-wal`/`-shm`):
+иначе SQLite применил бы журнал поверх копии (`SetAsideStaleJournal`, файлы `*.old`, D-090).
 
 | № | Что добавила |
 |---|---|
@@ -545,6 +558,7 @@ TimeoutAt)`, `AcquireResource(Key, Title, TimeoutAt)` (`RepeatNode` — повт
 | 6 | `processes.secrets`, `events.secrets` |
 | 7 | индекс `ix_subscriptions_event` (срок хранения событий) |
 | 8 | `processes.title`, `processes.inputs` (D-081) |
+| 9 | `events.sender_process_id` — процесс, отправивший событие (цепочки автозапуска, D-090) |
 
 Ещё одна таблица — `pepa_backup` (только в резервной копии): по ней восстановленная база узнаётся при запуске.
 Таблица `settings` — ключ/значение: `platform` (JSON `PlatformSettings`), `assistant.apiKey` (DPAPI),
@@ -567,8 +581,8 @@ TimeoutAt)`, `AcquireResource(Key, Title, TimeoutAt)` (`RepeatNode` — повт
 - `SnapshotFolder` — снимки экрана при ошибке шага, `snapshots/<id процесса>/NNN.jpg|png`, не больше 20 на процесс и
   10 МБ на снимок (D-072).
 
-Резервные копии содержат всё, что в базе: секреты процессов и ключ AdsPower (в настройках он хранится открыто) —
-обращаться с `backups/` как с `pepa.db`.
+Резервные копии содержат всё, что в базе, в том числе секретные переменные процессов (они в базе открыто, D-052) —
+обращаться с `backups/` как с `pepa.db`. Ключи интеграций (помощник, почта, Telegram, AdsPower) зашифрованы DPAPI.
 
 ### 4.4. Папка данных
 
@@ -826,7 +840,7 @@ Playwright → снимок при ошибке (если на странице 
 |---|---|
 | Система | `GET /info` (версия, папки, `recovery`), `GET /node-types` (разделы и описания блоков), `GET /overview` («Главная»: счётчики, ждущие решения, питание), `GET /stream`, `GET /plugins`, `GET /templates` (примеры как шаблоны), `POST /notifications/test`, `GET /backups`, `POST /backups` (копия сейчас) |
 | Настройки | `GET /settings`, `PUT /settings`, `GET /watches`, `PUT /watches` (слежение за папками) |
-| Сценарии | `GET /scenarios`, `POST /scenarios`, `GET /scenarios/{id}`, `PUT /scenarios/{id}` (`expectedVersion`), `DELETE /scenarios/{id}`, `POST /scenarios/{id}/duplicate`, `POST /scenarios/validate`, `POST /scenarios/{id}/run`, `POST /scenarios/{id}/run-many` (`runs`, `batchId`) |
+| Сценарии | `GET /scenarios`, `POST /scenarios`, `GET /scenarios/{id}`, `PUT /scenarios/{id}` (`expectedVersion`), `DELETE /scenarios/{id}`, `POST /scenarios/{id}/duplicate`, `POST /scenarios/validate`, `POST /scenarios/{id}/run` (`inputs`, `stepMode`, `runId` — ключ запуска: тот же ключ — тот же процесс), `POST /scenarios/{id}/run-many` (`runs`, `batchId`) |
 | Процессы | `GET /processes?view=&scenarioId=&limit=`, `GET /processes/{id}`, `POST /processes/{id}/pause`, `POST /processes/{id}/cancel`, `POST /processes/{id}/resume` (`action`, `variables`, `expectedRevision`), `GET /processes/{id}/snapshots/{name}`, `GET /processes/{id}/unmatched-events` |
 | Вопросы | `GET /questions?processId=`, `POST /questions/{id}/answer`, `GET /questions/{id}/image` (картинка из рабочей папки) |
 | События | `GET /events?view=&limit=`, `POST /events`, `POST /events/{id}/resolve` (`subscriptionId`), `POST /events/{id}/reroute` |
@@ -858,7 +872,9 @@ Playwright → снимок при ошибке (если на странице 
 - Секреты хранятся DPAPI (`Pepa.Core.Security.Secrets`, текущий пользователь, назначение: `Pepa.Assistant`,
   `Pepa.Email`, `Pepa.Telegram`; вне Windows — открытым текстом). `AssistantKeyStore` — ключ Anthropic в
   `settings.assistant.apiKey`; значение, которое не расшифровалось (другой компьютер), считается «не задано».
-  Исключение — ключ AdsPower: открыто внутри `platform` (а значит, и в резервных копиях). Новые секреты так не хранить.
+  Ключ AdsPower — внутри `platform`, зашифрованный (`Pepa.AdsPower`); в памяти `PlatformSettings` он расшифрован,
+  прежний открытый ключ шифруется при загрузке (D-090). Сохранённый пароль почты подставляется, только если не
+  менялись сервер чтения, сервер отправки и логин.
 
 ### 6.7. Уведомления (`AttentionNotifier`, D-048)
 
@@ -893,9 +909,9 @@ Playwright → снимок при ошибке (если на странице 
 авторов).
 
 `ReservedPrefixes` сейчас: `browser.`, `adspower.`, `telegram.`, `desktop.`, `file.`, `folder.`, `event.`, `resource.`,
-`scenario.`, `loop.`, `text.`, `variable.`, `test.`. Префиксов `email.`, `table.`, `http.`, `user.` в списке нет: точный
-повтор встроенного типа всё равно отвергается, но похожий на встроенный (`email.forward`) пройдёт. Новый встроенный
-адаптер добавляет свой префикс в этот список.
+`scenario.`, `loop.`, `text.`, `variable.`, `test.`, `email.`, `table.`, `http.`, `user.`. Тест
+`Every_built_in_block_prefix_is_reserved_from_extensions` сверяет список со всеми встроенными блоками: новый встроенный
+адаптер обязан добавить свой префикс.
 
 ### 6.10. Примеры и прочее
 
@@ -924,7 +940,8 @@ Playwright → снимок при ошибке (если на странице 
   `RegisterApplicationRestart` с `--minimized`; `SystemEvents.SessionSwitch` → блокировка/разблокировка:
   `ClaimExternallyAsync`/`ReleaseExternalAsync(desktop:input, pepa:locked)`.
 - `MainWindow`: WebView2 с профилем в `<данные>/WebView2`, открывает `LaunchUrl`; чужие адреса — во внешнем браузере
-  (`IsOwnPage`). Мост `chrome.webview.postMessage` — только `pickFolder` и `openFolder` (только существующие папки),
+  (`IsOwnPage` → `Pepa.Host.Security.OwnPage`: точное совпадение схемы, узла и порта). Мост `chrome.webview.postMessage` —
+  только `pickFolder` и `openFolder` (только существующие локальные папки, сетевые пути `\\сервер\…` — нет),
   ответ `{id, ok, result|error}`; всё остальное — через обычный API (D-004).
 - Закрытие: `OnClosing` всегда отменяет закрытие, пока оно не разрешено; вопросы задаются после. Выбор «свернуть в
   трей / закрыть» — `desktop.json`. `TrayIcon`: «Открыть Pepa», «При закрытии окна — сворачивать сюда», «Запускать
@@ -959,11 +976,16 @@ React 19 + TypeScript (strict), Vite, без библиотеки маршрут
 ### 7.2. Данные: REST + SSE как сигнал
 
 - Все данные — из REST через `api.*` и хуки `hooks.ts`. SSE (`events.ts`) читается через `fetch` (EventSource не умеет
-  передать `X-Pepa-Token`) и только инвалидирует ключи запросов по типу сообщения (таблица 6.4); после переподключения
-  (пауза от 1 до 15 с) инвалидируется всё. Плюс периодическое перечитывание (обзор 15 с, процессы 10 с…).
+  передать `X-Pepa-Token`) и только инвалидирует ключи запросов по типу сообщения (таблица 6.4, `keysFor`); после
+  переподключения (пауза от 1 до 15 с) инвалидируется всё. Плюс периодическое перечитывание (обзор 15 с, процессы 10 с…).
+- Инвалидации склеиваются (`createInvalidator`, D-090): каждый ключ — не чаще раза в 200 мс и не раньше, чем закончится
+  его прежний запрос (`cancelRefetch: false`; после него ключ перечитывается ещё раз). Без этого при работающих
+  процессах медленные списки не обновлялись бы вовсе, а брошенные запросы занимали бы соединения.
 - Каждый тип, который публикует сервер, должен иметь ветку в `events.ts` — иначе часть экрана устареет до опроса.
-- Решения: кнопки — только из `allowedActions` процесса; рискованные — через `feedback.confirm`; групповые решения
-  передают `expectedRevision`. Интерфейс сам ничего не продолжает и не повторяет.
+- Решения: кнопки — только из `allowedActions` процесса; рискованные — через `feedback.confirm`; все решения «продолжить»
+  (по одному процессу, «Исправить и повторить», выбранные, групповые) передают `expectedRevision` того состояния, что
+  видел пользователь. Запуск (`useRunScenario`) не отправляется второй раз, пока идёт первый, и несёт `runId`.
+  Интерфейс сам ничего не продолжает и не повторяет.
 - Ошибки — `ApiError` с текстом сервера (или «Нет связи с движком Pepa…»), показываются как есть.
 - Секреты и в интерфейсе не повторяются: поля паролей пустые («пусто — без изменений»), экспорт сценария очищает
   значения секретных переменных (`lib/export.ts`, D-075), отчёт о процессе — без значений переменных (`lib/report.ts`).
