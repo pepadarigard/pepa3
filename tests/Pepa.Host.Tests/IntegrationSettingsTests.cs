@@ -55,10 +55,12 @@ public sealed class IntegrationSettingsTests
             }
 
             // Ключ, сохранённый прежней версией открыто, читается и сразу шифруется.
+            // (Зашифрованное значение в JSON может быть экранировано — меняем поле, а не подстроку.)
+            var platform = System.Text.Json.Nodes.JsonNode.Parse((await store.GetSettingsAsync())["platform"])!;
+            platform["adsPowerApiKey"] = "old-plain-key";
             await using (var write = await store.BeginWriteAsync())
             {
-                await write.SetSettingAsync("platform", (await store.GetSettingsAsync())["platform"]
-                    .Replace(System.Text.Json.Nodes.JsonNode.Parse((await store.GetSettingsAsync())["platform"])!["adsPowerApiKey"]!.GetValue<string>(), "old-plain-key"));
+                await write.SetSettingAsync("platform", platform.ToJsonString());
                 await write.CommitAsync();
             }
 

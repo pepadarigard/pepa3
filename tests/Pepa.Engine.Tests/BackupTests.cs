@@ -186,7 +186,16 @@ public sealed class BackupTests : IDisposable
         await SaveAsync(live, "после-копии");
 
         // «Сбой»: журнал прежней базы, каким он был на диске, пока она работала.
-        var leftovers = new[] { "-wal", "-shm" }.Where(x => File.Exists(path + x)).ToDictionary(x => x, x => File.ReadAllBytes(path + x));
+        // Читаем, не мешая SQLite: в Windows файл, открытый базой на запись, иначе не прочитать.
+        static byte[] ReadShared(string file)
+        {
+            using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var copy = new MemoryStream();
+            stream.CopyTo(copy);
+            return copy.ToArray();
+        }
+
+        var leftovers = new[] { "-wal", "-shm" }.Where(x => File.Exists(path + x)).ToDictionary(x => x, x => ReadShared(path + x));
         Assert.True(leftovers.ContainsKey("-wal"));
         SqliteConnection.ClearAllPools();
         File.Copy(copy, path, overwrite: true);
