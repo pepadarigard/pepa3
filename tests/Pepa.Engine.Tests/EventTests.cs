@@ -479,4 +479,24 @@ public sealed class EventTests
         Assert.Equal(EventState.Ignored, cleared.State);
         Assert.Contains("Tok-998877", cleared.Secrets!);
     }
+
+    [Fact]
+    public async Task Repeated_send_with_a_capitalized_source_is_a_duplicate_not_an_engine_error()
+    {
+        // Источник и ключ хранятся приведёнными («Process» → «process»), и повтор должен искаться так же — раньше поиск по
+        // исходному написанию ничего не находил, и шаг падал с ошибкой движка.
+        await using var h = await EngineHarness.CreateAsync();
+        var id = await h.RunAsync(new ScenarioBuilder("Дважды")
+            .Node("start", "start")
+            .Node("first", "event.send", new { source = "Process", eventType = "notice", externalId = " k-1 " })
+            .Node("second", "event.send", new { source = "Process", eventType = "notice", externalId = " k-1 " })
+            .Node("end", "end")
+            .Chain("start", "first", "second", "end")
+            .Build());
+
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Single(await h.Store.ListEventsAsync(new EventQuery()), e => e.Type == "notice");
+        var second = (await h.StepsAsync(id)).Single(s => s.NodeId == "second");
+        Assert.True(second.Output!["duplicate"]!.GetValue<bool>());
+    }
 }

@@ -198,13 +198,15 @@ public sealed partial class ProcessEngine
 
                 // Секреты отправителя в событии (данные, ключ) событие помнит: при показе они скрыты, получателю — секретны.
                 var carried = (eventSecrets ?? EventSecrets(process, ExecutionGraph(process).Definition, input)) is { Count: > 0 } found ? found : null;
-                var id = await write.TryInsertEventAsync(NewEventRecord(input, now) with { Secrets = carried, SenderProcessId = process.Id });
+                var record = NewEventRecord(input, now) with { Secrets = carried, SenderProcessId = process.Id };
+                var id = await write.TryInsertEventAsync(record);
                 long eventId;
                 var duplicate = false;
                 if (id is null)
                 {
                     duplicate = true;
-                    eventId = (await write.FindEventByExternalIdAsync(input.Source, input.ExternalId!))!.Id;
+                    // Повтор ищется так же, как его нашла вставка: по приведённым источнику и ключу («Process», « A-1 »).
+                    eventId = (await write.FindEventByExternalIdAsync(record.Source, record.ExternalId!))!.Id;
                 }
                 else
                 {
