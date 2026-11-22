@@ -226,12 +226,59 @@ public sealed partial class SqliteStore : IPepaStore
 
     public Task InitializeAsync(CancellationToken cancellationToken = default) => InitializeAsync(Migrations.Length, cancellationToken);
 
+    /// <summary>Отложенные при запуске файлы журнала прежней базы (см. <see cref="SetAsideStaleJournal"/>); пусто — не было.</summary>
+    public IReadOnlyList<string> SetAsideJournalFiles { get; private set; } = [];
+
+    /// <summary>
+    /// Базу заменили резервной копией (копия — одним файлом, в обычном режиме журнала), а рядом остался журнал WAL прежней
+    /// базы — так бывает, если после сбоя забыть удалить pepa.db-wal и pepa.db-shm. SQLite применил бы этот журнал поверх
+    /// копии: «восстановленная» база тихо оказалась бы прежней (или их смесью), а отметка о восстановлении пропала бы.
+    /// Такой журнал откладывается в сторону (pepa.db-wal.&lt;время&gt;.old): с копией он не смешивается, но и не удаляется.
+    /// </summary>
+    private void SetAsideStaleJournal()
+    {
+        SetAsideJournalFiles = [];
+        var path = Path.GetFullPath(DatabasePath);
+        var journal = new[] { path + "-wal", path + "-shm" }.Where(File.Exists).ToList();
+        if (journal.Count == 0 || !File.Exists(path))
+        {
+            return;
+        }
+
+        var header = new byte[100];
+        using (var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        {
+            if (file.ReadAtLeast(header, header.Length, throwOnEndOfStream: false) < header.Length)
+            {
+                return;
+            }
+        }
+
+        // Байты 18–19 заголовка: 1 — обычный журнал (так записаны копии), 2 — WAL (так всегда работает база Pepa).
+        if (!header.AsSpan(0, 16).SequenceEqual("SQLite format 3\0"u8) || header[18] != 1 || header[19] != 1)
+        {
+            return;
+        }
+
+        var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
+        var moved = new List<string>();
+        foreach (var file in journal)
+        {
+            var target = $"{file}.{stamp}.old";
+            File.Move(file, target);
+            moved.Add(target);
+        }
+
+        SetAsideJournalFiles = moved;
+    }
+
     /// <param name="targetVersion">До какой версии схемы обновить (меньше последней — только для проверок обновления).</param>
     internal async Task InitializeAsync(int targetVersion, CancellationToken cancellationToken)
     {
         await _writeLock.WaitAsync(cancellationToken);
         try
         {
+            SetAsideStaleJournal();
             await using var connection = await OpenAsync(cancellationToken);
             await ExecuteAsync(connection, null, "PRAGMA journal_mode = WAL;", cancellationToken);
             var version = Convert.ToInt32(await ScalarAsync(connection, null, "PRAGMA user_version;", cancellationToken),

@@ -169,4 +169,37 @@ public sealed class BackupTests : IDisposable
         var migration = Assert.Single(Directory.GetFiles(store.BackupDirectory, "pepa-migration1-*.db"));
         Assert.Equal(1, (await ReadAsync(migration)).Scenarios);
     }
+
+    [Fact]
+    public async Task Copy_restored_over_a_database_with_a_leftover_journal_stays_the_copy()
+    {
+        // После сбоя рядом с базой остались pepa.db-wal и pepa.db-shm, а пользователь положил на место базы копию и забыл
+        // их удалить. Раньше SQLite применял старый журнал поверх копии: «восстановленная» база тихо оказывалась прежней,
+        // а отметка «восстановлена из копии» пропадала — процессы продолжились бы без вопроса.
+        var ct = TestContext.Current.CancellationToken;
+        var path = Path.Combine(_dir, "pepa.db");
+        var live = new SqliteStore(path);
+        await live.InitializeAsync(ct);
+        await SaveAsync(live, "до-копии");
+        var copy = Path.Combine(_dir, "copy.db");
+        await live.BackupAsync(copy, ct);
+        await SaveAsync(live, "после-копии");
+
+        // «Сбой»: журнал прежней базы, каким он был на диске, пока она работала.
+        var leftovers = new[] { "-wal", "-shm" }.Where(x => File.Exists(path + x)).ToDictionary(x => x, x => File.ReadAllBytes(path + x));
+        Assert.True(leftovers.ContainsKey("-wal"));
+        SqliteConnection.ClearAllPools();
+        File.Copy(copy, path, overwrite: true);
+        foreach (var (suffix, bytes) in leftovers)
+        {
+            File.WriteAllBytes(path + suffix, bytes);
+        }
+
+        var restored = new SqliteStore(path);
+        await restored.InitializeAsync(ct);
+        Assert.NotNull(restored.RestoredFromBackupAt);
+        Assert.Single(await restored.ListScenariosAsync(ct));
+        Assert.Contains(restored.SetAsideJournalFiles, f => f.EndsWith(".old", StringComparison.Ordinal) && f.Contains("pepa.db-wal", StringComparison.Ordinal));
+        Assert.All(restored.SetAsideJournalFiles, f => Assert.True(File.Exists(f)));
+    }
 }

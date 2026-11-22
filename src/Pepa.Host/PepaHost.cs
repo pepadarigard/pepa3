@@ -331,6 +331,12 @@ public sealed class PepaHost : IAsyncDisposable
             logger.LogWarning("База восстановлена из резервной копии от {At}. {Recovery}", restoredAt, hostContext.Recovery);
         }
 
+        if (store.SetAsideJournalFiles.Count > 0)
+        {
+            logger.LogWarning("Рядом с восстановленной базой лежал журнал прежней базы — он отложен, а не применён к копии: {Files}",
+                string.Join(", ", store.SetAsideJournalFiles));
+        }
+
         var unfinished = await store.ListProcessesAsync(new ProcessQuery
         {
             Statuses = [ProcessStatus.Running, ProcessStatus.Waiting, ProcessStatus.Paused, ProcessStatus.NeedsAttention],
