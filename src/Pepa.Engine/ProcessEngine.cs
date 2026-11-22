@@ -260,14 +260,14 @@ public sealed partial class ProcessEngine : IAsyncDisposable
 
     /// <summary>Записать новый процесс в транзакции. Если процесс с таким ключом происхождения уже есть — вернуть его.</summary>
     private async Task<(ProcessRecord Process, bool Created)> InsertStartedProcessAsync(IStoreWrite write, PreparedStart prepared,
-        string? originKey, string? origin, DebugState? debug = null)
+        string? originKey, string? origin, DebugState? debug = null, int depth = 0)
     {
         if (originKey is not null && await write.GetProcessByOriginAsync(originKey) is { } existing)
         {
             return (existing, false);
         }
 
-        var (process, token, titleProblem) = NewProcess(prepared, _time.GetUtcNow(), parentId: null, depth: 0, originKey);
+        var (process, token, titleProblem) = NewProcess(prepared, _time.GetUtcNow(), parentId: null, depth, originKey);
         process = process with { Debug = debug };
         await write.InsertProcessAsync(process);
         await write.UpsertTokenAsync(token);

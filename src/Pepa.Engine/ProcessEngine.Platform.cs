@@ -198,7 +198,7 @@ public sealed partial class ProcessEngine
 
                 // Секреты отправителя в событии (данные, ключ) событие помнит: при показе они скрыты, получателю — секретны.
                 var carried = (eventSecrets ?? EventSecrets(process, ExecutionGraph(process).Definition, input)) is { Count: > 0 } found ? found : null;
-                var id = await write.TryInsertEventAsync(NewEventRecord(input, now) with { Secrets = carried });
+                var id = await write.TryInsertEventAsync(NewEventRecord(input, now) with { Secrets = carried, SenderProcessId = process.Id });
                 long eventId;
                 var duplicate = false;
                 if (id is null)
@@ -1009,7 +1009,11 @@ public sealed partial class ProcessEngine
                 ExternalId = $"finished:{process.Id}",
                 CorrelationKey = process.Id,
                 Payload = payload,
-            }, now) with { Secrets = SecretsIn(RawSecretValues(process, definition), payload) is { Count: > 0 } carried ? carried : null });
+            }, now) with
+            {
+                Secrets = SecretsIn(RawSecretValues(process, definition), payload) is { Count: > 0 } carried ? carried : null,
+                SenderProcessId = process.Id,
+            });
             effects.RouteEvents = true;
         }
 

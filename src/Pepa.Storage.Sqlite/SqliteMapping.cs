@@ -163,6 +163,7 @@ internal static class SqliteMapping
         Note = Str(r, "note"),
         HandledAt = DateOf(r, "handled_at"),
         Secrets = SecretsOf(r),
+        SenderProcessId = Str(r, "sender_process_id"),
     };
 
     private static IReadOnlyList<string>? SecretsOf(SqliteDataReader r) =>

@@ -271,6 +271,12 @@ public sealed partial class ProcessEngine
                 }
             }
 
+            var depth = 0;
+            if (error is null)
+            {
+                (depth, error) = await EventChainAsync(record, trigger.ScenarioId, cancellationToken);
+            }
+
             if (error is null)
             {
                 try
@@ -317,7 +323,7 @@ public sealed partial class ProcessEngine
                 else
                 {
                     var (process, isNew) = await InsertStartedProcessAsync(write, prepared, $"event:{current.Id}:{record.Id}",
-                        $"по событию #{record.Id} «{record.Source}»");
+                        $"по событию #{record.Id} «{record.Source}»", depth: depth);
                     created = isNew ? process : null;
                     started.Add(process.Id);
                     await write.SaveTriggerAsync(current with
@@ -344,6 +350,54 @@ public sealed partial class ProcessEngine
 
         return (started, failures);
     }
+
+    /// <summary>
+    /// Цепочка запусков для процесса, который автозапуск начнёт по событию (D-090). Событие, отправленное процессом, продолжает
+    /// его цепочку: глубина считается, как у вызванного сценария, а сценарий, который в цепочке уже есть, по такому событию не
+    /// запускается — иначе каждое его событие запускало бы его снова, и внешние действия повторялись бы без конца.
+    /// </summary>
+    private async Task<(int Depth, string? Problem)> EventChainAsync(EventRecord record, string scenarioId,
+        CancellationToken cancellationToken)
+    {
+        int? depth = null;
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var currentId = record.SenderProcessId;
+        while (currentId is not null && seen.Add(currentId) && seen.Count <= 4 * MaxDepth)
+        {
+            if (await _store.GetProcessAsync(currentId, cancellationToken) is not { } current)
+            {
+                break; // отправитель уже удалён из истории — цепочка давно закончилась
+            }
+
+            depth ??= current.Depth + 1;
+            if (current.ScenarioId == scenarioId)
+            {
+                return (depth.Value,
+                    $"сценарий «{current.ScenarioName}» запустил бы сам себя: событие отправил его же процесс #{current.Id[^Math.Min(6, current.Id.Length)..]} " +
+                    "(или процесс, который тот запустил). Так сценарий повторялся бы без конца. Укажите в автозапуске вид события или " +
+                    "условие, которые не подходят к событиям самого сценария.");
+            }
+
+            currentId = current.ParentProcessId ?? await EventSenderAsync(current.OriginKey, cancellationToken);
+        }
+
+        if (depth > MaxDepth)
+        {
+            return (depth.Value,
+                $"слишком длинная цепочка запусков (больше {MaxDepth}): событие отправил процесс, который сам запущен цепочкой событий " +
+                "и вызовов сценариев. Возможно, сценарии запускают друг друга по кругу.");
+        }
+
+        return (depth ?? 0, null);
+    }
+
+    /// <summary>Процесс, отправивший событие, по которому автозапуск начал процесс с этим ключом происхождения.</summary>
+    private async Task<string?> EventSenderAsync(string? originKey, CancellationToken cancellationToken) =>
+        originKey is { } key && key.StartsWith("event:", StringComparison.Ordinal) &&
+        long.TryParse(key[(key.LastIndexOf(':') + 1)..], out var eventId) &&
+        await _store.GetEventAsync(eventId, cancellationToken) is { } origin
+            ? origin.SenderProcessId
+            : null;
 
     // ───────────────────────────── Управление триггерами ─────────────────────────────
 

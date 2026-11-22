@@ -339,6 +339,9 @@ public sealed record EventRecord
 
     /// <summary>Секретные значения внутри события (от процесса, который его отправил): при показе — «••••», получателю — тоже секретны.</summary>
     public IReadOnlyList<string>? Secrets { get; init; }
+
+    /// <summary>Процесс, отправивший событие блоком «Отправить событие»; null — событие пришло извне. По нему автозапуск видит цепочку (D-090).</summary>
+    public string? SenderProcessId { get; init; }
 }
 
 public sealed record EventQuery

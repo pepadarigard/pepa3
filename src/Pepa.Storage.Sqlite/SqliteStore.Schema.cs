@@ -228,5 +228,9 @@ public sealed partial class SqliteStore
         ALTER TABLE processes ADD COLUMN title TEXT NULL;
         ALTER TABLE processes ADD COLUMN inputs TEXT NULL;
         """,
+        // 9: процесс, отправивший событие, — по нему автозапуск видит цепочку запусков (D-090).
+        """
+        ALTER TABLE events ADD COLUMN sender_process_id TEXT NULL;
+        """,
     ];
 }

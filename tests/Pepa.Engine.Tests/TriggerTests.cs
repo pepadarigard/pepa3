@@ -370,4 +370,99 @@ public sealed class TriggerTests
         Assert.Null(ScheduleCalculator.Validate(weekdays));
         Assert.Equal("пн, вт, ср, чт, пт в 09:30", ScheduleCalculator.Describe(weekdays));
     }
+
+    // ── Цепочки запусков по событиям процессов (D-090) ──
+
+    private static ScenarioDefinition Sender(string key, string eventType) =>
+        new ScenarioBuilder($"Отправитель {key}")
+            .Node("start", "start")
+            .Node("a", Action, new { key })
+            .Node("send", "event.send", new { source = "process", eventType })
+            .Node("end", "end")
+            .Chain("start", "a", "send", "end")
+            .Build();
+
+    private static TriggerRecord OnProcessEvent(string scenarioId, string name, string? eventType) => new()
+    {
+        Id = "",
+        ScenarioId = scenarioId,
+        Kind = TriggerKind.Event,
+        Name = name,
+        Config = eventType is null ? new JsonObject { ["source"] = "process" } : new JsonObject { ["source"] = "process", ["eventType"] = eventType },
+        CreatedAt = default,
+        UpdatedAt = default,
+    };
+
+    [Fact]
+    public async Task Event_trigger_does_not_restart_the_scenario_that_sent_the_event()
+    {
+        // Сценарий отправляет событие, а его же автозапуск ждёт события этого источника без уточнения вида. Раньше каждый
+        // процесс запускал следующий — сотни процессов и повторов внешнего действия за секунды.
+        await using var h = await EngineHarness.CreateAsync();
+        var failures = new System.Collections.Concurrent.ConcurrentQueue<TriggerFailure>();
+        h.Engine.TriggerFailed += failures.Enqueue;
+        var scenario = await h.CreateScenarioAsync(Sender("x", "ready"));
+        var trigger = await h.Engine.SaveTriggerAsync(OnProcessEvent(scenario, "Сам себя", null));
+
+        var id = await h.Engine.StartProcessAsync(scenario);
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        await WaitUntilAsync(async () => (await h.Store.GetTriggerAsync(trigger.Id))!.LastError is not null, h);
+        await h.IdleAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Single(await ProcessesAsync(h, scenario));
+        Assert.Equal(1, h.World.Executions("x"));
+        Assert.Contains("запустил бы сам себя", (await h.Store.GetTriggerAsync(trigger.Id))!.LastError);
+        Assert.Contains("запустил бы сам себя", Assert.Single(failures).Error);
+    }
+
+    [Fact]
+    public async Task Event_triggers_do_not_bounce_between_two_scenarios_forever()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var a = await h.CreateScenarioAsync(Sender("a", "ping"));
+        var b = await h.CreateScenarioAsync(Sender("b", "pong"));
+        await h.Engine.SaveTriggerAsync(OnProcessEvent(b, "На ping", "ping"));
+        var back = await h.Engine.SaveTriggerAsync(OnProcessEvent(a, "На pong", "pong"));
+
+        var id = await h.Engine.StartProcessAsync(a);
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        await WaitUntilAsync(async () => (await h.Store.GetTriggerAsync(back.Id))!.LastError is not null, h);
+        await h.IdleAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, h.World.Executions("a"));
+        Assert.Equal(1, h.World.Executions("b"));
+        var started = Assert.Single(await ProcessesAsync(h, b));
+        Assert.Equal(1, started.Depth); // запущен событием процесса — продолжает его цепочку
+        Assert.Contains("запустил бы сам себя", (await h.Store.GetTriggerAsync(back.Id))!.LastError);
+    }
+
+    [Fact]
+    public async Task Event_trigger_chain_longer_than_the_call_depth_limit_stops_with_an_error()
+    {
+        // Разные сценарии запускают друг друга по цепочке: как и вложенные вызовы, цепочка не длиннее 8.
+        await using var h = await EngineHarness.CreateAsync();
+        var scenarios = new List<string>();
+        for (var i = 0; i <= 9; i++)
+        {
+            scenarios.Add(await h.CreateScenarioAsync(Sender($"s{i}", $"e{i}")));
+        }
+
+        var triggers = new List<TriggerRecord>();
+        for (var i = 1; i <= 9; i++)
+        {
+            triggers.Add(await h.Engine.SaveTriggerAsync(OnProcessEvent(scenarios[i], $"Звено {i}", $"e{i - 1}")));
+        }
+
+        await h.Engine.StartProcessAsync(scenarios[0]);
+        await WaitUntilAsync(async () => (await h.Store.GetTriggerAsync(triggers[^1].Id))!.LastError is not null, h);
+        await h.IdleAsync(TimeSpan.FromSeconds(5));
+
+        for (var i = 0; i <= 8; i++)
+        {
+            Assert.Equal(1, h.World.Executions($"s{i}"));
+        }
+
+        Assert.Equal(0, h.World.Executions("s9"));
+        Assert.Contains("слишком длинная цепочка", (await h.Store.GetTriggerAsync(triggers[^1].Id))!.LastError);
+    }
 }

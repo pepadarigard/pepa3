@@ -202,9 +202,11 @@ internal sealed class SqliteWrite(SqliteConnection connection, SqliteTransaction
 
         await using var command = Command("""
                                           INSERT INTO events (source, type, external_id, correlation_key, payload, received_at, occurred_at,
-                                              state, process_id, subscription_id, candidates, started_processes, note, handled_at, secrets)
+                                              state, process_id, subscription_id, candidates, started_processes, note, handled_at, secrets,
+                                              sender_process_id)
                                           VALUES ($source, $type, $external_id, $correlation_key, $payload, $received_at, $occurred_at,
-                                              $state, $process_id, $subscription_id, $candidates, $started_processes, $note, $handled_at, $secrets)
+                                              $state, $process_id, $subscription_id, $candidates, $started_processes, $note, $handled_at, $secrets,
+                                              $sender_process_id)
                                           RETURNING id;
                                           """);
         BindEvent(command, record);
@@ -531,6 +533,7 @@ internal sealed class SqliteWrite(SqliteConnection connection, SqliteTransaction
         c.Parameters.AddWithValue("$note", OrNull(e.Note));
         c.Parameters.AddWithValue("$handled_at", DateOrNull(e.HandledAt));
         c.Parameters.AddWithValue("$secrets", Secrets(e.Secrets));
+        c.Parameters.AddWithValue("$sender_process_id", OrNull(e.SenderProcessId));
     }
 
     private static object Secrets(IReadOnlyList<string>? values) =>
