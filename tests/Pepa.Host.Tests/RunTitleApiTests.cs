@@ -242,3 +242,48 @@ public sealed class RunManyApiTests
         Assert.Equal(200, ok);
     }
 }
+
+/// <summary>Сообщение, пришедшее до окна ожидания, видно у ждущего процесса и отдаётся ему вручную (D-089).</summary>
+public sealed class UnmatchedRepliesApiTests
+{
+    [Fact]
+    public async Task Earlier_unmatched_event_is_offered_to_the_waiting_process_and_can_be_given_to_it()
+    {
+        await using var f = await HostFixture.StartAsync(seedSamples: false);
+        var (_, scenario) = await f.SendAsync(HttpMethod.Post, "/api/scenarios", new
+        {
+            name = "Подождать и ждать ответ",
+            nodes = new object[]
+            {
+                new { id = "start", type = "start" },
+                new { id = "pause", type = "wait", config = new { mode = "duration", amount = 2, unit = "seconds" } },
+                new { id = "wait", type = "event.wait", config = new { source = "manual", correlationKey = "chat", timeoutSeconds = 600 } },
+                new { id = "end", type = "end" },
+            },
+            edges = new object[]
+            {
+                new { id = "a", source = "start", sourcePort = "out", target = "pause" },
+                new { id = "b", source = "pause", sourcePort = "out", target = "wait" },
+                new { id = "c", source = "wait", sourcePort = "event", target = "end" },
+            },
+        });
+        var (_, run) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{scenario!["id"]!.GetValue<string>()}/run", new { });
+        var id = run!["processId"]!.GetValue<string>();
+
+        // Сообщение пришло во время паузы — до ожидания: процесс его сам не берёт.
+        var (_, published) = await f.SendAsync(HttpMethod.Post, "/api/events",
+            new { source = "manual", type = "reply", correlationKey = "chat", externalId = (string?)null, payload = new { text = "готово" } });
+        var eventId = published!["eventId"]!.GetValue<long>();
+        await f.WaitForProcessAsync(id, p => HostFixture.Status(p) == "waiting" && p["currentNodeId"]?.GetValue<string>() == "wait");
+
+        var offered = (await f.GetAsync($"/api/processes/{id}/unmatched-events")).AsArray();
+        var item = Assert.Single(offered);
+        Assert.Equal(eventId, item!["event"]!["id"]!.GetValue<long>());
+
+        var (status, _) = await f.SendAsync(HttpMethod.Post, $"/api/events/{eventId}/resolve",
+            new { subscriptionId = item["subscriptionId"]!.GetValue<long>() });
+        Assert.Equal(200, status);
+        await f.WaitForProcessAsync(id, p => HostFixture.Status(p) == "completed");
+        Assert.Empty((await f.GetAsync($"/api/processes/{id}/unmatched-events")).AsArray());
+    }
+}

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { ReactFlow } from "@xyflow/react";
 import { AlertTriangle, ArrowLeft, BellRing, CircleAlert, ClipboardCopy, Info, ListChecks, Lock, Pencil, RotateCw, ScrollText, Workflow, X } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { useDescriptors, useInfo, useProcess } from "../api/hooks";
 import type { Json, NodeTypeDescriptor, ProcessDetails, ScenarioDefinition, Step, Wait } from "../api/types";
@@ -402,6 +403,62 @@ function ProcessGraph({ definition, details, descriptors, selected, onSelect }: 
 
 const waitTone: Record<Wait["state"], Tone> = { active: "warn", fulfilled: "success", expired: "muted", cancelled: "muted" };
 
+/**
+ * Сообщения, не подошедшие никому, которые могут быть ответом этому ожиданию (по источнику, ключу и условию), но пришли до
+ * его окна — например, пока процесс стоял на паузе. Сам процесс их не берёт (сообщение, написанное до вопроса, — не ответ);
+ * решает человек.
+ */
+function UnmatchedReplies({ processId }: { processId: string }) {
+  const feedback = useFeedback();
+  const queryClient = useQueryClient();
+  const [busy, setBusy] = useState<number | null>(null);
+  const found = useQuery({
+    queryKey: ["process", processId, "unmatched"],
+    queryFn: () => api.processUnmatchedEvents(processId),
+    refetchInterval: 15_000,
+  });
+  const items = found.data ?? [];
+  if (items.length === 0) return null;
+
+  const give = async (eventId: number, subscriptionId: number) => {
+    if (!(await feedback.confirm({
+      title: `Отдать событие #${eventId} этому процессу?`,
+      text: "Процесс продолжит с ним, как если бы оно пришло во время ожидания. Отдавайте, только если это действительно ответ " +
+        "на вопрос процесса, а не сообщение, написанное раньше.",
+      confirmLabel: "Отдать",
+    }))) return;
+    setBusy(eventId);
+    try {
+      const result = await api.resolveEvent(eventId, subscriptionId);
+      feedback.toast(result.message, "success");
+    } catch (e) {
+      feedback.error(e);
+    } finally {
+      setBusy(null);
+      void queryClient.invalidateQueries({ queryKey: ["process", processId] });
+      void queryClient.invalidateQueries({ queryKey: ["events"] });
+    }
+  };
+
+  return (
+    <div className="stack" style={{ gap: 6 }} data-testid="unmatched-replies">
+      <div className="row small">
+        <BellRing size={15} className="muted" /> Не подошли никому, но могут быть ответом · {items.length}
+      </div>
+      <div className="small faint" style={{ paddingLeft: 22 }}>
+        Пришли раньше, чем процесс начал ждать (например, пока он стоял на паузе). Сам процесс их не берёт — решите вы.
+      </div>
+      {items.map(({ event, subscriptionId }) => (
+        <div key={event.id} className="row wrap small" style={{ paddingLeft: 22 }}>
+          <span className="mono truncate" style={{ maxWidth: 420 }} title={preview(event.payload, 2000)}>{preview(event.payload, 90)}</span>
+          <span className="faint">#{event.id} · {formatMoment(event.receivedAt)}</span>
+          <Button size="small" busy={busy === event.id} onClick={() => give(event.id, subscriptionId)}>Отдать этому процессу</Button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** Связи процесса: кто его вызвал, кого вызвал он, чего ждал и какие ресурсы держит. */
 function Relations({ data }: { data: ProcessDetails }) {
   const waits = data.waits.filter((w) => w.purpose === "event");
@@ -444,6 +501,7 @@ function Relations({ data }: { data: ProcessDetails }) {
             ))}
           </div>
         )}
+        {waits.some((w) => w.state === "active") && <UnmatchedReplies processId={data.process.id} />}
         {data.children.length > 0 && (
           <div className="stack" style={{ gap: 6 }}>
             <div className="row small"><Workflow size={15} className="muted" /> Запущенные сценарии · {data.children.length}</div>

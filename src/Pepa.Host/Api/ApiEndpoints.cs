@@ -657,6 +657,14 @@ internal static class ApiEndpoints
                 ? Results.File(path, name.EndsWith(".png", StringComparison.Ordinal) ? "image/png" : "image/jpeg")
                 : NotFound("Снимка нет: он удалён вместе с историей процесса или не сохранился."));
 
+        // Не подошедшие никому события, которые могут быть ответом ждущему процессу (отдать — вручную, POST /events/{id}/resolve).
+        api.MapGet("/processes/{id}/unmatched-events", async (string id, ProcessEngine engine, ProcessMapper mapper, CancellationToken ct) =>
+        {
+            var found = await engine.ListUnmatchedForProcessAsync(id, cancellationToken: ct);
+            var events = await mapper.EventsAsync(found.Select(f => f.Event).ToList(), ct);
+            return found.Select((f, i) => new UnmatchedForProcessDto(f.SubscriptionId, events[i])).ToList();
+        });
+
         api.MapGet("/processes/{id}", async (string id, IPepaStore store, ProcessMapper mapper, CancellationToken ct) =>
         {
             var process = await store.GetProcessAsync(id, ct);

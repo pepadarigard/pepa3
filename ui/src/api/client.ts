@@ -169,6 +169,9 @@ export const api = {
     request<PepaEvent[]>("GET", `/events?view=${view}&limit=${limit}`),
   publishEvent: (event: { source: string; type: string; correlationKey: string | null; externalId: string | null; payload: Json | null }) =>
     request<{ eventId: number; duplicate: boolean }>("POST", "/events", event),
+  /** Не подошедшие никому события, которые могут быть ответом ждущему процессу. */
+  processUnmatchedEvents: (id: string) =>
+    request<{ subscriptionId: number; event: PepaEvent }[]>("GET", `/processes/${id}/unmatched-events`),
   resolveEvent: (id: number, subscriptionId: number | null) =>
     request<{ message: string }>("POST", `/events/${id}/resolve`, { subscriptionId }),
   rerouteEvent: (id: number) => request<{ message: string }>("POST", `/events/${id}/reroute`),

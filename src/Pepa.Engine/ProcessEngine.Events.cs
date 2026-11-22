@@ -556,6 +556,68 @@ public sealed partial class ProcessEngine
         }
     }
 
+    /// <summary>
+    /// Не подошедшие никому события, которые могут быть ответом действующему ожиданию процесса, но пришли вне его окна
+    /// «пришедшие раньше» (например, пока процесс стоял на паузе до ожидания, а вопрос задал вызванный сценарий): их можно
+    /// отдать процессу вручную (<see cref="ResolveEventAsync"/>). Только принятые после запуска процесса и подходящие по виду,
+    /// ключу и условию ожидания — сначала новые.
+    /// </summary>
+    public async Task<IReadOnlyList<(EventRecord Event, long SubscriptionId)>> ListUnmatchedForProcessAsync(string processId,
+        int limit = 20, CancellationToken cancellationToken = default)
+    {
+        var process = await _store.GetProcessAsync(processId, cancellationToken);
+        if (process is null || process.IsTerminal)
+        {
+            return [];
+        }
+
+        var result = new List<(EventRecord Event, long SubscriptionId)>();
+        foreach (var subscription in (await _store.GetSubscriptionsAsync(processId, cancellationToken))
+                     .Where(s => s is { State: SubscriptionState.Active, Purpose: SubscriptionPurpose.Event }))
+        {
+            var events = await _store.ListEventsAsync(new EventQuery
+            {
+                States = [EventState.Unmatched], Source = subscription.Source, CorrelationKey = subscription.CorrelationKey,
+                ReceivedSince = process.CreatedAt, Limit = 200,
+            }, cancellationToken);
+            foreach (var record in events)
+            {
+                if (result.Count >= limit)
+                {
+                    return result;
+                }
+
+                if (!SubscriptionAccepts(subscription.EventType, subscription.CorrelationKey, record) ||
+                    subscription.ExpiresAt is { } expires && record.ReceivedAt > expires)
+                {
+                    continue;
+                }
+
+                if (subscription.MatchExpression is { } expression)
+                {
+                    try
+                    {
+                        if (!_expressions.EvaluateCondition(expression, Scope(process) with
+                            {
+                                Extra = new JsonObject { ["event"] = EventJson(record) },
+                            }))
+                        {
+                            continue;
+                        }
+                    }
+                    catch (ExpressionException)
+                    {
+                        continue;
+                    }
+                }
+
+                result.Add((record, subscription.Id));
+            }
+        }
+
+        return result;
+    }
+
     /// <summary>Решение пользователя по конфликтному или необработанному событию.</summary>
     public async Task<ControlResult> ResolveEventAsync(long eventId, long? subscriptionId, CancellationToken cancellationToken = default)
     {

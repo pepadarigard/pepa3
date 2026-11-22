@@ -138,6 +138,9 @@ public sealed record WaitDto(
 
 public sealed record EventCandidateDto(long SubscriptionId, ProcessRefDto Process, bool StillWaiting);
 
+/// <summary>Не подошедшее никому событие, которое можно отдать ожиданию процесса вручную.</summary>
+public sealed record UnmatchedForProcessDto(long SubscriptionId, EventDto Event);
+
 public sealed record EventDto(
     long Id,
     string Source,
