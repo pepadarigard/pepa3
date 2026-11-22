@@ -180,6 +180,19 @@ public sealed class ApiTests
     }
 
     [Fact]
+    public async Task Every_built_in_block_prefix_is_reserved_from_extensions()
+    {
+        // Иначе расширение могло бы занять префикс встроенных блоков (как было с «email.», «table.», «http.», «user.»), а
+        // следующий встроенный блок с этим префиксом столкнулся бы с ним.
+        await using var f = await HostFixture.StartAsync(seedSamples: false);
+        var types = await f.GetAsync("/api/node-types");
+        var prefixes = types["nodeTypes"]!.AsArray().Select(t => t!["type"]!.GetValue<string>())
+            .Where(t => t.Contains('.')).Select(t => t[..(t.IndexOf('.') + 1)]).Distinct().ToList();
+        Assert.NotEmpty(prefixes);
+        Assert.All(prefixes, p => Assert.Contains(p, Pepa.Host.Plugins.PluginLoader.ReservedPrefixes));
+    }
+
+    [Fact]
     public async Task Node_types_describe_fields_and_ports()
     {
         await using var f = await HostFixture.StartAsync(seedSamples: false);

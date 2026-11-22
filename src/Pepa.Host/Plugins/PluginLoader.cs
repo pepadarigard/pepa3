@@ -29,10 +29,11 @@ public sealed class PluginCatalog(string directory, IReadOnlyList<PluginInfo> pl
 public static class PluginLoader
 {
     /// <summary>Префиксы встроенных блоков: расширение не может выдать свой блок за встроенный.</summary>
-    private static readonly string[] ReservedPrefixes =
+    /// <summary>Префиксы встроенных блоков: расширение не может их занять. Тест сверяет список со всеми встроенными блоками.</summary>
+    internal static readonly string[] ReservedPrefixes =
     [
         "browser.", "adspower.", "telegram.", "desktop.", "file.", "folder.", "event.", "resource.", "scenario.", "loop.", "text.",
-        "variable.", "test.",
+        "variable.", "test.", "email.", "table.", "http.", "user.",
     ];
 
     /// <remarks>
