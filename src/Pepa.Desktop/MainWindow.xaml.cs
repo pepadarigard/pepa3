@@ -87,13 +87,7 @@ public partial class MainWindow : Window
         core.Navigate(_host.LaunchUrl.ToString());
     }
 
-    private bool IsOwnPage(string uri)
-    {
-        var origin = _host.BaseUrl.ToString().TrimEnd('/');
-        // blob: — файлы, которые создаёт сама страница (экспорт сценария).
-        return uri.StartsWith(origin, StringComparison.OrdinalIgnoreCase) ||
-               uri.StartsWith("blob:" + origin, StringComparison.OrdinalIgnoreCase);
-    }
+    private bool IsOwnPage(string uri) => Pepa.Host.Security.OwnPage.Is(_host.BaseUrl, uri);
 
     /// <summary>Значок в области уведомлений (задаётся приложением).</summary>
     public TrayIcon? Tray { get; set; }
@@ -195,7 +189,7 @@ public partial class MainWindow : Window
             Title = "Выберите рабочую папку Pepa",
             Multiselect = false,
         };
-        if (!string.IsNullOrWhiteSpace(initial) && Directory.Exists(initial))
+        if (!string.IsNullOrWhiteSpace(initial) && !Pepa.Host.Security.OwnPage.IsNetworkPath(initial) && Directory.Exists(initial))
         {
             dialog.InitialDirectory = initial;
         }
@@ -205,8 +199,9 @@ public partial class MainWindow : Window
 
     private static object? OpenFolder(string? path)
     {
-        // Только существующие папки: так из интерфейса нельзя запустить произвольную программу.
-        if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path))
+        // Только существующие папки: так из интерфейса нельзя запустить произвольную программу. Сетевые пути — нет: даже
+        // проверка такой папки отправила бы серверу учётные данные Windows.
+        if (string.IsNullOrWhiteSpace(path) || Pepa.Host.Security.OwnPage.IsNetworkPath(path) || !Directory.Exists(path))
         {
             throw new DirectoryNotFoundException("Папка не найдена.");
         }
