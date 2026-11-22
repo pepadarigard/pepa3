@@ -14,13 +14,14 @@ namespace Pepa.Engine;
 /// </summary>
 internal static class InputResolver
 {
+    /// <param name="skipField">Поле, которое не нужно вычислять на этом шаге (продолжение перебора не вычисляет список заново).</param>
     public static JsonObject Resolve(NodeDefinition node, NodeTypeDescriptor descriptor, ExpressionScope scope,
-        IExpressionEvaluator expressions)
+        IExpressionEvaluator expressions, string? skipField = null)
     {
         var input = new JsonObject();
         foreach (var field in descriptor.Fields)
         {
-            if (!ScenarioValidator.IsFieldVisible(field, node.Config, descriptor.Fields))
+            if (field.Name == skipField || !ScenarioValidator.IsFieldVisible(field, node.Config, descriptor.Fields))
             {
                 continue;
             }

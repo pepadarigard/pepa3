@@ -165,10 +165,15 @@ public sealed partial class ProcessEngine
         }
 
         var plannedAt = _time.GetUtcNow();
+        var memory = process.Memory?[node.Id]?.DeepClone() as JsonObject;
+        // Продолжение перебора берёт список из памяти цикла: вычислять и сохранять его в каждом шаге заново не нужно
+        // (иначе хранилище росло бы квадратично от длины списка, а изменённая в теле переменная ломала бы перебор).
+        var skipField = node.Type == Nodes.ForEachNode.TypeName &&
+                        Nodes.ForEachNode.Continues(memory, token.FromNodeId, graph, node.Id) ? "items" : null;
         JsonObject input;
         try
         {
-            input = InputResolver.Resolve(node, descriptor, Scope(process), _expressions);
+            input = InputResolver.Resolve(node, descriptor, Scope(process), _expressions, skipField);
         }
         catch (Exception ex) when (ex is ExpressionException or NodeInputException)
         {
@@ -198,7 +203,7 @@ public sealed partial class ProcessEngine
             Variables = (JsonObject)process.Variables.DeepClone(),
             Attempt = token.Attempt,
             Time = _time,
-            Memory = process.Memory?[node.Id]?.DeepClone() as JsonObject,
+            Memory = memory,
             Graph = graph,
             EnteredFrom = token.FromNodeId,
             SecretValues = [.. RawSecretValues(process, graph.Definition).Where(v => v.Length >= MinSecretLength)],

@@ -339,6 +339,19 @@ public sealed class ForEachNode : INodeExecutor
         ],
     };
 
+    /// <summary>
+    /// Продолжает ли перебор этот вход: процесс вернулся сюда по кругу (из тела цикла), а не вошёл заново. Новый вход —
+    /// тем же путём, что и в первый раз, если до этого пути можно дойти и после «Готово» (например, следующий шаг внешнего
+    /// цикла после выхода из этого, D-021); он начинает перебор сначала. Блок, до которого доходит только ветка «Элемент»
+    /// (пауза или проверка перед каждым элементом), — часть тела: возврат через него продолжает перебор, иначе первый
+    /// элемент повторялся бы без конца. Движок спрашивает об этом до вычисления параметров: продолжение не вычисляет
+    /// и не сохраняет список заново.
+    /// </summary>
+    public static bool Continues(JsonObject? memory, string? enteredFrom, ScenarioGraph? graph, string nodeId) =>
+        memory is not null && enteredFrom is { } from && graph is not null &&
+        graph.LoopBody(nodeId, Ports.Item).Contains(from) &&
+        (from != memory.GetString("entry") || !graph.ReachableFrom(nodeId, Ports.Done).Contains(from));
+
     public IEnumerable<NodeConfigIssue> Validate(NodeDefinition node)
     {
         var item = node.Config.GetString("itemVariable");
@@ -354,11 +367,7 @@ public sealed class ForEachNode : INodeExecutor
         var itemVariable = context.RequireString("itemVariable");
         var indexVariable = FlowNodes.Optional(context, "indexVariable");
 
-        // Продолжение перебора — только если процесс вернулся сюда по кругу (из тела цикла), а не вошёл заново тем же путём,
-        // что и в первый раз (например, следующий шаг внешнего цикла после выхода из этого). Новый вход начинает перебор сначала.
-        var continuing = context.Memory is { } memory && context.EnteredFrom is { } from &&
-                         from != memory.GetString("entry") &&
-                         context.Graph?.LoopBody(node.Id, Ports.Item).Contains(from) == true;
+        var continuing = Continues(context.Memory, context.EnteredFrom, context.Graph, node.Id);
         JsonArray items;
         int index;
         string? entry;

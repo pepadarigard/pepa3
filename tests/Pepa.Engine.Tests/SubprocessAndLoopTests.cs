@@ -310,4 +310,92 @@ public sealed class SubprocessAndLoopTests
         var process = await h.WaitForStatusAsync(id, ProcessStatus.NeedsAttention);
         Assert.Contains("нужен список", process.StatusMessage);
     }
+
+    [Fact]
+    public async Task ForEach_with_pause_before_each_item_runs_every_item_once()
+    {
+        // Частая схема «пауза перед каждым элементом»: тело возвращается через блок, которым процесс вошёл в цикл.
+        // Раньше такой возврат считался новым входом, и первый элемент повторялся до исчерпания лимита шагов.
+        await using var h = await EngineHarness.CreateAsync(new EngineOptions { DefaultStepBudget = 60 });
+        var id = await h.RunAsync(new ScenarioBuilder("Пауза перед каждым")
+            .Variable("item", VariableType.Any)
+            .Node("start", "start")
+            .Node("w", "wait", new { mode = "duration", amount = 1, unit = "seconds" })
+            .Node("loop", "loop.forEach", new { items = "[\"a\", \"b\", \"c\"]", itemVariable = "item" })
+            .Node("send", Action, new { key = "send-{{ vars.item }}" })
+            .Node("end", "end")
+            .Edge("start", "w").Edge("w", "loop").Edge("loop", "send", Ports.Item).Edge("send", "w").Edge("loop", "end", Ports.Done)
+            .Build());
+
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed, advance: TimeSpan.FromSeconds(1));
+        Assert.Equal(1, h.World.Executions("send-a"));
+        Assert.Equal(1, h.World.Executions("send-b"));
+        Assert.Equal(1, h.World.Executions("send-c"));
+    }
+
+    [Fact]
+    public async Task ForEach_with_check_before_each_item_does_not_repeat_items()
+    {
+        await using var h = await EngineHarness.CreateAsync(new EngineOptions { DefaultStepBudget = 60 });
+        var id = await h.RunAsync(new ScenarioBuilder("Проверка перед каждым")
+            .Variable("item", VariableType.Any)
+            .Node("start", "start")
+            .Node("check", "condition", new { expression = "vars.item !== 99" })
+            .Node("loop", "loop.forEach", new { items = "[1, 2, 3]", itemVariable = "item" })
+            .Node("a", Action, new { key = "n{{ vars.item }}" })
+            .Node("end", "end")
+            .Edge("start", "check").Edge("check", "loop", Ports.True).Edge("check", "end", Ports.False)
+            .Edge("loop", "a", Ports.Item).Edge("a", "check").Edge("loop", "end", Ports.Done)
+            .Build());
+
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Equal(1, h.World.Executions("n1"));
+        Assert.Equal(1, h.World.Executions("n2"));
+        Assert.Equal(1, h.World.Executions("n3"));
+    }
+
+    [Fact]
+    public async Task ForEach_stores_the_list_once_not_in_every_step()
+    {
+        // Перебор длинного списка (строки таблицы) не должен сохранять весь список в каждом шаге: хранилище росло бы
+        // квадратично (400 строк по 1 КБ давали 156 МБ параметров шагов).
+        await using var h = await EngineHarness.CreateAsync();
+        var row = new string('x', 1000);
+        var id = await h.RunAsync(new ScenarioBuilder("Длинный список")
+            .Variable("item", VariableType.Any)
+            .Node("start", "start")
+            .Node("loop", "loop.forEach", new { items = $"Array.from({{ length: 60 }}, (_, i) => i + '{row}')", itemVariable = "item" })
+            .Node("log", "log", new { message = "строка" })
+            .Node("end", "end")
+            .Edge("start", "loop").Edge("loop", "log", Ports.Item).Edge("log", "loop").Edge("loop", "end", Ports.Done)
+            .Build());
+
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        var loopSteps = (await h.StepsAsync(id)).Where(s => s.NodeId == "loop").ToList();
+        Assert.Equal(61, loopSteps.Count);
+        var stored = loopSteps.Sum(s => s.Input?.ToJsonString().Length ?? 0);
+        Assert.InRange(stored, 60 * 1000, 2 * 60 * 1000);
+    }
+
+    [Fact]
+    public async Task ForEach_list_is_evaluated_once_even_if_the_body_changes_its_variable()
+    {
+        // Подсказка поля обещает: «Список вычисляется один раз при входе в цикл».
+        await using var h = await EngineHarness.CreateAsync();
+        var id = await h.RunAsync(new ScenarioBuilder("Тело меняет список")
+            .Variable("data", VariableType.Any, JsonNode.Parse("""{ "rows": [1, 2, 3] }"""))
+            .Variable("item", VariableType.Any)
+            .Node("start", "start")
+            .Node("loop", "loop.forEach", new { items = "vars.data.rows", itemVariable = "item" })
+            .Node("a", Action, new { key = "row{{ vars.item }}" })
+            .Node("clear", "variable.set", new { variable = "data", value = "null" })
+            .Node("end", "end")
+            .Edge("start", "loop").Edge("loop", "a", Ports.Item).Edge("a", "clear").Edge("clear", "loop").Edge("loop", "end", Ports.Done)
+            .Build());
+
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Equal(1, h.World.Executions("row1"));
+        Assert.Equal(1, h.World.Executions("row2"));
+        Assert.Equal(1, h.World.Executions("row3"));
+    }
 }

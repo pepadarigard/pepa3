@@ -50,10 +50,8 @@ public sealed class ScenarioGraph
     public IReadOnlyList<EdgeDefinition> Incoming(string nodeId) =>
         _incoming.TryGetValue(nodeId, out var list) ? list : [];
 
-    /// <summary>
-    /// Блоки «тела цикла»: достижимые из порта <paramref name="port"/> блока <paramref name="nodeId"/> и ведущие обратно в него.
-    /// </summary>
-    public HashSet<string> LoopBody(string nodeId, string port)
+    /// <summary>Блоки, до которых можно дойти из порта <paramref name="port"/> блока <paramref name="nodeId"/>, не проходя через сам блок.</summary>
+    public HashSet<string> ReachableFrom(string nodeId, string port)
     {
         var forward = new HashSet<string>(StringComparer.Ordinal);
         var queue = new Queue<string>();
@@ -76,6 +74,16 @@ public sealed class ScenarioGraph
             }
         }
 
+        return forward;
+    }
+
+    /// <summary>
+    /// Блоки «тела цикла»: достижимые из порта <paramref name="port"/> блока <paramref name="nodeId"/> и ведущие обратно в него.
+    /// </summary>
+    public HashSet<string> LoopBody(string nodeId, string port)
+    {
+        var forward = ReachableFrom(nodeId, port);
+        var queue = new Queue<string>();
         var backward = new HashSet<string>(StringComparer.Ordinal);
         queue.Enqueue(nodeId);
         while (queue.Count > 0)
