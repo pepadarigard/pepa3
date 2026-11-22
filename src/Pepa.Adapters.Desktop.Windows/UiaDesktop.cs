@@ -336,67 +336,39 @@ public sealed class UiaDesktop : IDesktop, IDisposable
     public Task TypeTextAsync(DesktopWindow window, string text, int delayMs, CancellationToken cancellationToken) =>
         RunVoidAsync(() =>
         {
-            var sent = 0;
-            RequireForeground(window);
-            var focus = FocusOf(Handle(window));
-            var refocus = false;
-            var followed = false;
-            var sentHere = 0;
-            foreach (var ch in text.ReplaceLineEndings("\n"))
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                // Перед каждым символом: окно всё ещё впереди (пользователь мог переключиться, программа — открыть диалог)
-                // и ввод там же, где начинался (фокус не перешёл на другое поле).
-                RequireForeground(window, partial: sent > 0);
-                if (refocus)
-                {
-                    // Tab и Enter из текста переводят фокус сами — это задумано: дальше сверяем с новым полем.
-                    Thread.Sleep(Math.Max(0, 80 - delayMs));
-                    focus = FocusOf(Handle(window));
-                    refocus = false;
-                    followed = false;
-                    sentHere = 0;
-                }
-                else if (focus != IntPtr.Zero && FocusOf(Handle(window)) is var now && now != focus)
-                {
-                    // Таблицы и списки на первом же символе открывают поле правки внутри себя — это тот же ввод. Только так:
-                    // сразу после первого символа, один раз, внутрь того же поля (не окна целиком). Иначе фокус ушёл не туда.
-                    if (now == IntPtr.Zero || followed || sentHere != 1 || focus == Handle(window) || !NativeMethods.IsChild(focus, now))
-                    {
-                        throw new DesktopInputBlockedException(
-                            $"Во время ввода в окне «{window.Info.Title}» фокус перешёл на другое поле — Pepa остановилась, чтобы не печатать не туда.",
-                            partial: sent > 0);
-                    }
-
-                    focus = now;
-                    followed = true;
-                }
-
-                switch (ch)
-                {
-                    case '\n':
-                        SendInput.Keys([0x0D]);
-                        refocus = true;
-                        break;
-                    case '\t':
-                        SendInput.Keys([0x09]);
-                        refocus = true;
-                        break;
-                    default:
-                        SendInput.Unicode(ch);
-                        break;
-                }
-
-                sent++;
-                sentHere++;
-                if (delayMs > 0)
-                {
-                    Thread.Sleep(delayMs);
-                }
-            }
-
+            InputGuard.TypeText(new NativeTypingTarget(this, window), text, delayMs, window.Info.Title, cancellationToken);
             return true;
         }, cancellationToken);
+
+    /// <summary>Ввод в настоящее окно: проверки — в <see cref="InputGuard"/>, здесь только вызовы Windows.</summary>
+    private sealed class NativeTypingTarget(UiaDesktop desktop, DesktopWindow window) : ITypingTarget
+    {
+        public nint Window { get; } = Handle(window);
+
+        public void RequireForeground(bool partial) => desktop.RequireForeground(window, partial);
+
+        public nint Focus() => FocusOf(Window);
+
+        public bool IsChild(nint parent, nint child) => NativeMethods.IsChild(parent, child);
+
+        public void Send(char ch)
+        {
+            switch (ch)
+            {
+                case '\n':
+                    SendInput.Keys([0x0D]);
+                    break;
+                case '\t':
+                    SendInput.Keys([0x09]);
+                    break;
+                default:
+                    SendInput.Unicode(ch);
+                    break;
+            }
+        }
+
+        public void Sleep(int milliseconds) => Thread.Sleep(milliseconds);
+    }
 
     public Task PressKeysAsync(DesktopWindow window, IReadOnlyList<string> keys, CancellationToken cancellationToken) =>
         RunVoidAsync(() =>
@@ -480,19 +452,6 @@ public sealed class UiaDesktop : IDesktop, IDisposable
         return thread != 0 && NativeMethods.GetGUIThreadInfo(thread, ref info) ? info.Focus : IntPtr.Zero;
     }
 
-    /// <summary>Окно (или его собственный диалог) на переднем плане — для вывода окна вперёд.</summary>
-    private static bool OwnsForeground(IntPtr handle)
-    {
-        var foreground = NativeMethods.GetForegroundWindow();
-        if (foreground == IntPtr.Zero)
-        {
-            return false;
-        }
-
-        return foreground == handle || NativeMethods.GetAncestor(foreground, NativeMethods.GaRoot) == handle ||
-               NativeMethods.GetAncestor(foreground, NativeMethods.GaRootOwner) == handle;
-    }
-
     /// <summary>
     /// Ввод — только в окно на переднем плане и только если Windows его пропустит: в программу, запущенную от имени
     /// администратора, ввод из Pepa без таких прав молча теряется (Windows не сообщает об этом).
@@ -501,34 +460,18 @@ public sealed class UiaDesktop : IDesktop, IDisposable
     {
         var handle = Handle(window);
         var foreground = NativeMethods.GetForegroundWindow();
-        if (foreground != IntPtr.Zero && foreground != handle && NativeMethods.GetAncestor(foreground, NativeMethods.GaRoot) != handle &&
-            NativeMethods.GetAncestor(foreground, NativeMethods.GaRootOwner) == handle)
+        var root = foreground == IntPtr.Zero ? IntPtr.Zero : NativeMethods.GetAncestor(foreground, NativeMethods.GaRoot);
+        var owner = foreground == IntPtr.Zero ? IntPtr.Zero : NativeMethods.GetAncestor(foreground, NativeMethods.GaRootOwner);
+        int? target = null;
+        if (foreground != IntPtr.Zero)
         {
-            // Ввод — только в то окно, о котором шаг: диалог программы («Сохранить?») мог открыться сам, и буква или Enter
-            // в нём выбрали бы ответ за пользователя.
-            throw new DesktopInputBlockedException(
-                $"Поверх окна «{window.Info.Title}» открыто другое окно этой программы (например, вопрос или диалог). Чтобы не ответить " +
-                "в нём за вас, Pepa остановилась. Закройте его или добавьте в сценарий шаг для этого окна.", partial);
+            NativeMethods.GetWindowThreadProcessId(foreground, out var processId);
+            target = Integrity.Of((int)processId);
         }
 
-        if (!OwnsForeground(handle))
+        if (InputGuard.ForegroundProblem(new ForegroundState(handle, foreground, root, owner, target, _ownIntegrity), window.Info.Title) is { } problem)
         {
-            throw new DesktopInputBlockedException(
-                $"Окно «{window.Info.Title}» не на переднем плане: Windows не дал вывести его вперёд (так бывает, когда вы работаете в " +
-                "другом окне) или на него переключились. Чтобы не нажать и не напечатать в чужом окне, Pepa остановилась.", partial);
-        }
-
-        NativeMethods.GetWindowThreadProcessId(NativeMethods.GetForegroundWindow(), out var processId);
-        var target = Integrity.Of((int)processId);
-        if (target is null || _ownIntegrity is null || target > _ownIntegrity)
-        {
-            throw new DesktopInputBlockedException(
-                target is null
-                    ? $"Не удалось проверить права программы окна «{window.Info.Title}». Если она запущена от имени администратора, ввод из " +
-                      "Pepa до неё не дойдёт — запустите Pepa тоже от имени администратора или программу без этих прав."
-                    : $"Программа окна «{window.Info.Title}» запущена от имени администратора: ввод мышью и клавиатурой из Pepa до неё не " +
-                      "дойдёт (Windows его молча отбрасывает). Запустите Pepa тоже от имени администратора или программу без этих прав.",
-                partial);
+            throw new DesktopInputBlockedException(problem, partial);
         }
     }
 
