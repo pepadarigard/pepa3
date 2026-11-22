@@ -186,6 +186,16 @@ public sealed partial class SqliteStore : IPepaStore
             throw new IOException($"Копия «{Path.GetFileName(targetPath)}» уже есть.");
         }
 
+        // Места на диске меньше, чем нужно копии (с запасом), — понятный отказ заранее, а не заполненный диск, на котором
+        // перестанет записываться и сама база.
+        var directory = Path.GetDirectoryName(Path.GetFullPath(targetPath))!;
+        var needed = new FileInfo(Path.GetFullPath(DatabasePath)) is { Exists: true } db ? db.Length + 50L * 1024 * 1024 : 0;
+        if (needed > 0 && FreeSpace(directory) is { } free && free < needed)
+        {
+            throw new IOException(
+                $"На диске мало места для резервной копии: свободно {free / (1024 * 1024)} МБ, нужно около {needed / (1024 * 1024)} МБ.");
+        }
+
         var temp = targetPath + ".tmp";
         try
         {
@@ -225,6 +235,19 @@ public sealed partial class SqliteStore : IPepaStore
     }
 
     public Task InitializeAsync(CancellationToken cancellationToken = default) => InitializeAsync(Migrations.Length, cancellationToken);
+
+    /// <summary>Свободное место на диске папки; null — узнать не удалось (тогда копия делается как обычно).</summary>
+    private static long? FreeSpace(string directory)
+    {
+        try
+        {
+            return new DriveInfo(Path.GetPathRoot(directory)!).AvailableFreeSpace;
+        }
+        catch (Exception ex) when (ex is IOException or ArgumentException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
 
     /// <summary>Отложенные при запуске файлы журнала прежней базы (см. <see cref="SetAsideStaleJournal"/>); пусто — не было.</summary>
     public IReadOnlyList<string> SetAsideJournalFiles { get; private set; } = [];
@@ -700,7 +723,10 @@ public sealed partial class SqliteStore : IPepaStore
         var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await ExecuteAsync(connection, null,
-            "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA synchronous = FULL;", cancellationToken);
+            // journal_size_limit: после переноса в базу журнал WAL усекается до 64 МБ, а не остаётся размером с самый большой
+            // всплеск записи, пока открыты соединения.
+            "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA synchronous = FULL; PRAGMA journal_size_limit = 67108864;",
+            cancellationToken);
         return connection;
     }
 
