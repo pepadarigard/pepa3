@@ -20,7 +20,10 @@ public sealed record PlatformSettings
     /// <summary>Адрес Local API AdsPower (смотрите в AdsPower: Настройки → Local API).</summary>
     public string AdsPowerUrl { get; init; } = DefaultAdsPowerUrl;
 
-    /// <summary>Ключ API AdsPower, если в AdsPower включена проверка ключа. Хранится в базе Pepa на этом компьютере.</summary>
+    /// <summary>
+    /// Ключ API AdsPower, если в AdsPower включена проверка ключа. В базе (и в её резервных копиях) хранится зашифрованным для
+    /// текущего пользователя Windows (DPAPI), как и остальные ключи; здесь — расшифрованный.
+    /// </summary>
     public string? AdsPowerApiKey { get; init; }
 
     /// <summary>Сообщать в Telegram («Избранное» своего аккаунта), когда процесс ждёт решения.</summary>
@@ -58,6 +61,7 @@ public sealed class SettingsValidationException(string message) : Exception(mess
 public sealed partial class SettingsService
 {
     private const string Key = "platform";
+    private const string AdsPowerPurpose = "Pepa.AdsPower";
     private readonly IPepaStore _store;
     private readonly string _dataDirectory;
     private PlatformSettings _current;
@@ -97,6 +101,28 @@ public sealed partial class SettingsService
             {
                 settings = settings with { WorkspaceRoot = defaultWorkspace };
             }
+
+            if (settings.AdsPowerApiKey is { } stored)
+            {
+                string? key;
+                try
+                {
+                    key = Pepa.Core.Security.Secrets.Unprotect(stored, AdsPowerPurpose);
+                }
+                catch (CryptographicException)
+                {
+                    key = null; // база с другого компьютера или пользователя — ключ нужно ввести заново
+                }
+
+                settings = settings with { AdsPowerApiKey = key };
+                // Ключ, сохранённый прежней версией открыто, шифруется сразу.
+                if (key is not null && OperatingSystem.IsWindows() && !stored.StartsWith("dpapi:", StringComparison.Ordinal))
+                {
+                    await using var write = await store.BeginWriteAsync();
+                    await write.SetSettingAsync(Key, Serialize(settings));
+                    await write.CommitAsync();
+                }
+            }
         }
         else
         {
@@ -104,12 +130,18 @@ public sealed partial class SettingsService
             // она не поменялась молча (например, если сервер запущен без --workspace).
             settings = new PlatformSettings { WorkspaceRoot = Path.GetFullPath(defaultWorkspace) };
             await using var write = await store.BeginWriteAsync();
-            await write.SetSettingAsync(Key, PepaJson.Serialize(settings));
+            await write.SetSettingAsync(Key, Serialize(settings));
             await write.CommitAsync();
         }
 
         return new SettingsService(store, dataDirectory, settings);
     }
+
+    /// <summary>Как настройки лежат в базе: ключ AdsPower — зашифрованным.</summary>
+    private static string Serialize(PlatformSettings settings) => PepaJson.Serialize(settings with
+    {
+        AdsPowerApiKey = settings.AdsPowerApiKey is { } key ? Pepa.Core.Security.Secrets.Protect(key, AdsPowerPurpose) : null,
+    });
 
     /// <summary>Проверить и привести к виду, в котором сохранятся (без сохранения).</summary>
     public Task<PlatformSettings> ValidateAsync(PlatformSettings settings) => Task.FromResult(Validate(settings, apply: false));
@@ -119,7 +151,7 @@ public sealed partial class SettingsService
         var normalized = Validate(settings, apply: true);
         await using (var write = await _store.BeginWriteAsync())
         {
-            await write.SetSettingAsync(Key, PepaJson.Serialize(normalized));
+            await write.SetSettingAsync(Key, Serialize(normalized));
             await write.CommitAsync();
         }
 

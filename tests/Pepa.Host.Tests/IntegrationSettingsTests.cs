@@ -34,6 +34,48 @@ public sealed class IntegrationSettingsTests
     }
 
     [Fact]
+    public async Task AdsPower_key_is_encrypted_in_the_database_and_its_backups()
+    {
+        // Ключ AdsPower был единственным ключом, который лежал в pepa.db (и в каждой резервной копии) открыто.
+        var dir = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "pepa-settings-" + Guid.NewGuid().ToString("N"))).FullName;
+        try
+        {
+            var ct = TestContext.Current.CancellationToken;
+            var store = new Pepa.Storage.Sqlite.SqliteStore(Path.Combine(dir, "pepa.db"));
+            await store.InitializeAsync(ct);
+            var workspace = Path.Combine(dir, "workspace");
+            var settings = await Pepa.Host.Settings.SettingsService.LoadAsync(store, Path.Combine(dir, "data"), workspace);
+            await settings.SaveAsync(settings.Current with { AdsPowerApiKey = "ads-key-123456" });
+
+            var reloaded = await Pepa.Host.Settings.SettingsService.LoadAsync(store, Path.Combine(dir, "data"), workspace);
+            Assert.Equal("ads-key-123456", reloaded.Current.AdsPowerApiKey);
+            if (OperatingSystem.IsWindows())
+            {
+                Assert.DoesNotContain("ads-key-123456", (await store.GetSettingsAsync())["platform"]);
+            }
+
+            // Ключ, сохранённый прежней версией открыто, читается и сразу шифруется.
+            await using (var write = await store.BeginWriteAsync())
+            {
+                await write.SetSettingAsync("platform", (await store.GetSettingsAsync())["platform"]
+                    .Replace(System.Text.Json.Nodes.JsonNode.Parse((await store.GetSettingsAsync())["platform"])!["adsPowerApiKey"]!.GetValue<string>(), "old-plain-key"));
+                await write.CommitAsync();
+            }
+
+            Assert.Equal("old-plain-key", (await Pepa.Host.Settings.SettingsService.LoadAsync(store, Path.Combine(dir, "data"), workspace)).Current.AdsPowerApiKey);
+            if (OperatingSystem.IsWindows())
+            {
+                Assert.DoesNotContain("old-plain-key", (await store.GetSettingsAsync())["platform"]);
+            }
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task AdsPower_check_explains_missing_connection()
     {
         await using var f = await HostFixture.StartAsync(seedSamples: false);
