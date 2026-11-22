@@ -17,14 +17,26 @@ internal static class TestBrowser
     /// <summary>Исполняемый файл для поддельного AdsPower (нужен путь, канала мало).</summary>
     public static string? ExecutableForCdp { get; } = ExecutablePath ?? FindInstalled();
 
-    public static void RequireBrowser()
-    {
-        Assert.SkipUnless(Available, "Браузер для тестов не найден (задайте PEPA_TEST_BROWSER_PATH или PEPA_TEST_BROWSER_CHANNEL).");
-    }
+    /// <summary>
+    /// PEPA_TEST_REQUIRE_BROWSER=1 (так в CI): без браузера тесты не пропускаются, а падают — иначе сборка выглядела бы
+    /// зелёной, хотя блоки браузера и AdsPower не проверялись.
+    /// </summary>
+    private static bool Required => Environment.GetEnvironmentVariable("PEPA_TEST_REQUIRE_BROWSER") == "1";
 
-    public static void RequireCdpBrowser()
+    public static void RequireBrowser() =>
+        SkipOrFail(Available, "Браузер для тестов не найден (задайте PEPA_TEST_BROWSER_PATH или PEPA_TEST_BROWSER_CHANNEL).");
+
+    public static void RequireCdpBrowser() =>
+        SkipOrFail(ExecutableForCdp is not null, "Исполняемый файл браузера для имитации AdsPower не найден (PEPA_TEST_BROWSER_PATH).");
+
+    private static void SkipOrFail(bool available, string reason)
     {
-        Assert.SkipUnless(ExecutableForCdp is not null, "Исполняемый файл браузера для имитации AdsPower не найден (PEPA_TEST_BROWSER_PATH).");
+        if (!available && Required)
+        {
+            Assert.Fail(reason + " В CI браузер обязателен (PEPA_TEST_REQUIRE_BROWSER=1).");
+        }
+
+        Assert.SkipUnless(available, reason);
     }
 
     private static string? FindExecutable()
