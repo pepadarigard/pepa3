@@ -34,12 +34,26 @@ jobs:
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
-      - name: Интерфейс — зависимости, тесты, сборка
+      # По одной команде на шаг: в многострочном шаге pwsh проверяется код возврата только последней команды.
+      - name: Интерфейс — зависимости
         working-directory: ui
+        run: npm ci
+
+      - name: Интерфейс — тесты
+        working-directory: ui
+        run: npm test
+
+      - name: Интерфейс — сборка
+        working-directory: ui
+        run: npm run build
+
+      # build\build.ps1 запускают в Windows PowerShell 5.1 (README): он должен разбираться без ошибок.
+      - name: Проверка build.ps1 в Windows PowerShell
+        shell: powershell
         run: |
-          npm ci
-          npm test
-          npm run build
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path build/build.ps1), [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Error $_.ToString() }; exit 1 }
 
       # Блоки браузера проверяются на установленном Microsoft Edge, имитация AdsPower запускает его же с портом отладки.
       - name: Тесты .NET (на Windows)

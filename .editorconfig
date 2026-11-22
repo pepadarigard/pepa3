@@ -14,6 +14,10 @@ indent_size = 2
 [*.md]
 trim_trailing_whitespace = false
 
+# Windows PowerShell 5.1 читает файл без BOM в кодировке системы — русские строки ломают разбор сценария.
+[*.ps1]
+charset = utf-8-bom
+
 [*.cs]
 csharp_style_namespace_declarations = file_scoped:warning
 dotnet_sort_system_directives_first = true
