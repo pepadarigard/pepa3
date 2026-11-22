@@ -550,9 +550,12 @@ public sealed partial class EmailService : IAsyncDisposable
             return password;
         }
 
+        // Сохранённый пароль — только для тех же серверов и логина: исправили сервер отправки (опечатка, чужой «ретранслятор») —
+        // пароль нужно ввести заново, иначе Pepa отправила бы его новому серверу, не спросив.
         if (_stored is { Password: { } stored } current &&
             string.Equals(current.Account.Server, account.Server, StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(current.Account.Login, account.Login, StringComparison.OrdinalIgnoreCase))
+            string.Equals(current.Account.Login, account.Login, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(current.Account.SmtpServer ?? "", account.SmtpServer ?? "", StringComparison.OrdinalIgnoreCase))
         {
             return stored;
         }

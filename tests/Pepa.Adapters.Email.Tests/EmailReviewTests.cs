@@ -144,6 +144,20 @@ public sealed class EmailReviewTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Saved_password_is_not_sent_to_a_changed_sending_server()
+    {
+        // Исправили только «Сервер отправки» (опечатка или чужой ретранслятор): сохранённый пароль приложения не уходит туда
+        // без вопроса — его нужно ввести заново.
+        var service = await ConnectedAsync();
+        var refused = await Assert.ThrowsAsync<EmailUnavailableException>(() =>
+            service.ConfigureAsync(Account() with { SmtpServer = "smtp.yandx.ru" }, null, CancellationToken.None));
+        Assert.Contains("Введите пароль", refused.Message);
+
+        // Тот же ящик без изменений серверов — пароль можно не вводить.
+        await service.ConfigureAsync(Account(), null, CancellationToken.None);
+    }
+
+    [Fact]
     public async Task Damaged_settings_do_not_stop_pepa_and_the_reason_stays_visible()
     {
         Directory.CreateDirectory(Path.Combine(_data, "email"));

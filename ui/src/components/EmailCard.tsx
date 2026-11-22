@@ -122,7 +122,9 @@ function AccountForm({ status, onSaved, onCancel }: {
   const [busy, setBusy] = useState<"save" | "check" | null>(null);
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
   const preset = presets.find((p) => p.server !== "" && p.server === form.server.trim()) ?? presets[presets.length - 1];
-  const passwordSaved = status.account !== null && status.account.server === form.server.trim() && status.account.login === form.login.trim();
+  // Сохранённый пароль — только для тех же серверов (чтения и отправки) и логина: иначе его нужно ввести заново.
+  const passwordSaved = status.account !== null && status.account.server === form.server.trim() && status.account.login === form.login.trim() &&
+    (status.account.smtpServer ?? "").toLowerCase() === (form.smtpServer ?? "").trim().toLowerCase();
   const sending = (form.smtpServer ?? "").trim().length > 0;
   const valid = form.server.trim().length > 0 && form.login.trim().length > 0 && form.port > 0 && (!sending || form.smtpPort > 0) &&
     (passwordSaved || (form.password ?? "").length > 0);
