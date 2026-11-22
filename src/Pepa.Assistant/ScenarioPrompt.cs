@@ -221,7 +221,10 @@ internal sealed class ScenarioPrompt
             - summary — 1–3 предложения: что делает черновик.
             - questions — что пользователю нужно уточнить или проверить (может быть пусто).
             - variables — новые переменные: name, type (any, text, number, boolean, list, object), description, isInput
-              (true — спрашивается при запуске), default (значение по умолчанию строкой или пустая строка).
+              (true — спрашивается при запуске), default (значение по умолчанию строкой или пустая строка), secret (true —
+              секретная: пароль, код подтверждения, PIN, токен, ключ API, номер или код карты; значение не показывается, не
+              попадает в название запуска, журнал и уведомления). Пароли и подобное всегда спрашивай при запуске
+              (isInput = true, secret = true) и никогда не пиши их значение в default.
             - blocks — блоки по порядку выполнения: id (короткий латиницей: open, send, wait…), type (тип из каталога), label
               (короткое название по-русски или пустая строка), note (пояснение для пользователя или пустая строка), settings —
               список полей {field, value}, value — всегда строка.
@@ -321,7 +324,8 @@ internal sealed class ScenarioPrompt
         {
             Summary = scenario.Description,
             Variables = scenario.Variables.Select(v => new DraftVariable(v.Name, TypeName(v.Type), v.Description, v.IsInput,
-                v.Default is JsonValue value && value.TryGetValue<string>(out var s) ? s : v.Default?.ToJsonString() ?? "")).ToList(),
+                v.Secret ? "" : v.Default is JsonValue value && value.TryGetValue<string>(out var s) ? s : v.Default?.ToJsonString() ?? "",
+                v.Secret)).ToList(),
             Blocks = scenario.Nodes.Where(n => !start.Contains(n.Id)).Select(n => new DraftBlock(n.Id, n.Type, n.Label ?? "", n.Note ?? "",
                 n.Config.Select(p => new DraftSetting(p.Key, p.Value is JsonValue v && v.TryGetValue<string>(out var text) ? text : p.Value?.ToJsonString() ?? ""))
                     .ToList())).ToList(),
@@ -384,6 +388,7 @@ internal sealed class ScenarioPrompt
                 ["description"] = Str(),
                 ["isInput"] = new JsonObject { ["type"] = "boolean" },
                 ["default"] = Str(),
+                ["secret"] = new JsonObject { ["type"] = "boolean" },
             })),
             ["blocks"] = Arr(Obj(new JsonObject
             {

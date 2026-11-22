@@ -21,6 +21,12 @@ const example =
 
 const editExample = "Перед отправкой сообщения подождать 5 секунд, а если ответа нет — написать в журнал «Ответа нет» и закончить с ошибкой.";
 
+/** Пометка новой переменной в черновике: спрашивается ли при запуске и секретна ли (значение не показывается). */
+function variableNote(v: { isInput?: boolean; secret?: boolean }): string {
+  const notes = [v.isInput ? "спрашивается при запуске" : null, v.secret ? "секретная" : null].filter(Boolean);
+  return notes.length > 0 ? ` (${notes.join(", ")})` : "";
+}
+
 function load(key: string): string {
   try {
     return sessionStorage.getItem(key) ?? "";
@@ -280,7 +286,7 @@ export function AssistantDialog({ scenario, startId, onInsert, onApply, onSelect
           )}
           {draft.variables.length > 0 && (
             <p className="small muted">
-              Новые переменные: {draft.variables.map((v) => `${v.name}${v.isInput ? " (спрашивается при запуске)" : ""}`).join(", ")}.
+              Новые переменные: {draft.variables.map((v) => `${v.name}${variableNote(v)}`).join(", ")}.
             </p>
           )}
           <UsageLine usage={draft.usage} requests={draft.requests} />

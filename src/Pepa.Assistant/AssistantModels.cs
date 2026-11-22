@@ -95,7 +95,8 @@ internal sealed record DraftJson
     public IReadOnlyList<DraftLink> Links { get; init; } = [];
 }
 
-internal sealed record DraftVariable(string Name, string Type, string Description, bool IsInput, string Default);
+/// <summary><paramref name="Secret"/> — секретная переменная (пароль, код, токен): значение не показывается и не попадает в название запуска.</summary>
+internal sealed record DraftVariable(string Name, string Type, string Description, bool IsInput, string Default, bool Secret = false);
 
 internal sealed record DraftBlock(string Id, string Type, string Label, string Note, IReadOnlyList<DraftSetting> Settings);
 

@@ -42,13 +42,18 @@ internal sealed class DraftConverter(NodeRegistry registry, ScenarioValidator va
             }
 
             var type = Enum.TryParse<VariableType>(v.Type, ignoreCase: true, out var parsed) ? parsed : VariableType.Any;
+            // Помощник может забыть отметить пароль секретным — тогда он попал бы в название запуска, уведомления и историю.
+            // Поэтому переменная, похожая на пароль, код или токен по имени или описанию, секретна в любом случае, а значения
+            // по умолчанию у секретной переменной из черновика нет (помощник его знать не может).
+            var secret = v.Secret || LooksSecret(name) || LooksSecret(v.Description);
             variables.Add(new VariableDefinition
             {
                 Name = name,
                 Type = type,
                 Description = v.Description.Trim(),
                 IsInput = v.IsInput,
-                Default = DefaultValue(type, v.Default),
+                Secret = secret,
+                Default = secret ? null : DefaultValue(type, v.Default),
             });
         }
 
@@ -384,4 +389,12 @@ internal sealed class DraftConverter(NodeRegistry registry, ScenarioValidator va
             return null;
         }
     }
+
+    /// <summary>Имя или описание переменной похоже на пароль, код подтверждения, PIN, токен или ключ.</summary>
+    internal static bool LooksSecret(string? text) => text is { Length: > 0 } && SecretName.IsMatch(text);
+
+    private static readonly System.Text.RegularExpressions.Regex SecretName = new(
+        @"парол|password|passwd|passw|pwd|\bpin\b|pin[-_ ]?code|\bпин\b|пин-код|token|токен|secret|секрет|api[-_ ]?key|apikey|ключ api|" +
+        @"cvv|cvc|\botp\b|одноразов|код подтвержд|confirmation code|verification code",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 }

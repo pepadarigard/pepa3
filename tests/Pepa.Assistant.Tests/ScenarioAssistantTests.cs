@@ -396,6 +396,41 @@ public sealed class ScenarioAssistantTests : IDisposable
     }
 
     [Fact]
+    public async Task Password_drafted_by_the_assistant_is_a_secret_even_if_the_model_forgot_to_mark_it()
+    {
+        // «Войти на сайт, логин и пароль спрашивать при запуске»: незасекреченный пароль попал бы в название запуска,
+        // уведомления в Telegram и историю.
+        JsonObject Variable(string name, string description, bool? secret = null)
+        {
+            var variable = new JsonObject { ["name"] = name, ["type"] = "text", ["description"] = description, ["isInput"] = true, ["default"] = "" };
+            if (secret is { } value) variable["secret"] = value;
+            return variable;
+        }
+
+        var draft = Draft([Block("done", "end")], [],
+            [
+                Variable("login", "Логин на сайте", secret: false),
+                Variable("password", "Пароль на сайте", secret: false),
+                Variable("code", "Код подтверждения из СМС"),
+                Variable("apiToken", "Для запросов", secret: true),
+            ]);
+        draft["variables"]![1]!["default"] = "Qwerty123";
+        _api.ReplyDraft(draft);
+        var result = await Assistant().DraftAsync("sk-ant-test", Ask("Войти на сайт, логин и пароль спрашивать при запуске"),
+            TestContext.Current.CancellationToken);
+
+        var secret = result.Variables.ToDictionary(v => v.Name, v => v.Secret);
+        Assert.False(secret["login"]);
+        Assert.True(secret["password"]);
+        Assert.True(secret["code"]);
+        Assert.True(secret["apiToken"]);
+        Assert.Null(result.Variables.Single(v => v.Name == "password").Default);
+        // Модель может сама отметить секретную переменную: поле есть в схеме ответа, а правило — в подсказке.
+        var body = _api.Requests.Single().Body!.ToJsonString();
+        Assert.Contains("\"secret\"", body);
+    }
+
+    [Fact]
     public void Examples_given_to_the_model_pass_the_same_check()
     {
         var registry = Registry();
