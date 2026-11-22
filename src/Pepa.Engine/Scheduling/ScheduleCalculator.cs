@@ -55,6 +55,11 @@ public static class ScheduleCalculator
                 // Остальные (7 минут, 36 часов) идут ровной сеткой от постоянной точки, без сбоя в полночь.
                 var period = TimeSpan.FromMinutes(minutes);
                 DateTimeOffset anchor;
+                if (TimeSpan.FromDays(1).Ticks % period.Ticks == 0 && period > TimeSpan.FromHours(1))
+                {
+                    return NextWallClockSlot(period, after, zone);
+                }
+
                 if (TimeSpan.FromDays(1).Ticks % period.Ticks == 0)
                 {
                     var localDate = TimeZoneInfo.ConvertTime(after, zone).Date;
@@ -117,6 +122,45 @@ public static class ScheduleCalculator
             default:
                 return null;
         }
+    }
+
+    /// <summary>
+    /// Редкий интервал, укладывающийся в сутки целое число раз («каждые 6 часов»), — по местным часам: в 00:00, 06:00, 12:00
+    /// и 18:00 и в день перевода часов. Иначе в такой день запуски сдвигались бы на час, а при переводе назад два запуска
+    /// приходились бы на 23:00 и 00:00 — лишний запуск. Несуществующее время (часы переведены вперёд) сдвигается на час
+    /// вперёд, повторяющееся (часы переведены назад) — один раз, в первый. Частые интервалы (до часа) идут ровной сеткой.
+    /// </summary>
+    private static DateTimeOffset? NextWallClockSlot(TimeSpan period, DateTimeOffset after, TimeZoneInfo zone)
+    {
+        var day = TimeZoneInfo.ConvertTime(after, zone).Date;
+        DateTimeOffset? best = null;
+        for (var offset = 0; offset <= 2; offset++)
+        {
+            var date = day.AddDays(offset);
+            for (var slot = date; slot < date.AddDays(1); slot += period)
+            {
+                var wall = DateTime.SpecifyKind(slot, DateTimeKind.Unspecified);
+                while (zone.IsInvalidTime(wall))
+                {
+                    wall = wall.AddHours(1);
+                }
+
+                var moment = zone.IsAmbiguousTime(wall)
+                    ? new DateTimeOffset(wall, zone.GetAmbiguousTimeOffsets(wall).Max())
+                    : new DateTimeOffset(wall, zone.GetUtcOffset(wall));
+                if (moment > after && (best is null || moment < best))
+                {
+                    best = moment;
+                }
+            }
+
+            if (best is not null)
+            {
+                return best;
+            }
+        }
+
+        return best;
     }
 
     /// <summary>Сколько запусков пришлось на промежуток (from, to] — для учёта пропущенных (не больше <paramref name="cap"/>).</summary>

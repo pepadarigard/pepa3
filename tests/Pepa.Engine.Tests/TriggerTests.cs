@@ -371,6 +371,52 @@ public sealed class TriggerTests
         Assert.Equal("пн, вт, ср, чт, пт в 09:30", ScheduleCalculator.Describe(weekdays));
     }
 
+    /// <summary>Зона с переводом часов, как в Европе: +1, летом +2; вперёд — в последнее воскресенье марта в 02:00, назад — октября в 03:00.</summary>
+    private static TimeZoneInfo Europe() => TimeZoneInfo.CreateCustomTimeZone("test-dst", TimeSpan.FromHours(1), "test", "зима", "лето",
+    [
+        TimeZoneInfo.AdjustmentRule.CreateAdjustmentRule(DateTime.MinValue.Date, DateTime.MaxValue.Date, TimeSpan.FromHours(1),
+            TimeZoneInfo.TransitionTime.CreateFloatingDateRule(new DateTime(1, 1, 1, 2, 0, 0), 3, 5, DayOfWeek.Sunday),
+            TimeZoneInfo.TransitionTime.CreateFloatingDateRule(new DateTime(1, 1, 1, 3, 0, 0), 10, 5, DayOfWeek.Sunday)),
+    ]);
+
+    private static List<string> Runs(JsonObject schedule, DateTimeOffset from, DateTimeOffset to, TimeZoneInfo zone)
+    {
+        var runs = new List<string>();
+        var cursor = from;
+        while (ScheduleCalculator.Next(schedule, cursor, zone) is { } next && next <= to)
+        {
+            runs.Add(TimeZoneInfo.ConvertTime(next, zone).ToString("dd HH:mm", System.Globalization.CultureInfo.InvariantCulture));
+            cursor = next;
+        }
+
+        return runs;
+    }
+
+    [Fact]
+    public void Interval_dividing_the_day_keeps_local_hours_on_clock_change_days()
+    {
+        // «Каждые 6 часов» в день перевода часов — по-прежнему 00:00, 06:00, 12:00, 18:00 по местному времени. Раньше запуски
+        // сдвигались на час, а при переводе назад два запуска выпадали на 23:00 и 00:00.
+        var zone = Europe();
+        var six = new JsonObject { ["mode"] = "interval", ["everyMinutes"] = 360 };
+        var spring = new DateTimeOffset(2026, 3, 28, 23, 0, 0, TimeSpan.FromHours(1));
+        Assert.Equal(["29 00:00", "29 06:00", "29 12:00", "29 18:00", "30 00:00"], Runs(six, spring, spring.AddHours(25), zone));
+        var autumn = new DateTimeOffset(2026, 10, 24, 23, 0, 0, TimeSpan.FromHours(2));
+        Assert.Equal(["25 00:00", "25 06:00", "25 12:00", "25 18:00", "26 00:00"], Runs(six, autumn, autumn.AddHours(26), zone));
+
+        var twelve = new JsonObject { ["mode"] = "interval", ["everyMinutes"] = 720 };
+        Assert.Equal(["25 00:00", "25 12:00", "26 00:00"], Runs(twelve, autumn, autumn.AddHours(26), zone));
+
+        // Несуществующее 02:00 (часы переведены вперёд) — в 03:00; дальше — как обычно.
+        var two = new JsonObject { ["mode"] = "interval", ["everyMinutes"] = 120 };
+        Assert.Equal(["29 00:00", "29 03:00", "29 04:00", "29 06:00"], Runs(two, spring, spring.AddHours(7), zone));
+
+        // Частый интервал идёт ровной сеткой и через повторяющийся час: за 25 часов дня перевода назад — 50 запусков по 30 минут.
+        var half = new JsonObject { ["mode"] = "interval", ["everyMinutes"] = 30 };
+        var midnight = new DateTimeOffset(2026, 10, 25, 0, 0, 0, TimeSpan.FromHours(2));
+        Assert.Equal(50, ScheduleCalculator.CountBetween(half, midnight, midnight.AddHours(25), zone));
+    }
+
     // ── Цепочки запусков по событиям процессов (D-090) ──
 
     private static ScenarioDefinition Sender(string key, string eventType) =>
