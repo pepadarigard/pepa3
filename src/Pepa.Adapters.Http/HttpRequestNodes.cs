@@ -56,6 +56,7 @@ public sealed class HttpGetNode(HttpClient client) : INodeExecutor
         HttpResponseMessage? response = null;
         try
         {
+            bool? originLocal = null;
             for (var hop = 0; ; hop++)
             {
                 try
@@ -108,6 +109,16 @@ public sealed class HttpGetNode(HttpClient client) : INodeExecutor
                 {
                     return NodeResult.Fail($"«{HttpNodes.Display(request.RequestUri)}» перенаправляет на незащищённый адрес «{HttpNodes.Display(next)}» " +
                                            "— Pepa туда не переходит: заголовки и ответ можно было бы подсмотреть.", retryable: false);
+                }
+
+                // С сайта в интернете — не в локальную сеть и не на этот компьютер: так чужой (или подменённый) сайт мог бы
+                // нажать за Pepa на программы этого компьютера — например, открыть профиль AdsPower через его Local API.
+                originLocal ??= await LocalAddresses.IsLocalAsync(origin, cancellationToken);
+                if (originLocal == false && await LocalAddresses.IsLocalAsync(next, cancellationToken))
+                {
+                    return NodeResult.Fail($"«{HttpNodes.Display(request.RequestUri!)}» перенаправляет на адрес в локальной сети или на этом " +
+                                           $"компьютере («{next.Host}») — Pepa туда не переходит: так сайт мог бы управлять программами " +
+                                           "вашего компьютера. Если это задумано, укажите этот адрес в блоке сами.", retryable: false);
                 }
 
                 var redirected = new HttpRequestMessage(HttpMethod.Get, next);
@@ -415,3 +426,57 @@ public sealed class HttpSendNode(HttpClient client) : INodeExecutor
         }
     }
 }
+
+/// <summary>Адрес — этот компьютер или локальная сеть (loopback, частные диапазоны, link-local).</summary>
+internal static class LocalAddresses
+{
+    public static async Task<bool> IsLocalAsync(Uri uri, CancellationToken cancellationToken)
+    {
+        if (uri.IsLoopback)
+        {
+            return true;
+        }
+
+        var host = uri.DnsSafeHost;
+        if (IPAddress.TryParse(host, out var literal))
+        {
+            return IsLocal(literal);
+        }
+
+        try
+        {
+            return (await Dns.GetHostAddressesAsync(host, cancellationToken)).Any(IsLocal);
+        }
+        catch (System.Net.Sockets.SocketException)
+        {
+            return false; // имя не найдено — запрос всё равно не пройдёт и сообщит об этом сам
+        }
+    }
+
+    public static bool IsLocal(IPAddress address)
+    {
+        if (address.IsIPv4MappedToIPv6)
+        {
+            address = address.MapToIPv4();
+        }
+
+        if (IPAddress.IsLoopback(address) || address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any))
+        {
+            return true;
+        }
+
+        if (address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+        {
+            var b6 = address.GetAddressBytes();
+            return address.IsIPv6LinkLocal || address.IsIPv6SiteLocal || (b6[0] & 0xFE) == 0xFC; // fe80::/10, fec0::/10, fc00::/7
+        }
+
+        var b = address.GetAddressBytes();
+        return b[0] == 10 || b[0] == 127 || b[0] == 0 ||
+               (b[0] == 172 && b[1] is >= 16 and <= 31) ||
+               (b[0] == 192 && b[1] == 168) ||
+               (b[0] == 169 && b[1] == 254) ||
+               (b[0] == 100 && b[1] is >= 64 and <= 127); // 100.64/10 — сеть провайдера и VPN
+    }
+}
+

@@ -116,6 +116,43 @@ public sealed class HttpNodeTests
     }
 
     [Fact]
+    public async Task Get_from_an_internet_site_does_not_follow_a_redirect_into_this_computer_or_the_local_network()
+    {
+        // Подменённый сайт отвечает «302 → Local API AdsPower»: Pepa открыла бы профиль мимо очереди ресурсов.
+        var fake = new FakeHttp((request, _) => request.RequestUri!.Host == "203.0.113.5"
+            ? FakeHttp.Redirect(HttpStatusCode.Found, "http://127.0.0.1:50325/api/v1/browser/start?user_id=k1")
+            : FakeHttp.Text("открыт профиль"));
+        var fail = Assert.IsType<NodeResult.Failure>(await Run(new HttpGetNode(Client(fake)), new { url = "http://203.0.113.5/feed", saveTo = "x" }));
+        Assert.Contains("локальной сети или на этом компьютере", fail.Error);
+        Assert.Single(fake.Requests);
+
+        // Локальный адрес, указанный в блоке самим пользователем, перенаправлять внутри локальной сети может.
+        var local = new FakeHttp((request, _) => request.RequestUri!.AbsolutePath == "/old"
+            ? FakeHttp.Redirect(HttpStatusCode.Found, "http://192.168.1.10/new")
+            : FakeHttp.Text("ок"));
+        Assert.IsType<NodeResult.Success>(await Run(new HttpGetNode(Client(local)), new { url = "http://127.0.0.1:8080/old", saveTo = "x" }));
+    }
+
+    [Theory]
+    [InlineData("127.0.0.1", true)]
+    [InlineData("10.1.2.3", true)]
+    [InlineData("172.16.0.1", true)]
+    [InlineData("172.32.0.1", false)]
+    [InlineData("192.168.0.5", true)]
+    [InlineData("169.254.1.1", true)]
+    [InlineData("100.64.0.1", true)]
+    [InlineData("0.0.0.0", true)]
+    [InlineData("::1", true)]
+    [InlineData("fe80::1", true)]
+    [InlineData("fd00::1", true)]
+    [InlineData("::ffff:192.168.1.1", true)]
+    [InlineData("203.0.113.5", false)]
+    [InlineData("8.8.8.8", false)]
+    [InlineData("2001:4860:4860::8888", false)]
+    public void Local_addresses_are_recognized(string address, bool local) =>
+        Assert.Equal(local, LocalAddresses.IsLocal(IPAddress.Parse(address)));
+
+    [Fact]
     public async Task Saved_address_has_no_query_and_messages_have_no_user_name()
     {
         var fake = new FakeHttp((_, _) => FakeHttp.Json("{}"));
