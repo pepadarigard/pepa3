@@ -882,11 +882,14 @@ public sealed class FillNode(BrowserSessions sessions) : INodeExecutor
             var selector = context.RequireString("selector");
             var text = context.GetString("text") ?? "";
             await BrowserNodes.WaitReadyAsync(locator, BrowserNodes.WaitMs(context), selector);
+            // Шаг уже брошен (тайм-аут шага, остановка) — в поле позже не вводить.
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 if (context.GetString("mode") == "type")
                 {
                     await locator.FillAsync("", new LocatorFillOptions { Timeout = BrowserNodes.WaitMs(context) });
+                    cancellationToken.ThrowIfCancellationRequested();
                     await locator.PressSequentiallyAsync(text, new LocatorPressSequentiallyOptions { Delay = 60 });
                 }
                 else
@@ -966,6 +969,8 @@ public sealed class PressNode(BrowserSessions sessions) : INodeExecutor
             {
                 var locator = page.Locator(selector.Trim());
                 await BrowserNodes.WaitReadyAsync(locator, BrowserNodes.WaitMs(context), selector);
+                // Шаг уже брошен (тайм-аут шага, остановка) — клавишу позже не нажимать.
+                cancellationToken.ThrowIfCancellationRequested();
                 await locator.PressAsync(key, new LocatorPressOptions { Timeout = BrowserNodes.WaitMs(context) });
             }
             else

@@ -182,4 +182,88 @@ public sealed class WaitWindowTests
         await h.Engine.ResumeAsync(id, ResumeAction.Continue);
         await h.WaitForStatusAsync(id, ProcessStatus.Completed);
     }
+
+    [Fact]
+    public async Task Message_written_before_a_called_scenario_asks_is_not_taken_as_the_reply()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var child = await h.CreateScenarioAsync(new ScenarioBuilder("Спросить")
+            .Node("start", "start")
+            .Node("ask", TestActionNode.TypeName, new { key = "child-ask" })
+            .Node("end", "end")
+            .Chain("start", "ask", "end").Build());
+        var id = await h.RunAsync(new ScenarioBuilder("Родитель спрашивает через вызов")
+            .Node("start", "start")
+            .Node("open", TestActionNode.TypeName, new { key = "open" })
+            .Node("pause", "wait", new { mode = "duration", amount = 10, unit = "minutes" })
+            .Node("call", "scenario.call", new { scenario = child })
+            .Node("wait", "event.wait", new { source = "manual", correlationKey = "chat", lookbackSeconds = 30, timeoutSeconds = 1800 })
+            .Node("got", TestActionNode.TypeName, new { key = "got" })
+            .Node("end", "end")
+            .Chain("start", "open", "pause", "call").Edge("call", "wait", Ports.Done)
+            .Edge("wait", "got", Ports.Event).Edge("got", "end").Build());
+        await h.WaitForAsync(id, p => p.Status == ProcessStatus.Waiting && p.StepCount >= 3);
+
+        // Сообщение во время таймера — до вопроса, который задаст вызванный сценарий.
+        h.Time.Advance(TimeSpan.FromMinutes(1));
+        await h.Engine.PublishEventAsync(new EventInput { Source = "manual", Type = "reply", CorrelationKey = "chat" });
+        h.Time.Advance(TimeSpan.FromMinutes(10));
+        await h.UntilAsync(async () => (await h.Store.GetSubscriptionsAsync(id)).Any(x => x.State == SubscriptionState.Active && x.NodeId == "wait"),
+            "ожидание записано", TimeSpan.FromSeconds(30));
+        await h.IdleAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(0, h.World.Executions("got"));
+    }
+
+    [Fact]
+    public async Task Message_written_before_the_split_is_not_taken_when_a_sibling_branch_asks()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var id = await h.RunAsync(new ScenarioBuilder("Вопрос в соседней ветви")
+            .Node("start", "start")
+            .Node("open", TestActionNode.TypeName, new { key = "open" })
+            .Node("pause", "wait", new { mode = "duration", amount = 10, unit = "minutes" })
+            .Node("split", "parallel")
+            .Node("ask", TestActionNode.TypeName, new { key = "ask" })
+            .Node("wait", "event.wait", new { source = "manual", correlationKey = "chat", lookbackSeconds = 30, timeoutSeconds = 1800 })
+            .Node("got", TestActionNode.TypeName, new { key = "got" })
+            .Node("join", "join")
+            .Node("end", "end")
+            .Edge("start", "open").Edge("open", "pause").Edge("pause", "split")
+            .Edge("split", "wait", "b1").Edge("split", "ask", "b2")
+            .Edge("wait", "got", Ports.Event).Edge("got", "join").Edge("ask", "join").Edge("join", "end")
+            .Build());
+        await h.WaitForAsync(id, p => p.Status == ProcessStatus.Waiting && p.StepCount >= 3);
+
+        h.Time.Advance(TimeSpan.FromMinutes(1));
+        await h.Engine.PublishEventAsync(new EventInput { Source = "manual", Type = "reply", CorrelationKey = "chat" });
+        h.Time.Advance(TimeSpan.FromMinutes(10));
+        await h.UntilAsync(() => h.World.Executions("ask") == 1, "вопрос задан", TimeSpan.FromSeconds(30));
+        await h.IdleAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(0, h.World.Executions("got"));
+    }
+
+    [Fact]
+    public async Task Reply_during_a_timer_between_two_visits_of_the_same_wait_is_taken()
+    {
+        await using var h = await EngineHarness.CreateAsync();
+        var id = await h.RunAsync(new ScenarioBuilder("Ждать, подождать, ждать снова")
+            .Node("start", "start")
+            .Node("ask", TestActionNode.TypeName, new { key = "ask" })
+            .Node("wait", "event.wait", new { source = "manual", correlationKey = "chat", lookbackSeconds = 30, timeoutSeconds = 600 })
+            .Node("pause", "wait", new { mode = "duration", amount = 60, unit = "minutes" })
+            .Node("got", TestActionNode.TypeName, new { key = "got" })
+            .Node("end", "end")
+            .Edge("start", "ask").Edge("ask", "wait").Edge("wait", "got", Ports.Event).Edge("wait", "pause", Ports.Timeout)
+            .Edge("pause", "wait").Edge("got", "end").Build());
+        await h.WaitForStatusAsync(id, ProcessStatus.Waiting);
+
+        // Первое ожидание истекло, идёт час таймера; ответ пришёл в это время — второе ожидание его берёт.
+        h.Time.Advance(TimeSpan.FromMinutes(11));
+        await h.UntilAsync(async () => (await h.StepsAsync(id)).Any(s => s.NodeId == "pause"), "таймер начался", TimeSpan.FromSeconds(30));
+        h.Time.Advance(TimeSpan.FromMinutes(5));
+        await h.Engine.PublishEventAsync(new EventInput { Source = "manual", Type = "reply", CorrelationKey = "chat" });
+        h.Time.Advance(TimeSpan.FromMinutes(60));
+        await h.WaitForStatusAsync(id, ProcessStatus.Completed);
+        Assert.Equal(1, h.World.Executions("got"));
+    }
 }

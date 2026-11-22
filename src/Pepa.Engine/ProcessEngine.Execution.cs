@@ -1447,40 +1447,40 @@ public sealed partial class ProcessEngine
     /// С какого времени ответ на ожидание мог прийти: начало последнего действия во внешнем мире перед ожиданием (вопроса) — с
     /// первой его попытки, которая могла дойти до адресата (выполнена, итог неизвестен, могла выполниться). Попытки, которые
     /// точно ничего не сделали (отказ Telegram, нет связи), окно не открывают: сообщение, написанное до вопроса, — не ответ.
-    /// Шаги без внешних действий между вопросом и ожиданием (условие, переменная, параллельный участок, таймер) окно не
-    /// сдвигают. Ничего не нашлось — конец предыдущего шага или появление маркера. Слияние («Соединить») — граница: что было
-    /// в других ветвях, не учитывается (осторожно — окно уже, а не шире). Не позже «сейчас».
+    /// Шаги без внешних действий между вопросом и ожиданием (условие, переменная, таймер, вопрос в Pepa) окно не сдвигают.
+    /// Границы — окно от их конца: прошлое посещение того же ожидания (до него ответ уже искали), разделение и слияние ветвей
+    /// и вызов или запуск сценария, отправка события (вопрос мог задать другой процесс или соседняя ветвь — их шаги не видны,
+    /// поэтому окно уже, а не шире). Ничего не нашлось — конец предыдущего шага или появление маркера. Не позже «сейчас».
     /// </summary>
     private async Task<DateTimeOffset> WaitAnchorAsync(ProcessRecord process, TokenRecord token, string waitNodeId, DateTimeOffset now)
     {
-        var timeline = await _store.GetStepsSincePreviousVisitAsync(process.Id, token.Id, waitNodeId);
-        var mine = timeline.Where(s => s.TokenId == token.Id).ToList();
+        var mine = (await _store.GetStepsSincePreviousVisitAsync(process.Id, token.Id, waitNodeId))
+            .Where(s => s.TokenId == token.Id).ToList();
         var end = mine.Count - 1;
         while (end >= 0 && mine[end].NodeId == waitNodeId)
         {
             end--;
         }
 
-        var anchor = LineAnchor(mine, end);
-        if (anchor is null)
-        {
-            // Маркер появился в разделении на ветви: вопрос мог быть задан до разделения — шаги до появления маркера.
-            var first = mine.Count > 0 ? mine[0].Id : long.MaxValue;
-            var before = timeline.Where(s => s.Id < first && (s.StartedAt ?? s.PlannedAt) <= token.CreatedAt).ToList();
-            anchor = LineAnchor(before, before.Count - 1);
-        }
-
-        var at = anchor ?? (end >= 0 ? mine[end].FinishedAt ?? mine[end].StartedAt : null) ?? token.CreatedAt;
+        // Маркер появился в разделении на ветви и до ожидания ничего не делал — от появления (конца разделения).
+        var at = LineAnchor(mine, end, waitNodeId) ?? (end >= 0 ? mine[end].FinishedAt ?? mine[end].StartedAt : null) ?? token.CreatedAt;
         return at < now ? at : now;
     }
 
-    /// <summary>Идя назад от шага <paramref name="from"/>: начало вопроса (действия во внешнем мире), конец слияния или null.</summary>
-    private static DateTimeOffset? LineAnchor(IReadOnlyList<StepRecord> steps, int from)
+    /// <summary>Шаги, после которых вопрос мог задать не этот маркер: окно — от их конца.</summary>
+    private static readonly HashSet<string> WindowBoundaries = new(StringComparer.Ordinal)
+    {
+        Nodes.ParallelNode.TypeName, Nodes.JoinNode.TypeName, Nodes.CallScenarioNode.TypeName, Nodes.RunScenarioNode.TypeName,
+        Nodes.SendEventNode.TypeName,
+    };
+
+    /// <summary>Идя назад от шага <paramref name="from"/>: начало вопроса (действия во внешнем мире), конец границы или null.</summary>
+    private static DateTimeOffset? LineAnchor(IReadOnlyList<StepRecord> steps, int from, string waitNodeId)
     {
         for (var i = from; i >= 0; i--)
         {
             var step = steps[i];
-            if (step.NodeType == Nodes.JoinNode.TypeName)
+            if (step.NodeId == waitNodeId || WindowBoundaries.Contains(step.NodeType))
             {
                 return step.FinishedAt ?? step.StartedAt;
             }
@@ -1490,9 +1490,9 @@ public sealed partial class ProcessEngine
                 continue;
             }
 
-            // Посещение блока: попытки подряд того же маркера на том же блоке — до первой.
+            // Посещение блока: попытки подряд на том же блоке — до первой.
             var visit = new List<StepRecord>();
-            for (var k = i; k >= 0 && steps[k].NodeId == step.NodeId && steps[k].TokenId == step.TokenId; k--)
+            for (var k = i; k >= 0 && steps[k].NodeId == step.NodeId; k--)
             {
                 visit.Add(steps[k]);
                 if (steps[k].Attempt == 1)

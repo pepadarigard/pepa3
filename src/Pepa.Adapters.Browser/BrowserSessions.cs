@@ -631,6 +631,11 @@ public sealed class BrowserSessions : IAsyncDisposable
                 }
             }
 
+            // Какой запуск браузера подключается — записано до подключения: если оно не удастся, запись всё равно знает окно
+            // процесса, и окно, которое потом откроет владелец, за него не сойдёт.
+            info = info with { Endpoint = state.WsEndpoint };
+            SaveRegistry(info);
+            RememberLaunch(profileId, state.WsEndpoint);
             var session = await ConnectAsync(info, state.WsEndpoint!, newTab);
             _sessions[(processId, name)] = session;
             DropRetired(processId, profileId);
@@ -1310,8 +1315,8 @@ public sealed class BrowserSessions : IAsyncDisposable
                 // Профиль открыт не Pepa (вкладка процесса — в окне владельца): его Pepa не закрывает ни при каких условиях.
                 note = tabsClosed == true
                     ? $"Профиль AdsPower {profileId} открыт не Pepa — закрыты только вкладки процесса, профиль оставлен открытым."
-                    : $"Профиль AdsPower {profileId} открыт не Pepa — профиль оставлен открытым; вкладки процесса закрыть не удалось " +
-                      "(окно закрывали или открыли заново) — закройте их сами, если они не нужны.";
+                    : $"Профиль AdsPower {profileId} открыт не Pepa — профиль оставлен открытым; вкладки процесса Pepa не запомнила " +
+                      "и закрыть не может — закройте их сами, если они не нужны.";
             }
             else if (usedByOther)
             {
@@ -1372,8 +1377,10 @@ public sealed class BrowserSessions : IAsyncDisposable
 
     /// <summary>
     /// После перезапуска Pepa подключения нет: вкладки процесса находятся по запомненным идентификаторам — только в том же
-    /// запуске браузера, в котором процесс их открыл (окно, открытое владельцем заново, Pepa не трогает).
+    /// запуске браузера, в котором процесс их открыл. Профиль закрыт или открыт заново — вкладок процесса уже нет (они ушли с
+    /// прежним окном). Ошибка AdsPower или подключения — наружу: шаг не выполнен, запись остаётся для повтора.
     /// </summary>
+    /// <returns>false — закрыть нечем: Pepa не запомнила вкладки процесса.</returns>
     private async Task<bool> CloseOwnTabsAfterRestartAsync(BrowserSessionInfo info, CancellationToken cancellationToken)
     {
         var targets = new HashSet<string>(info.OwnedTargets ?? [], StringComparer.Ordinal);
@@ -1387,38 +1394,30 @@ public sealed class BrowserSessions : IAsyncDisposable
             return false;
         }
 
+        var state = await _adsPower.GetStateAsync(info.ProfileId, cancellationToken);
+        if (!state.Active || state.WsEndpoint is null || !SameLaunch(info.Endpoint, state.WsEndpoint))
+        {
+            return true;
+        }
+
+        var playwright = await PlaywrightAsync();
+        var browser = await playwright.Chromium.ConnectOverCDPAsync(state.WsEndpoint, new BrowserTypeConnectOverCDPOptions { Timeout = 30_000 });
         try
         {
-            var state = await _adsPower.GetStateAsync(info.ProfileId, cancellationToken);
-            if (!state.Active || state.WsEndpoint is null || !SameLaunch(info.Endpoint, state.WsEndpoint))
+            foreach (var page in browser.Contexts.SelectMany(c => c.Pages).Where(p => !p.IsClosed).ToList())
             {
-                return false;
-            }
-
-            var playwright = await PlaywrightAsync();
-            var browser = await playwright.Chromium.ConnectOverCDPAsync(state.WsEndpoint, new BrowserTypeConnectOverCDPOptions { Timeout = 30_000 });
-            try
-            {
-                foreach (var page in browser.Contexts.SelectMany(c => c.Pages).Where(p => !p.IsClosed).ToList())
+                if (await TargetIdAsync(page) is { } id && targets.Contains(id))
                 {
-                    if (await TargetIdAsync(page) is { } id && targets.Contains(id))
-                    {
-                        await page.CloseAsync();
-                    }
+                    await page.CloseAsync();
                 }
+            }
 
-                return true;
-            }
-            finally
-            {
-                // Только отключение: окно владельца остаётся.
-                await browser.CloseAsync();
-            }
+            return true;
         }
-        catch (Exception ex) when (ex is PlaywrightException or AdsPowerException)
+        finally
         {
-            Logger.LogWarning(ex, "Не удалось закрыть вкладки процесса {Process} в профиле AdsPower {Profile}.", info.ProcessId, info.ProfileId);
-            return false;
+            // Только отключение: окно владельца остаётся.
+            await browser.CloseAsync();
         }
     }
 

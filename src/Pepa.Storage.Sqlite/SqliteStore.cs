@@ -396,7 +396,7 @@ public sealed partial class SqliteStore : IPepaStore
         QueryAsync("""
                    SELECT * FROM steps
                    WHERE process_id = $p
-                     AND id > (SELECT COALESCE(MAX(w.id), 0) FROM steps w
+                     AND id >= (SELECT COALESCE(MAX(w.id), 0) FROM steps w
                                WHERE w.process_id = $p AND w.token_id = $t AND w.node_id = $n
                                  AND EXISTS (SELECT 1 FROM steps x
                                              WHERE x.process_id = $p AND x.token_id = $t AND x.node_id <> $n AND x.id > w.id))

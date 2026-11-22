@@ -31,8 +31,8 @@ public interface IPepaStore
     Task<StepRecord?> GetLastCheckpointStepAsync(string processId, string tokenId, string nodeId, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Шаги процесса после прошлого посещения маркером блока <paramref name="waitNodeId"/> (в цикле), по порядку: откуда маркер
-    /// пришёл в ожидание — и с какого времени мог прийти ответ.
+    /// Шаги процесса с последнего шага прошлого посещения маркером блока <paramref name="waitNodeId"/> (в цикле) включительно, по
+    /// порядку: откуда маркер пришёл в ожидание — и с какого времени мог прийти ответ.
     /// </summary>
     Task<IReadOnlyList<StepRecord>> GetStepsSincePreviousVisitAsync(string processId, string tokenId, string waitNodeId,
         CancellationToken cancellationToken = default);
