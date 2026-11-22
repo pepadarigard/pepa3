@@ -14,7 +14,7 @@ import { Button, Callout, Loading } from "./ui";
  * выполняется ещё раз. Секретные значения не показываются: пустое поле — без изменений. Так же — переменная, в значении
  * которой есть секрет (сервер показывает его маской «••••»): отправить маску обратно значило бы записать её вместо секрета.
  */
-export function FixAndRetryDialog({ processId, onClose }: { processId: string; onClose: () => void }) {
+export function FixAndRetryDialog({ processId, revision, onClose }: { processId: string; revision?: string; onClose: () => void }) {
   const details = useQuery({ queryKey: ["process", processId], queryFn: () => api.process(processId) });
   const queryClient = useQueryClient();
   const feedback = useFeedback();
@@ -44,7 +44,8 @@ export function FixAndRetryDialog({ processId, onClose }: { processId: string; o
     setError(null);
     setBusy(true);
     try {
-      const result = await api.resume(processId, "retryWithChanges", parsed);
+      // Ревизия — процесса, каким его видели, открывая окно: изменился — сервер откажет, а не повторит шаг вслепую.
+      const result = await api.resume(processId, "retryWithChanges", parsed, revision);
       feedback.toast(result.message, "success");
       void queryClient.invalidateQueries({ queryKey: ["process", processId] });
       void queryClient.invalidateQueries({ queryKey: ["processes"] });

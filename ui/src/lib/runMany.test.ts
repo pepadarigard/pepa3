@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { VariableDefinition } from "../api/types";
 import { parseInput } from "../components/RunDialog";
-import { batchRuns, manyCandidates, parseTable, tableColumns, tableRunCount, tableRuns } from "./runMany";
+import { batchRuns, manyCandidates, parseTable, sendKey, tableColumns, tableRunCount, tableRuns } from "./runMany";
 
 const variable = (name: string, type: VariableDefinition["type"], extra: Partial<VariableDefinition> = {}): VariableDefinition =>
   ({ name, type, secret: false, isInput: true, default: null, description: null, ...extra }) as unknown as VariableDefinition;
@@ -69,5 +69,13 @@ describe("несколько запусков из таблицы", () => {
     });
     expect(tableRuns("profile\tdry\nk1\tага", flags, {}, parseInput)).toEqual({ error: expect.stringContaining("Строка 2, «dry»: нужно «да» или «нет» («ага»)") });
     expect(tableRuns("profile\tdry\nk1\t", flags, {}, parseInput)).toEqual({ error: expect.stringContaining("ячейка пустая") });
+  });
+});
+
+describe("sendKey", () => {
+  it("подходит серверу и не повторяется", () => {
+    const keys = new Set(Array.from({ length: 200 }, () => sendKey("r")));
+    expect(keys.size).toBe(200);
+    for (const key of keys) expect(key).toMatch(/^[A-Za-z0-9_-]{6,64}$/);
   });
 });

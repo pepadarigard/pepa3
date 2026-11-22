@@ -96,7 +96,7 @@ export function ProcessPage({ id }: { id: string }) {
             Скопировать отчёт
           </Button>
           <Button icon={Pencil} onClick={() => navigate({ page: "editor", id: p.scenarioId })}>Сценарий</Button>
-          {!isActive(p.status) && <Button icon={RotateCw} onClick={() => runner.run(p.scenarioId, { values: data.runInputs })}>Запустить снова</Button>}
+          {!isActive(p.status) && <Button icon={RotateCw} busy={runner.busy} onClick={() => runner.run(p.scenarioId, { values: data.runInputs })}>Запустить снова</Button>}
         </div>
       </header>
 

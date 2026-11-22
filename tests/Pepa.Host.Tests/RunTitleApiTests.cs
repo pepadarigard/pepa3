@@ -192,6 +192,31 @@ public sealed class RunManyApiTests
     }
 
     [Fact]
+    public async Task Run_sent_twice_with_the_same_key_starts_one_process()
+    {
+        // Двойной щелчок «Запустить» у сценария без входных данных (или повтор после обрыва связи) — один процесс (D-090).
+        await using var f = await HostFixture.StartAsync(seedSamples: false);
+        var (_, scenario) = await f.SendAsync(HttpMethod.Post, "/api/scenarios", new
+        {
+            name = "Один раз",
+            nodes = new object[] { new { id = "start", type = "start" }, new { id = "end", type = "end" } },
+            edges = new object[] { new { id = "a", source = "start", sourcePort = "out", target = "end" } },
+        });
+        var id = scenario!["id"]!.GetValue<string>();
+
+        var (status, first) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{id}/run", new { inputs = (object?)null, runId = "run0000001" });
+        Assert.Equal(200, status);
+        var (_, again) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{id}/run", new { inputs = (object?)null, runId = "run0000001" });
+        Assert.Equal(first!["processId"]!.GetValue<string>(), again!["processId"]!.GetValue<string>());
+
+        var (_, other) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{id}/run", new { inputs = (object?)null, runId = "run0000002" });
+        Assert.NotEqual(first["processId"]!.GetValue<string>(), other!["processId"]!.GetValue<string>());
+
+        var (badStatus, _) = await f.SendAsync(HttpMethod.Post, $"/api/scenarios/{id}/run", new { runId = "../x" });
+        Assert.Equal(400, badStatus);
+    }
+
+    [Fact]
     public async Task Stopped_batch_processes_are_listed_and_counted_apart_and_a_stale_decision_is_refused()
     {
         await using var f = await HostFixture.StartAsync(seedSamples: false);

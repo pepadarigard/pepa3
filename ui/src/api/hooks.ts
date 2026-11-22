@@ -63,7 +63,11 @@ export const useEmail = () => useQuery({ queryKey: ["email"], queryFn: api.email
 export const useTriggers = (scenarioId?: string) =>
   useQuery({ queryKey: ["triggers", scenarioId ?? ""], queryFn: () => api.triggers(scenarioId), refetchInterval: 30_000 });
 
-/** Управление процессом: пауза, остановка, решения пользователя. */
+/**
+ * Управление процессом: пауза, остановка, решения пользователя. Решение отправляется с ревизией процесса, которую видел
+ * пользователь: если процесс за это время изменился (например, повтор шага закончился неизвестным итогом), сервер откажет,
+ * а не применит решение к состоянию, которого пользователь не видел (D-090).
+ */
 export function useProcessControl() {
   const client = useQueryClient();
   const invalidate = (id: string) => {
@@ -72,10 +76,10 @@ export function useProcessControl() {
     client.invalidateQueries({ queryKey: ["overview"] });
   };
   return useMutation({
-    mutationFn: async ({ id, action }: { id: string; action: "pause" | "cancel" | ResumeAction }) => {
+    mutationFn: async ({ id, action, revision }: { id: string; action: "pause" | "cancel" | ResumeAction; revision?: string }) => {
       if (action === "pause") return api.pause(id);
       if (action === "cancel") return api.cancel(id);
-      return api.resume(id, action);
+      return api.resume(id, action, undefined, revision);
     },
     onSettled: (_data, _error, variables) => invalidate(variables.id),
   });

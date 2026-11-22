@@ -15,6 +15,9 @@ namespace Pepa.Host.Api;
 
 internal static class ApiEndpoints
 {
+    /// <summary>Ключ отправки от интерфейса (запуск, несколько запусков): по нему повторная отправка не запускает процессы снова.</summary>
+    private static readonly System.Text.RegularExpressions.Regex SendKey = new("^[A-Za-z0-9_-]{6,64}$");
+
     private static readonly ProcessStatus[] ActiveStatuses =
         [ProcessStatus.Running, ProcessStatus.Waiting, ProcessStatus.Paused, ProcessStatus.NeedsAttention];
 
@@ -614,13 +617,26 @@ internal static class ApiEndpoints
         api.MapPost("/scenarios/validate", (ScenarioDefinition definition, ScenarioService scenarios) =>
             scenarios.Validate(definition));
 
+        // Ключ запуска (D-090): повторная отправка того же запуска (двойной щелчок, повтор после обрыва связи) возвращает уже
+        // запущенный процесс, а не запускает второй.
         api.MapPost("/scenarios/{id}/run", async (string id, RunRequest? request, ProcessEngine engine, CancellationToken ct) =>
-            new RunResponse(await engine.StartProcessAsync(id, request?.Inputs, request?.StepMode == true, ct)));
+        {
+            if (request?.RunId is { } runId && !SendKey.IsMatch(runId))
+            {
+                return Results.BadRequest(new ErrorDto("Неверный ключ запуска."));
+            }
+
+            var stepMode = request?.StepMode == true;
+            var processId = await engine.StartProcessAsync(id, request?.Inputs,
+                request?.RunId is { } key ? $"manual:{id}:{key}" : null, stepMode ? "пошагово" : null, ct,
+                stepMode ? new DebugState { StepMode = true } : null);
+            return Results.Ok(new RunResponse(processId));
+        });
 
         // Несколько запусков сразу (D-088): все или ни одного.
         api.MapPost("/scenarios/{id}/run-many", async (string id, RunManyRequest request, ProcessEngine engine, CancellationToken ct) =>
         {
-            if (request.BatchId is { } batch && !System.Text.RegularExpressions.Regex.IsMatch(batch, "^[A-Za-z0-9_-]{6,64}$"))
+            if (request.BatchId is { } batch && !SendKey.IsMatch(batch))
             {
                 return Results.BadRequest(new ErrorDto("Неверный ключ отправки."));
             }

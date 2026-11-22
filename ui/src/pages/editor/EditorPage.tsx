@@ -564,11 +564,11 @@ function Editor({ scenario, types }: { scenario: Scenario; types: NodeTypes }) {
           Автозапуск
         </Button>
         <Button size="small" icon={Save} busy={saving} disabled={!dirty} onClick={() => void save()} title="Сохранить (Ctrl+S)">Сохранить</Button>
-        <Button size="small" icon={Bug} onClick={() => void run({ stepMode: true })}
+        <Button size="small" icon={Bug} disabled={runner.busy} onClick={() => void run({ stepMode: true })}
           title="Отладка: запустить с паузой перед каждым блоком — смотреть переменные и продолжать по шагу">
           Пошагово
         </Button>
-        <Button size="small" variant="primary" icon={Play} onClick={() => void run()} title={report.isValid ? "Запустить новый процесс" : "Есть ошибки — запуск невозможен"}>
+        <Button size="small" variant="primary" icon={Play} busy={runner.busy} onClick={() => void run()} title={report.isValid ? "Запустить новый процесс" : "Есть ошибки — запуск невозможен"}>
           Запустить
         </Button>
       </div>

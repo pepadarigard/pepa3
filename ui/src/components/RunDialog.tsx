@@ -8,20 +8,22 @@ import { navigate } from "../router";
 import { Dialog, useFeedback } from "./feedback";
 import { Button, Callout } from "./ui";
 import { AdsPowerPicker } from "../pages/editor/FieldEditor";
-import { newId } from "../lib/graph";
-import { batchRuns, manyCandidates, tableColumns, tableRunCount, tableRuns } from "../lib/runMany";
+import { batchRuns, manyCandidates, sendKey, tableColumns, tableRunCount, tableRuns } from "../lib/runMany";
 
 /** Запуск сценария: если есть входные переменные — сначала спросить значения. */
 export function useRunScenario() {
   const feedback = useFeedback();
   const queryClient = useQueryClient();
   const [dialog, setDialog] = useState<{
-    id: string; name: string; inputs: VariableDefinition[]; stepMode: boolean; values?: Record<string, Json> | null;
+    id: string; name: string; inputs: VariableDefinition[]; stepMode: boolean; values?: Record<string, Json> | null; runId: string;
   } | null>(null);
+  // Пока запуск отправляется, второй щелчок ничего не делает; ключ запуска защищает и от повторной отправки (D-090).
+  const pending = useRef(false);
+  const [busy, setBusy] = useState(false);
 
-  const start = async (id: string, inputs?: Record<string, Json>, stepMode = false) => {
+  const start = async (id: string, runId: string, inputs?: Record<string, Json>, stepMode = false) => {
     try {
-      const result = await api.run(id, inputs, stepMode);
+      const result = await api.run(id, inputs, stepMode, runId);
       queryClient.invalidateQueries({ queryKey: ["processes"] });
       queryClient.invalidateQueries({ queryKey: ["overview"] });
       feedback.toast(stepMode ? "Процесс запущен пошагово: пауза перед каждым блоком" : "Процесс запущен");
@@ -42,17 +44,24 @@ export function useRunScenario() {
    * запуска («Запустить снова»): подставляются в окно запуска, секретные поля остаются пустыми.
    */
   const run = async (id: string, options?: { stepMode?: boolean; values?: Record<string, Json> | null }) => {
+    if (pending.current) return;
+    pending.current = true;
+    setBusy(true);
     const stepMode = options?.stepMode === true;
+    const runId = sendKey("r");
     try {
       const scenario = await api.scenario(id);
       const inputs = scenario.definition.variables.filter((v) => v.isInput);
       if (inputs.length === 0) {
-        await start(id, undefined, stepMode);
+        await start(id, runId, undefined, stepMode);
       } else {
-        setDialog({ id, name: scenario.name, inputs, stepMode, values: options?.values });
+        setDialog({ id, name: scenario.name, inputs, stepMode, values: options?.values, runId });
       }
     } catch (e) {
       feedback.error(e);
+    } finally {
+      pending.current = false;
+      setBusy(false);
     }
   };
 
@@ -82,7 +91,7 @@ export function useRunScenario() {
       allowMany={!dialog.stepMode}
       onCancel={() => setDialog(null)}
       onRun={async (values) => {
-        if (await start(dialog.id, values, dialog.stepMode)) setDialog(null);
+        if (await start(dialog.id, dialog.runId, values, dialog.stepMode)) setDialog(null);
       }}
       onRunMany={async (runs, batchId) => {
         if (await startMany(dialog.id, runs, batchId)) setDialog(null);
@@ -90,7 +99,7 @@ export function useRunScenario() {
     />
   );
 
-  return { run, element };
+  return { run, element, busy };
 }
 
 function RunDialog({ name, inputs, previous, allowMany, onRun, onRunMany, onCancel }: {
@@ -112,7 +121,7 @@ function RunDialog({ name, inputs, previous, allowMany, onRun, onRunMany, onCanc
   // «Таблица»: первая строка — имена переменных, каждая следующая — запуск (можно вставить из Excel).
   const [manyMode, setManyMode] = useState<"list" | "table">("list");
   const [table, setTable] = useState("");
-  const [batchId] = useState(() => newId("b"));
+  const [batchId] = useState(() => sendKey("b"));
   const byTable = many && manyMode === "table";
   const varying = many && !byTable ? inputs.find((v) => v.name === manyVar) : undefined;
   const fromTable = byTable ? tableColumns(table) : [];

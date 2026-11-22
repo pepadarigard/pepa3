@@ -52,7 +52,7 @@ export function useProcessSelection(processes: ProcessSummary[]) {
       try {
         if (action === "pause") await api.pause(p.id);
         else if (action === "cancel") await api.cancel(p.id);
-        else await api.resume(p.id, "continue");
+        else await api.resume(p.id, "continue", undefined, p.revision);
       } catch (e) {
         failures.push(`#${p.shortId}: ${e instanceof Error ? e.message : String(e)}`);
       }

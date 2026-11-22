@@ -38,7 +38,8 @@ public sealed record ScenarioDto(
 public sealed record SaveScenarioRequest(ScenarioDefinition Definition, int ExpectedVersion);
 
 /// <param name="StepMode">Отладка: пауза перед каждым блоком.</param>
-public sealed record RunRequest(JsonObject? Inputs, bool? StepMode = null);
+/// <summary><paramref name="RunId"/> — ключ запуска от интерфейса: повторная отправка с тем же ключом не запускает второй процесс.</summary>
+public sealed record RunRequest(JsonObject? Inputs, bool? StepMode = null, string? RunId = null);
 
 public sealed record RunResponse(string ProcessId);
 

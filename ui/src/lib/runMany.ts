@@ -158,3 +158,14 @@ export function tableColumns(text: string): string[] {
   const table = parseTable(text);
   return "error" in table ? [] : (table.rows[0] ?? []).filter((c) => c !== "");
 }
+
+/**
+ * Ключ отправки (запуск, несколько запусков): повторная отправка с тем же ключом не запускает процессы снова. Сервер
+ * принимает 6–64 знака из латиницы, цифр, «-» и «_».
+ */
+export function sendKey(prefix: string): string {
+  const random = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID().replace(/-/g, "")
+    : `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+  return `${prefix}${random}`.slice(0, 40).padEnd(8, "0");
+}

@@ -134,7 +134,7 @@ export function HomePage() {
                     </div>
                   </div>
                   {s.lastRun && <ProcessStatusBadge status={s.lastRun.status} />}
-                  <Button size="small" icon={Play} disabled={s.errorCount > 0} title={s.errorCount > 0 ? "В сценарии есть ошибки" : "Запустить"}
+                  <Button size="small" icon={Play} disabled={s.errorCount > 0 || runner.busy} title={s.errorCount > 0 ? "В сценарии есть ошибки" : "Запустить"}
                     onClick={(e) => { e.stopPropagation(); void runner.run(s.id); }}>
                     Запустить
                   </Button>

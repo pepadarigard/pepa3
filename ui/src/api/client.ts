@@ -143,8 +143,9 @@ export const api = {
   deleteScenario: (id: string) => request<{ message: string }>("DELETE", `/scenarios/${id}`),
   duplicateScenario: (id: string) => request<Scenario>("POST", `/scenarios/${id}/duplicate`),
   validate: (definition: ScenarioDefinition) => request<ValidationReport>("POST", "/scenarios/validate", definition),
-  run: (id: string, inputs?: Record<string, Json>, stepMode = false) =>
-    request<{ processId: string }>("POST", `/scenarios/${id}/run`, { inputs: inputs ?? null, stepMode }),
+  /** runId — ключ запуска: повторная отправка с тем же ключом возвращает уже запущенный процесс. */
+  run: (id: string, inputs?: Record<string, Json>, stepMode = false, runId?: string) =>
+    request<{ processId: string }>("POST", `/scenarios/${id}/run`, { inputs: inputs ?? null, stepMode, ...(runId ? { runId } : {}) }),
   /** Несколько запусков сразу: все или ни одного; тот же batchId — без повторного запуска. */
   runMany: (id: string, runs: Record<string, Json>[], batchId: string) =>
     request<{ processIds: string[] }>("POST", `/scenarios/${id}/run-many`, { runs, batchId }),

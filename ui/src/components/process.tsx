@@ -62,12 +62,14 @@ export function ProcessActions({ process, size, exclude = [] }: { process: Proce
       setFixing(true);
       return;
     }
+    // Ревизия — того состояния, которое пользователь видел, когда нажал (до подтверждения).
+    const revision = process.revision;
     const confirmation = confirmationFor(process, action);
     if (confirmation && !(await feedback.confirm({ title: ru.actions[action].label, text: confirmation, confirmLabel: ru.actions[action].label, danger: action === "cancel" }))) {
       return;
     }
     try {
-      const result = await control.mutateAsync({ id: process.id, action: action as "pause" | "cancel" | ResumeAction });
+      const result = await control.mutateAsync({ id: process.id, action: action as "pause" | "cancel" | ResumeAction, revision });
       feedback.toast(result.message, "success");
     } catch (e) {
       feedback.error(e);
@@ -92,7 +94,7 @@ export function ProcessActions({ process, size, exclude = [] }: { process: Proce
           {ru.actions[action].label}
         </Button>
       ))}
-      {fixing && <FixAndRetryDialog processId={process.id} onClose={() => setFixing(false)} />}
+      {fixing && <FixAndRetryDialog processId={process.id} revision={process.revision} onClose={() => setFixing(false)} />}
     </div>
   );
 }

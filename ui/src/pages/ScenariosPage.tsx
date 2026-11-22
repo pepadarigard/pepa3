@@ -116,7 +116,7 @@ export function ScenariosPage() {
       ) : (
         <div className="scenario-grid">
           {filtered.map((s) => (
-            <ScenarioCard key={s.id} scenario={s} onRun={() => runner.run(s.id)}
+            <ScenarioCard key={s.id} scenario={s} onRun={() => runner.run(s.id)} running={runner.busy}
               triggers={(triggers.data ?? []).filter((t) => t.scenarioId === s.id)}
               onTriggers={() => triggersDialog.open(s.id, s.name)} />
           ))}
@@ -129,7 +129,9 @@ export function ScenariosPage() {
   );
 }
 
-function ScenarioCard({ scenario: s, onRun, triggers, onTriggers }: { scenario: ScenarioSummary; onRun: () => void; triggers: Trigger[]; onTriggers: () => void }) {
+function ScenarioCard({ scenario: s, onRun, running, triggers, onTriggers }: {
+  scenario: ScenarioSummary; onRun: () => void; running: boolean; triggers: Trigger[]; onTriggers: () => void;
+}) {
   const feedback = useFeedback();
   const queryClient = useQueryClient();
   const [menu, setMenu] = useState(false);
@@ -224,7 +226,7 @@ function ScenarioCard({ scenario: s, onRun, triggers, onTriggers }: { scenario: 
       <div className="row">
         <Button icon={Pencil} onClick={() => navigate({ page: "editor", id: s.id })}>Открыть</Button>
         <span className="spacer" />
-        <Button variant="primary" icon={Play} disabled={s.errorCount > 0} title={s.errorCount > 0 ? "Исправьте ошибки в конструкторе" : undefined} onClick={onRun}>
+        <Button variant="primary" icon={Play} disabled={s.errorCount > 0 || running} title={s.errorCount > 0 ? "Исправьте ошибки в конструкторе" : undefined} onClick={onRun}>
           Запустить
         </Button>
       </div>
