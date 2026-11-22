@@ -5,6 +5,7 @@ import { api } from "../api/client";
 import type { ProcessAction, ProcessSummary, ResumeAction } from "../api/types";
 import { ru } from "../i18n/ru";
 import { stopGroups } from "../lib/groupActions";
+import { plural } from "../lib/format";
 import { explainProcess } from "../lib/status";
 import { useFeedback } from "./feedback";
 import { Button } from "./ui";
@@ -14,14 +15,17 @@ import { Button } from "./ui";
  * повторить шаг, взять исправленный блок, проверить, остановить. Решения, которые требуют смотреть на каждый процесс
  * отдельно, здесь не предлагаются.
  */
-/** Процессы группы, которые после проверки всё ещё стоят на том же шаге по той же причине («#id: почему»). */
-async function stillStopped(members: ProcessSummary[], failures: string[]): Promise<string[]> {
+/**
+ * Процессы группы, которые после проверки всё ещё стоят на том же шаге по той же причине («#id: почему»); null — узнать не
+ * удалось (нет связи): тогда нельзя сказать ни «готово», ни «ждут решения».
+ */
+async function stillStopped(members: ProcessSummary[], failures: string[]): Promise<string[] | null> {
   const failed = new Set(failures.map((f) => f.slice(1, f.indexOf(":"))));
   let now: ProcessSummary[];
   try {
     now = await api.processes("attention", undefined, 100_000);
   } catch {
-    return [];
+    return null;
   }
   const byId = new Map(now.map((p) => [p.id, p]));
   return members
@@ -45,7 +49,7 @@ export function GroupActions({ processes }: { processes: ProcessSummary[] }) {
     const label = ru.actions[action].label;
     if (!(await feedback.confirm({
       title: `${label} — для всех`,
-      text: `${label}: ${members.length} ${members.length < 5 ? "процесса" : "процессов"}. ${ru.actions[action].hint}`,
+      text: `${label}: ${members.length} ${plural(members.length, "процесс", "процесса", "процессов")}. ${ru.actions[action].hint}`,
       confirmLabel: label,
       danger: action === "cancel",
     }))) return;
@@ -63,12 +67,15 @@ export function GroupActions({ processes }: { processes: ProcessSummary[] }) {
         }
       }
       // Проверка может не дать однозначного ответа — тогда процесс по-прежнему ждёт решения, и «Готово» было бы неправдой.
-      const pending = action === "verify" ? await stillStopped(members, failures) : [];
+      const checked = action === "verify" ? await stillStopped(members, failures) : [];
+      const pending = checked ?? [];
       const done = members.length - failures.length - pending.length;
-      const parts = [`Готово: ${done} из ${members.length}`];
+      const parts = checked === null
+        ? [`Проверка отправлена: ${members.length - failures.length} из ${members.length}. Узнать её итог не удалось — посмотрите «Требуют решения»`]
+        : [`Готово: ${done} из ${members.length}`];
       if (pending.length > 0) parts.push(`Ждут решения — ${pending.length}: ${pending.join("; ")}`);
       if (failures.length > 0) parts.push(`Не вышло — ${failures.join("; ")}`);
-      feedback.toast(parts.join(". "), failures.length > 0 ? "error" : pending.length > 0 ? "info" : "success");
+      feedback.toast(parts.join(". "), failures.length > 0 ? "error" : checked === null || pending.length > 0 ? "info" : "success");
     } finally {
       setBusy(null);
       void queryClient.invalidateQueries({ queryKey: ["processes"] });
@@ -83,7 +90,7 @@ export function GroupActions({ processes }: { processes: ProcessSummary[] }) {
           <Layers size={18} className="callout-icon" />
           <div className="stack" style={{ gap: 6, flex: 1, minWidth: 0 }}>
             <div>
-              <strong>{group.processes.length} {group.processes.length < 5 ? "процесса" : "процессов"} «{group.scenarioName}»</strong>{" "}
+              <strong>{group.processes.length} {plural(group.processes.length, "процесс", "процесса", "процессов")} «{group.scenarioName}»</strong>{" "}
               остановились на одном шаге{group.nodeLabel ? ` «${group.nodeLabel}»` : ""}: {explainProcess(group.processes[0]).title.toLowerCase()}.
             </div>
             <div className="row wrap">
