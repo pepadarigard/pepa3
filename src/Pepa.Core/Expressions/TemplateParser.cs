@@ -47,4 +47,22 @@ public static class TemplateParser
     }
 
     public static bool HasExpressions(string template) => template.Contains("{{", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Подстановки шаблона ничего не дали: от значения остался только текст самого шаблона («Код для {{ vars.login }}» с
+    /// пустым login → «Код для»). Для условий ожидания это значит «подойдёт чужое» (письмо, сообщение, файл другого процесса),
+    /// поэтому такие значения отвергаются. Пробелы не учитываются.
+    /// </summary>
+    public static bool OnlyLiteralLeft(string? template, string? rendered)
+    {
+        if (template is null || rendered is null || !HasExpressions(template))
+        {
+            return false;
+        }
+
+        var literal = string.Concat(Parse(template).OfType<Literal>().Select(l => l.Text));
+        return Squeeze(rendered) == Squeeze(literal);
+    }
+
+    private static string Squeeze(string text) => string.Concat(text.Where(c => !char.IsWhiteSpace(c)));
 }

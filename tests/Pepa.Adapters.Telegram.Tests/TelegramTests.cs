@@ -200,6 +200,14 @@ public sealed class TelegramTests
         var broken = await h.RunAsync(WaitOnly(new { chat = "@ivan", replyTo = "{{ vars.reply }}", saveTo = "reply" }));
         Assert.Contains("получилось пустым", (await h.WaitForStatusAsync(broken, ProcessStatus.NeedsAttention)).StatusMessage);
         await h.Engine.CancelAsync(broken);
+
+        // Пустая переменная внутри текста условия: «заказ {{ vars.order }}» → «заказ» подошло бы к сообщению о любом заказе.
+        var partly = await h.RunAsync(WaitOnly(new { chat = "@ivan", contains = "заказ {{ vars.order }}", saveTo = "reply" }) with
+        {
+            Variables = [new VariableDefinition { Name = "reply", Type = VariableType.Any }, new VariableDefinition { Name = "order", Type = VariableType.Text }],
+        });
+        Assert.Contains("получилась пустой", (await h.WaitForStatusAsync(partly, ProcessStatus.NeedsAttention)).StatusMessage);
+        await h.Engine.CancelAsync(partly);
     }
 
     [Fact]

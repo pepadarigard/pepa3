@@ -459,6 +459,14 @@ public sealed class WaitTelegramNode(ITelegramGateway telegram) : INodeExecutor
             throw new NodeInputException($"Условие «{field}» ({configured}) получилось пустым — иначе подошло бы любое сообщение. Проверьте переменные.");
         }
 
+        // Переменная пуста, и от условия остался только текст шаблона («заказ {{ vars.order }}» → «заказ»): так подошло бы
+        // сообщение о любом заказе.
+        if (Core.Expressions.TemplateParser.OnlyLiteralLeft(configured, value))
+        {
+            throw new NodeInputException(
+                $"Подстановка в условии «{field}» ({configured}) получилась пустой — осталось «{value}», и подошло бы чужое сообщение. Проверьте переменные.");
+        }
+
         return string.IsNullOrEmpty(value) ? null : value;
     }
 }

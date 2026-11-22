@@ -171,5 +171,14 @@ public sealed class ExpressionTests
     [InlineData("https://api.example/orders/{{ vars.a }}{{ vars.b }}", "/delete", "https://api.example/orders/5%2Fdelete")]
     public void Value_after_another_value_inside_the_path_is_encoded(string template, string b, string expected) =>
         Assert.Equal(expected, _evaluator.RenderUrl(template, Scope(new JsonObject { ["a"] = "5", ["b"] = b })));
-}
 
+    [Theory]
+    [InlineData("Код для {{ vars.login }}", "Код для", true)]
+    [InlineData("noreply@{{ vars.domain }}", "noreply@", true)]
+    [InlineData("{{ vars.a }}", "", true)]
+    [InlineData("Код для {{ vars.login }}", "Код для anna", false)]
+    [InlineData("{{ vars.a }}-{{ vars.b }}", "x-", false)]
+    [InlineData("без подстановок", "без подстановок", false)]
+    public void Template_with_only_its_literal_left_is_detected(string template, string rendered, bool expected) =>
+        Assert.Equal(expected, Pepa.Core.Expressions.TemplateParser.OnlyLiteralLeft(template, rendered));
+}

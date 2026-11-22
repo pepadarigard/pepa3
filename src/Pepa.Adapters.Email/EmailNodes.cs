@@ -168,6 +168,14 @@ public sealed partial class WaitEmailNode(Func<string?> problem) : INodeExecutor
             throw new NodeInputException($"Условие «{field}» ({configured}) получилось пустым — иначе подошло бы любое письмо. Проверьте переменные.");
         }
 
+        // Переменная пуста, и от условия остался только текст шаблона («Код для {{ vars.login }}» → «Код для»): так подошло бы
+        // письмо любого аккаунта, и процесс забрал бы чужой код.
+        if (Core.Expressions.TemplateParser.OnlyLiteralLeft(configured, value))
+        {
+            throw new NodeInputException(
+                $"Подстановка в условии «{field}» ({configured}) получилась пустой — осталось «{value}», и подошло бы чужое письмо. Проверьте переменные.");
+        }
+
         return string.IsNullOrEmpty(value) ? null : value;
     }
 }

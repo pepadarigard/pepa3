@@ -107,6 +107,23 @@ public sealed partial class EmailScenarioTests : IAsyncDisposable
                 new VariableDefinition { Name = "nobody", Type = VariableType.Text }],
         });
         Assert.Contains("получилось пустым", (await h.WaitForStatusAsync(empty, ProcessStatus.NeedsAttention)).StatusMessage);
+
+        // Пустая переменная внутри условия: от него остался только текст шаблона («Код для», «noreply@», «@») — подошло бы
+        // письмо любого аккаунта (например, строка таблицы с пустым логином при «Нескольких запусках»).
+        foreach (var wait in new object[]
+                 {
+                     new { subject = "Код для {{ vars.nobody }}", saveTo = "mail" },
+                     new { from = "noreply@{{ vars.nobody }}", saveTo = "mail" },
+                     new { from = "@{{ vars.nobody }}", saveTo = "mail" },
+                 })
+        {
+            var partly = await h.RunAsync(Confirm(wait) with
+            {
+                Variables = [new VariableDefinition { Name = "mail", Type = VariableType.Any }, new VariableDefinition { Name = "code", Type = VariableType.Text },
+                    new VariableDefinition { Name = "nobody", Type = VariableType.Text }],
+            });
+            Assert.Contains("получилась пустой", (await h.WaitForStatusAsync(partly, ProcessStatus.NeedsAttention)).StatusMessage);
+        }
     }
 
     [Fact]
