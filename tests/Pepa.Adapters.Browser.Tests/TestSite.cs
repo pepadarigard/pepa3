@@ -146,6 +146,16 @@ internal sealed class TestSite : IDisposable
                            <script>setTimeout(() => { const b = document.createElement('button'); b.id = 'late'; b.textContent = 'Появилась'; document.body.appendChild(b); }, 1500);</script>
                            </body></html>
                            """,
+                "/recorder-login" => """
+                           <!doctype html><html><head><title>Вход</title></head><body>
+                           <table>
+                             <tr><td>Пароль:</td><td><input type="password" id="pw"></td></tr>
+                             <tr><td>Код карты:</td><td><input type="tel" id="cvc" autocomplete="cc-csc"></td></tr>
+                             <tr><td>Пароль (показан):</td><td><input type="text" id="shown" name="user_pass"></td></tr>
+                             <tr><td>Комментарий:</td><td><input type="text" id="note"></td></tr>
+                           </table>
+                           </body></html>
+                           """,
                 "/controls" => """
                            <!doctype html><html><head><title>Элементы</title></head><body>
                            <select id="city"><option value="msk">Москва</option><option value="spb">Санкт-Петербург</option></select>

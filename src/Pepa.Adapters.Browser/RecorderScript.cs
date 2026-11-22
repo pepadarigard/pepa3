@@ -17,14 +17,31 @@ internal static class RecorderScript
           const unique = (sel) => { try { return document.querySelectorAll(sel).length === 1; } catch (e) { return false; } };
           const dynamicId = (id) => /\d{4,}|[0-9a-f]{8,}|^[0-9]|:/.test(id);
           const textOf = (el) => norm(el.innerText || el.textContent || "");
+          const isText = (el) =>
+            (el.tagName === "INPUT" && !["checkbox", "radio", "button", "submit", "reset", "file", "image", "range", "color"].includes(el.type)) ||
+            el.tagName === "TEXTAREA" || el.isContentEditable;
+          // Подпись поля ввода — никогда не его содержимое: в поле может быть пароль (подпись видна в окне записи).
           const label = (el) => {
             const aria = el.getAttribute("aria-label");
             if (aria) return norm(aria);
             if (el.labels && el.labels[0]) return textOf(el.labels[0]);
             const placeholder = el.getAttribute("placeholder");
             if (placeholder) return norm(placeholder);
-            const text = textOf(el) || norm(el.value);
+            const text = isText(el) ? norm(el.getAttribute("title") || "") : textOf(el) || (el.tagName === "INPUT" ? norm(el.value) : "");
             return text.length <= 40 ? text : text.slice(0, 40) + "…";
+          };
+          // Секретное поле: пароль (в том числе показанный кнопкой «глаз» — запоминается, что поле было паролем), код
+          // подтверждения, PIN, данные карты — по типу, autocomplete или по имени и подписи. Значение такого поля не записывается.
+          const secretFields = new WeakSet();
+          const secretAutocomplete = /current-password|new-password|one-time-code|cc-number|cc-csc|cc-exp/i;
+          const secretName = /парол|password|passwd|(^|[^a-z])(pass|pwd|pin|otp)([^a-z]|$)|пин-?код|пин код|cvv|cvc|cvn|one.?time|код подтвержд|sms.?code|security.?code|card.?number|cardnumber|номер карты/i;
+          const isSecret = (el) => {
+            if (secretFields.has(el)) return true;
+            const named = [el.getAttribute("name"), el.id, el.getAttribute("aria-label"), el.getAttribute("placeholder"),
+              el.labels && el.labels[0] ? textOf(el.labels[0]) : ""].join(" ");
+            const secret = el.type === "password" || secretAutocomplete.test(el.getAttribute("autocomplete") || "") || secretName.test(named);
+            if (secret) secretFields.add(el);
+            return secret;
           };
           const byText = (el) => {
             const text = textOf(el);
@@ -75,15 +92,12 @@ internal static class RecorderScript
               note: "элемент найден по положению на странице — если сайт изменится, проверьте селектор",
             };
           };
-          const isText = (el) =>
-            (el.tagName === "INPUT" && !["checkbox", "radio", "button", "submit", "reset", "file", "image", "range", "color"].includes(el.type)) ||
-            el.tagName === "TEXTAREA" || el.isContentEditable;
           let pending = null;
           const flush = () => {
             if (!pending) return;
             const p = pending;
             pending = null;
-            if (p.el.type === "password") {
+            if (p.secret || isSecret(p.el)) {
               send({ kind: "fill", selector: p.selector, value: "", label: p.label, secret: true, note: "пароль не записан — подставьте переменную" });
             } else {
               send({ kind: "fill", selector: p.selector, value: p.el.isContentEditable ? p.el.innerText : p.el.value, label: p.label, note: p.note });
@@ -96,7 +110,7 @@ internal static class RecorderScript
             if (!pending || pending.el !== el) {
               flush();
               const s = selectorFor(el);
-              pending = { el, selector: s.selector, note: s.note, label: label(el) };
+              pending = { el, selector: s.selector, note: s.note, label: label(el), secret: isSecret(el) };
             }
           }, true);
           document.addEventListener("change", (e) => {
@@ -133,6 +147,8 @@ internal static class RecorderScript
             // Tab — просто переход к следующему полю: ввод уже записан, клавишу не пишем.
             if (e.key !== "Tab") send({ kind: "press", selector, value: e.key, label: label(el) });
           }, true);
+          // Поле-пароль запоминается, как только получает фокус: если потом его покажут «глазом», оно останется секретным.
+          document.addEventListener("focusin", (e) => { if (e.target instanceof Element && isText(e.target)) isSecret(e.target); }, true);
           window.addEventListener("pagehide", flush, true);
         })();
         """;

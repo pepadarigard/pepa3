@@ -61,6 +61,46 @@ public sealed class BrowserRecorderTests
         Assert.False(recorder.State.Recording);
     }
 
+    [Fact]
+    public async Task Typed_passwords_and_card_codes_never_reach_the_steps_or_their_labels()
+    {
+        // Поле без подписи и подсказки: раньше подпись шага бралась из значения поля, и пароль был виден в окне записи.
+        TestBrowser.RequireBrowser();
+        await using var f = await BrowserFixture.CreateAsync();
+        await using var recorder = new BrowserRecorder(f.Sessions);
+        await recorder.StartAsync(new RecorderStart(RecorderBrowser.Pepa, null, f.Site.Url("/recorder-login"), TestBrowser.Channel ?? "msedge", Headless: true),
+            TestContext.Current.CancellationToken);
+        var page = (await f.Sessions.GetAsync(BrowserRecorder.SessionOwner, "main", TestContext.Current.CancellationToken)).CurrentPage();
+
+        await page.ClickAsync("#pw");
+        await page.Keyboard.TypeAsync("hunter2secret");
+        await page.Keyboard.PressAsync("Enter");
+        await page.ClickAsync("#cvc");
+        await page.Keyboard.TypeAsync("731");
+        await page.ClickAsync("#shown");
+        await page.Keyboard.TypeAsync("Qwerty123");
+        await page.ClickAsync("#note");
+        await page.Keyboard.TypeAsync("обычный текст");
+        await page.Keyboard.PressAsync("Enter");
+
+        await WaitUntilAsync(() => recorder.State.Actions.Count(a => a.Kind == "press") >= 2);
+        var actions = await recorder.StopAsync(TestContext.Current.CancellationToken);
+        var fills = actions.Where(a => a.Kind == "fill").ToDictionary(a => a.Selector!);
+        Assert.True(fills["#pw"].Secret);
+        Assert.True(fills["#cvc"].Secret);
+        Assert.True(fills["#shown"].Secret);
+        Assert.All(new[] { "#pw", "#cvc", "#shown" }, s => Assert.Equal("", fills[s].Value));
+        Assert.False(fills["#note"].Secret);
+        Assert.Equal("обычный текст", fills["#note"].Value);
+        foreach (var action in actions)
+        {
+            foreach (var secret in new[] { "hunter2secret", "hunter", "731", "Qwerty123", "обычный" })
+            {
+                Assert.DoesNotContain(secret, action.Label ?? "");
+            }
+        }
+    }
+
     private static async Task WaitUntilAsync(Func<bool> condition)
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
